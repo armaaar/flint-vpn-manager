@@ -7,7 +7,6 @@ export const devices = writable([]);
 export const protonLoggedIn = writable(false);
 export const toastMessage = writable(null); // { text, error }
 export const movingDevices = writable(new Set()); // MACs of devices being reassigned
-export const betterServers = writable({}); // {profileId: {id, name, city, country_code, load, current_load}}
 
 // SSE connection
 let sseSource = null;
@@ -43,9 +42,6 @@ export function startSSE() {
           }
           return [...list];
         });
-      }
-      if (data.better_servers !== undefined) {
-        betterServers.set(data.better_servers);
       }
       if (data.devices) {
         devices.set(data.devices);

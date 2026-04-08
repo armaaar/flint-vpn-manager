@@ -1,9 +1,8 @@
 <script>
-  import { devices, profiles, showToast, movingDevices, betterServers } from '../stores/app.js';
+  import { devices, profiles, showToast, movingDevices } from '../stores/app.js';
   import { api } from '../api.js';
   import { isOnline, deviceIcon, countryFlagUrl } from '../utils.js';
 
-  $: betterServer = $betterServers[profile.id];
   import { dndzone } from 'svelte-dnd-action';
   import DeviceRow from './DeviceRow.svelte';
   import { createEventDispatcher } from 'svelte';
@@ -181,21 +180,6 @@
     dispatch('reload');
   }
 
-  async function switchToBetter() {
-    const bs = $betterServers[profile.id];
-    if (!bs) return;
-    // Show transitioning state by setting health to 'connecting' until SSE confirms.
-    profiles.update(list => {
-      const p = list.find(x => x.id === profile.id);
-      if (p) p.health = 'connecting';
-      return [...list];
-    });
-    const res = await api.changeServer(profile.id, { server_id: bs.id });
-    if (res.error) showToast(res.error, true);
-    else showToast('Switched to faster server');
-    dispatch('reload');
-  }
-
   async function disconnect() {
     // Optimistic UI: show "checking" spinner immediately while we wait for the router.
     profiles.update(list => {
@@ -260,16 +244,6 @@
         <button class="group-server-menu"
                 on:click|stopPropagation={() => dispatch('pickserver', { profileId: profile.id })}
                 title="Change server">…</button>
-      </div>
-    {/if}
-
-    {#if betterServer && connState === 'connected'}
-      <div class="better-hint" on:click|stopPropagation>
-        <span class="hint-text">
-          ⚡ Faster: <img class="flag-img" src={countryFlagUrl(betterServer.country_code)} alt="" />
-          {betterServer.name} ({betterServer.load}% vs {betterServer.current_load}%)
-        </span>
-        <button class="hint-switch" on:click={switchToBetter}>Switch</button>
       </div>
     {/if}
 
@@ -382,18 +356,6 @@
   .proto-tag { font-size: .6rem; padding: 1px 5px; border-radius: 3px; font-weight: 700; vertical-align: middle; margin-left: 4px; }
   .proto-tag.wg { background: rgba(46,204,113,.2); color: #2ecc71; }
   .proto-tag.ovpn { background: rgba(0,180,216,.2); color: #00b4d8; }
-  .better-hint {
-    display: flex; align-items: center; gap: 6px; margin-top: 8px;
-    padding: 5px 10px; background: rgba(243,156,18,.18); border-radius: 4px;
-    font-size: .75rem; color: rgba(255,255,255,.9);
-  }
-  .hint-text { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .hint-switch {
-    background: rgba(255,255,255,.25); border: none; color: #fff;
-    padding: 3px 10px; border-radius: 3px; font-size: .72rem;
-    font-weight: 600; cursor: pointer; flex-shrink: 0;
-  }
-  .hint-switch:hover { background: rgba(255,255,255,.4); }
   .group-connect-area { margin-top: 14px; }
 
   .vpn-options-toggle {

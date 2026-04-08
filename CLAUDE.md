@@ -173,7 +173,6 @@ Every 10 seconds, builds the merged profile list and pushes:
 - `tunnel_health[profile_id]` — live router health
 - `kill_switch[profile_id]` — live router kill_switch
 - `profile_names[profile_id]` — live router name (so SSH-side renames propagate)
-- `better_servers[profile_id]` — passive auto-optimize hint (every 3rd tick)
 - `devices[]` — full live device list
 
 The frontend's Svelte stores are mutated in place from each event. No local persistence of any of these fields.
@@ -224,7 +223,7 @@ Minimal background thread. Polls DHCP leases every 30s. The **only** thing it pe
 Fernet (AES-128-CBC + HMAC-SHA256) with PBKDF2 key derivation. Stores ProtonVPN and router credentials in `secrets.enc`.
 
 ### `server_optimizer.py` — Server load comparison
-Pure function `find_better_server(profile, servers, threshold)`. Used by SSE passive hints (threshold=20) and auto-optimizer (threshold=30).
+Pure function `find_better_server(profile, servers, threshold)`. Used by the auto-optimizer (threshold=30) to pick a less-loaded server during its scheduled run.
 
 ### `auto_optimizer.py` — Background server switcher
 Daemon thread; uses live router health via `build_profile_list`. Within a 2-minute window after the scheduled time, switches each eligible VPN profile to a better server.

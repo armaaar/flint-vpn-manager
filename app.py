@@ -24,7 +24,6 @@ import lan_sync
 from proton_api import ProtonAPI
 from router_api import RouterAPI
 from device_tracker import start_tracker, stop_tracker, get_tracker
-from server_optimizer import find_better_server
 from auto_optimizer import start_optimizer, stop_optimizer
 
 # Backup file path on the router (single static JSON, no scripts).
@@ -1612,9 +1611,7 @@ def api_stream():
     - Device count changes
     """
     def generate():
-        sse_tick = 0
         while True:
-            sse_tick += 1
             try:
                 # Trigger a device tracker poll to refresh client details
                 tracker = get_tracker()
@@ -1651,31 +1648,6 @@ def api_stream():
                     except Exception:
                         pass
 
-                # Check for better servers every 3rd tick (~30s).
-                # Eligibility uses live router health from the merged profile list.
-                better_servers = {}
-                if sse_tick % 3 == 0:
-                    try:
-                        proton = _get_proton()
-                        if proton and proton.is_logged_in:
-                            all_servers = proton.get_servers()
-                            for p in merged_profiles:
-                                if (p.get("type") == "vpn"
-                                    and p.get("health") in ("green", "amber")
-                                    and p.get("server_scope", {}).get("type") != "server"):
-                                    better = find_better_server(p, all_servers)
-                                    if better:
-                                        better_servers[p["id"]] = {
-                                            "id": better["id"],
-                                            "name": better["name"],
-                                            "city": better.get("city", ""),
-                                            "country_code": better["country_code"],
-                                            "load": better["load"],
-                                            "current_load": p.get("server", {}).get("load", 0),
-                                        }
-                    except Exception:
-                        pass
-
                 # Stage 8: device list is fully live from router (DHCP + gl-clients).
                 # Cache invalidation: refresh on every SSE tick (10s) so the SSE
                 # always reflects the latest device state.
@@ -1686,7 +1658,6 @@ def api_stream():
                     "tunnel_health": tunnel_health,
                     "kill_switch": kill_switch_state,
                     "profile_names": profile_names,
-                    "better_servers": better_servers,
                     "devices": all_devices,
                     "device_count": len(all_devices),
                     "timestamp": time.time(),
