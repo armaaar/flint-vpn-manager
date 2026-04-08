@@ -64,11 +64,17 @@ class DeviceTracker:
         """Detect new devices and auto-assign them to the guest profile.
 
         Reads DHCP leases from router (live). For each MAC not seen before:
-          1. Check if it's already assigned anywhere (router VPN rule or local
-             non-VPN store) — if so, skip and just remember it.
+          1. Check if it's already assigned anywhere (router VPN rule, local
+             non-VPN store, OR has a sticky-None marker indicating an
+             intentional unassignment) — if so, skip and just remember it.
           2. If a guest profile exists, assign the new MAC to it:
              - VPN guest → router.set_device_vpn() + ipset
              - NoVPN/NoInternet guest → local profile_store.device_assignments
+
+        Sticky-None: when the user explicitly unassigns a device,
+        api_assign_device writes `device_assignments[mac] = None` so the
+        intent survives lock/unlock and app restarts (which clear the
+        in-memory `_known_macs` set).
         """
         try:
             leases = self.router.get_dhcp_leases()
@@ -82,6 +88,7 @@ class DeviceTracker:
 
         data = profile_store.load()
         guest = profile_store.get_guest_profile(data)
+        local_assignments = data.get("device_assignments", {})
 
         new_macs_to_assign = []
         for lease in leases:
@@ -95,8 +102,10 @@ class DeviceTracker:
             # Already assigned somewhere on the router?
             if mac in router_assignments:
                 continue
-            # Already assigned to a non-VPN profile locally?
-            if data.get("device_assignments", {}).get(mac):
+            # KEY check (not value check): if the MAC has any local entry —
+            # including a sticky-None from an intentional unassignment — leave
+            # it alone. Only never-seen-before MACs get auto-assigned.
+            if mac in local_assignments:
                 continue
             new_macs_to_assign.append(mac)
 

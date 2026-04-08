@@ -4,6 +4,7 @@
   import EmojiPicker from './EmojiPicker.svelte';
   import ColorPicker from './ColorPicker.svelte';
   import LanPeerPicker from './LanPeerPicker.svelte';
+  import HelpTooltip from './HelpTooltip.svelte';
   import { createEventDispatcher } from 'svelte';
 
   // The parent passes a profile reference via bind:profile, but we
@@ -179,7 +180,12 @@
             {#if !isWireGuard}<span class="proto-note">OpenVPN</span>{/if}
           </div>
           <div class="form-group">
-            <label for="eg-netshield">NetShield</label>
+            <label for="eg-netshield" class="opt-label-with-help">
+              NetShield
+              <HelpTooltip title="NetShield">
+                <p>Blocks ads, trackers, and malware at the DNS level for every device in this group. Use the highest level by default; drop to Malware only if a site breaks.</p>
+              </HelpTooltip>
+            </label>
             <select id="eg-netshield" bind:value={netshield}>
               <option value="0">Off</option>
               <option value="1">Malware</option>
@@ -192,6 +198,9 @@
               Kill Switch
               <span class="opt-hint">— block traffic if the tunnel drops</span>
             </label>
+            <HelpTooltip title="Kill Switch">
+              <p>If the VPN drops, devices lose all internet instead of leaking through your ISP. Turn on for torrenting, work, or anything privacy-sensitive.</p>
+            </HelpTooltip>
           </div>
           {#if isWireGuard}
             <div class="option-item">
@@ -200,6 +209,9 @@
                 VPN Accelerator
                 <span class="opt-hint">— up to 400% faster (recommended)</span>
               </label>
+              <HelpTooltip title="VPN Accelerator">
+                <p>Proton's speed-tuning tweaks — same encryption, just faster. Leave on unless you're troubleshooting connection issues.</p>
+              </HelpTooltip>
             </div>
             <div class="option-item">
               <input type="checkbox" id="eg-mn" bind:checked={moderateNat}>
@@ -207,6 +219,9 @@
                 Moderate NAT
                 <span class="opt-hint">— better for gaming/P2P</span>
               </label>
+              <HelpTooltip title="Moderate NAT">
+                <p>Fixes "Strict NAT" issues with gaming consoles, voice/video calls, and P2P apps. Slightly less anonymous; turn on if you have an Xbox/PlayStation or use Discord voice chat.</p>
+              </HelpTooltip>
             </div>
             <div class="option-item">
               <input type="checkbox" id="eg-nm" bind:checked={natPmp}>
@@ -214,6 +229,9 @@
                 NAT-PMP
                 <span class="opt-hint">— UPnP-style port forwarding</span>
               </label>
+              <HelpTooltip title="NAT-PMP (Port Forwarding)">
+                <p>Lets apps inside the tunnel accept incoming connections. Turn on for torrent seeding or hosting; leave off otherwise.</p>
+              </HelpTooltip>
             </div>
           {/if}
           {#if optionsChanged}
@@ -285,6 +303,7 @@
 
 <style>
   .option-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; }
+  .opt-label-with-help { display: flex; align-items: center; }
   .option-item input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer; }
   .option-item label { font-size: .85rem; cursor: pointer; }
   .opt-hint { color: var(--fg3); font-weight: 400; font-size: .78rem; }

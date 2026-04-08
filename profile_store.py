@@ -271,11 +271,14 @@ def delete_profile(profile_id: str) -> bool:
     if len(data["profiles"]) == original_len:
         return False
 
-    # Unassign devices from this profile and clean up their LAN overrides
+    # Cascade: drop devices that were assigned to the deleted profile entirely
+    # (NOT a sticky-None — the device tracker should auto-reassign these to
+    # the guest group on the next poll, since the user didn't explicitly
+    # unassign them; the group just disappeared from under them).
     lan_overrides = data.get("device_lan_overrides", {})
     for mac, pid in list(data["device_assignments"].items()):
         if pid == profile_id:
-            data["device_assignments"][mac] = None
+            del data["device_assignments"][mac]
             lan_overrides.pop(mac, None)
 
     # Strip the deleted profile's ID from any *_allow lists on remaining

@@ -899,7 +899,52 @@ class TestDeviceAssignmentsLive:
               json={"profile_id": None})
         app_mod._router_api.remove_device_from_all_vpn.assert_called_with("aa:bb:cc:dd:ee:ff")
         stored = ps.load()
-        assert stored["device_assignments"].get("aa:bb:cc:dd:ee:ff") in (None,)
+        # Sticky-None: KEY exists with value None so the device tracker
+        # won't auto-reassign on the next unlock/restart.
+        assert "aa:bb:cc:dd:ee:ff" in stored["device_assignments"]
+        assert stored["device_assignments"]["aa:bb:cc:dd:ee:ff"] is None
+
+    def test_unassign_vpn_only_device_writes_sticky_marker(self, unlocked_client):
+        """A device that was VPN-assigned (no local entry) should still get a
+        sticky-None marker on explicit unassign so the tracker won't auto-
+        reassign it on the next unlock/restart."""
+        c, app_mod = unlocked_client
+        ps.save(ps._EMPTY_STORE)  # No local entry for the MAC
+        # Router says the device is in a VPN rule
+        app_mod._router_api.get_device_assignments.return_value = {
+            "aa:bb:cc:dd:ee:ff": "fvpn_rule_9001"
+        }
+        c.put("/api/devices/aa:bb:cc:dd:ee:ff/profile",
+              json={"profile_id": None})
+        stored = ps.load()
+        assert "aa:bb:cc:dd:ee:ff" in stored["device_assignments"]
+        assert stored["device_assignments"]["aa:bb:cc:dd:ee:ff"] is None
+
+    def test_assign_vpn_drops_local_entry(self, unlocked_client):
+        """Assigning a previously-unassigned (sticky-None) device to a VPN
+        group should clear the local entry so a future unassign can re-write
+        a fresh sticky-None marker."""
+        c, app_mod = unlocked_client
+        # Pre-existing sticky-None
+        ps.save({
+            **ps._EMPTY_STORE,
+            "profiles": [{
+                "id": "vpn-1", "type": "vpn", "name": "X",
+                "color": "#000", "icon": "🔒", "is_guest": False,
+                "router_info": {"rule_name": "fvpn_rule_9001",
+                                "peer_id": "9001", "vpn_protocol": "wireguard"},
+            }],
+            "device_assignments": {"aa:bb:cc:dd:ee:ff": None},
+        })
+        app_mod._router_api.get_device_assignments.return_value = {}
+        c.put("/api/devices/aa:bb:cc:dd:ee:ff/profile",
+              json={"profile_id": "vpn-1"})
+        stored = ps.load()
+        # Local entry dropped (router is the source for VPN assignments)
+        assert "aa:bb:cc:dd:ee:ff" not in stored["device_assignments"]
+        app_mod._router_api.set_device_vpn.assert_called_with(
+            "aa:bb:cc:dd:ee:ff", "fvpn_rule_9001"
+        )
 
 
 class TestGuestEndpoint:

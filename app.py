@@ -384,6 +384,28 @@ def api_unlock():
         return jsonify({"error": str(e)}), 401
 
 
+@app.route("/api/lock", methods=["POST"])
+def api_lock():
+    """Lock the session without restarting the app.
+
+    Clears the in-memory unlocked flag, stops the device tracker, and stops
+    the auto-optimizer. The next request that needs an unlocked session will
+    return 401 until /api/unlock is called again.
+    """
+    global _session_unlocked
+    _session_unlocked = False
+    try:
+        stop_tracker()
+    except Exception as e:
+        log.warning(f"Failed to stop tracker on lock: {e}")
+    try:
+        stop_optimizer()
+    except Exception as e:
+        log.warning(f"Failed to stop optimizer on lock: {e}")
+    log.info("Session locked")
+    return jsonify({"success": True})
+
+
 # ── Profiles ──────────────────────────────────────────────────────────────────
 
 def _resolve_server_live(proton, local_profile: dict) -> dict:
@@ -946,14 +968,38 @@ def _switch_server(profile_id: str, server_id: str, options: dict = None,
         # we can reassign them to the new rule below. Must happen BEFORE the
         # tear-down or the from_mac list is gone.
         old_ri = profile.get("router_info", {})
+        old_rule_name = old_ri.get("rule_name", "")
         old_assigned_macs = []
-        if old_ri.get("rule_name"):
+        if old_rule_name:
             try:
                 old_assigned_macs = [
-                    t.lower() for t in router._from_mac_tokens(old_ri["rule_name"])
+                    t.lower() for t in router._from_mac_tokens(old_rule_name)
                 ]
             except Exception as e:
                 log.warning(f"_switch_server: failed to read old from_mac: {e}")
+
+        # Capture the current section order so we can restore the new rule
+        # to the same position after upload (otherwise upload appends to the
+        # end and the user loses their group ordering). Also capture whether
+        # the old rule was enabled so we only re-connect if it was.
+        old_rule_index = None
+        old_rule_order = []
+        old_was_enabled = False
+        try:
+            existing_rules = router.get_flint_vpn_rules()
+            old_rule_order = [
+                r.get("rule_name", "")
+                for r in existing_rules
+                if r.get("rule_name", "")
+            ]
+            if old_rule_name in old_rule_order:
+                old_rule_index = old_rule_order.index(old_rule_name)
+            for r in existing_rules:
+                if r.get("rule_name") == old_rule_name:
+                    old_was_enabled = r.get("enabled", "0") == "1"
+                    break
+        except Exception as e:
+            log.warning(f"_switch_server: failed to read rule order: {e}")
 
         # Tear down old tunnel
         if old_ri.get("rule_name"):
@@ -1006,20 +1052,31 @@ def _switch_server(profile_id: str, server_id: str, options: dict = None,
                 public_key=public_key, endpoint=endpoint, dns=dns,
             )
 
+        # Restore the new rule to the OLD rule's section position so the
+        # group keeps its priority in the dashboard. uci reorder is cheap
+        # and only affects the listed sections.
+        if old_rule_index is not None and new_ri.get("rule_name"):
+            try:
+                new_order = [r for r in old_rule_order if r != old_rule_name]
+                new_order.insert(old_rule_index, new_ri["rule_name"])
+                router.reorder_vpn_rules(new_order)
+            except Exception as e:
+                log.warning(f"_switch_server: failed to restore rule order: {e}")
+
         # Re-assign devices from the OLD rule to the NEW rule.
         # Stage 5+: VPN device assignments are router-canonical, not in local
-        # store. We must read the OLD rule's from_mac BEFORE deleting it (we
-        # already deleted above), so we capture the MACs first below.
-        # NOTE: this code path runs AFTER delete_*_config above, which deletes
-        # the old rule entirely. So we need to capture the MACs BEFORE the
-        # delete. See the rewrite of the tear-down section.
+        # store. The OLD rule's from_mac was captured at the top of this
+        # function, before delete_*_config tore it down.
         for mac in old_assigned_macs:
             try:
                 router.set_device_vpn(mac, new_ri["rule_name"])
             except Exception as e:
                 log.warning(f"_switch_server: failed to reassign {mac}: {e}")
 
-        router.bring_tunnel_up(new_ri["rule_name"])
+        # Only bring the new tunnel up if the old one was already running.
+        # Editing options on a disconnected group should leave it disconnected.
+        if old_was_enabled:
+            router.bring_tunnel_up(new_ri["rule_name"])
 
         scope = server_scope or profile.get("server_scope", {"type": "server"})
         # Stage 7: persist only the server_id reference + minimal cache for
@@ -1411,10 +1468,6 @@ def api_assign_device(mac):
         router.remove_device_from_all_vpn(mac)
     except Exception as e:
         log.warning(f"remove_device_from_all_vpn({mac}) failed: {e}")
-    # Also clear any local non-VPN assignment
-    if mac in store_data.get("device_assignments", {}):
-        store_data["device_assignments"][mac] = None
-        ps.save(store_data)
 
     # Apply new assignment
     if profile_id:
@@ -1423,12 +1476,23 @@ def api_assign_device(mac):
             return jsonify({"error": "Profile not found"}), 404
 
         if new_profile["type"] == "vpn" and new_profile.get("router_info"):
-            # Router is the source for VPN assignments
+            # Router is the source for VPN assignments. Drop any local
+            # entry so we don't double-track (and so a future unassign
+            # can write a fresh sticky-None marker).
+            if mac in store_data.get("device_assignments", {}):
+                del store_data["device_assignments"][mac]
+                ps.save(store_data)
             router.set_device_vpn(mac, new_profile["router_info"]["rule_name"])
         else:
             # no_vpn / no_internet — local store; LAN sync below applies the
             # router-side execution (NoInternet ipset membership).
             ps.assign_device(mac, profile_id)
+    else:
+        # Explicit unassign. Write a sticky-None marker so the device tracker
+        # won't auto-reassign this MAC to the guest group on the next unlock
+        # or restart (the in-memory _known_macs set is wiped on every fresh
+        # tracker instance, so the local store is the only durable signal).
+        ps.assign_device(mac, None)
 
     target = ps.get_profile(profile_id)["name"] if profile_id and ps.get_profile(profile_id) else "Unassigned"
     log.info(f"Device {mac} assigned to '{target}'")

@@ -3,6 +3,7 @@
   import { profiles, showToast } from '../stores/app.js';
   import EmojiPicker from './EmojiPicker.svelte';
   import ColorPicker from './ColorPicker.svelte';
+  import LanPeerPicker from './LanPeerPicker.svelte';
   import { createEventDispatcher } from 'svelte';
 
   export let visible = false;
@@ -15,7 +16,15 @@
   let vpnProtocol = 'wireguard'; // 'wireguard' or 'openvpn'
   let ovpnProtocol = 'udp'; // 'udp' or 'tcp'
   let lanOutbound = 'allowed', lanInbound = 'allowed';
+  // Exception lists. Plain entries: [{value, type}] (no source tag — at the
+  // group layer everything IS the source).
+  let lanOutboundAllow = [];
+  let lanInboundAllow = [];
   let error = '';
+
+  function entriesToRawList(entries) {
+    return (entries || []).map(e => e.value);
+  }
 
   // When creating VPN profile, we need the server picker
   export let onNeedServer;
@@ -42,6 +51,8 @@
     ovpnProtocol = 'udp';
     lanOutbound = 'allowed';
     lanInbound = 'allowed';
+    lanOutboundAllow = [];
+    lanInboundAllow = [];
     error = '';
   }
 
@@ -70,6 +81,8 @@
       visible = false;
       if (onNeedServer) {
         const savedLanOut = lanOutbound, savedLanIn = lanInbound;
+        const savedOutAllow = entriesToRawList(lanOutboundAllow);
+        const savedInAllow = entriesToRawList(lanInboundAllow);
         onNeedServer(async (serverId, options, scope) => {
           const body = {
             name, type, color, icon, is_guest: isGuest,
@@ -80,8 +93,15 @@
           };
           const res = await api.createProfile(body);
           if (res.error) { showToast(res.error, true); return; }
-          if (savedLanOut !== 'allowed' || savedLanIn !== 'allowed') {
-            await api.setProfileLanAccess(res.id, { outbound: savedLanOut, inbound: savedLanIn });
+          const hasLan = savedLanOut !== 'allowed' || savedLanIn !== 'allowed'
+            || savedOutAllow.length || savedInAllow.length;
+          if (hasLan) {
+            await api.setProfileLanAccess(res.id, {
+              outbound: savedLanOut,
+              inbound: savedLanIn,
+              outbound_allow: savedOutAllow,
+              inbound_allow: savedInAllow,
+            });
           }
           showToast(`Created ${icon} ${name}`);
           dispatch('reload');
@@ -92,8 +112,17 @@
 
     const res = await api.createProfile({ name, type, color, icon, is_guest: isGuest });
     if (res.error) { error = res.error; return; }
-    if (lanOutbound !== 'allowed' || lanInbound !== 'allowed') {
-      await api.setProfileLanAccess(res.id, { outbound: lanOutbound, inbound: lanInbound });
+    const outAllow = entriesToRawList(lanOutboundAllow);
+    const inAllow = entriesToRawList(lanInboundAllow);
+    const hasLan = lanOutbound !== 'allowed' || lanInbound !== 'allowed'
+      || outAllow.length || inAllow.length;
+    if (hasLan) {
+      await api.setProfileLanAccess(res.id, {
+        outbound: lanOutbound,
+        inbound: lanInbound,
+        outbound_allow: outAllow,
+        inbound_allow: inAllow,
+      });
     }
     visible = false;
     showToast(`Created ${icon} ${name}`);
@@ -231,6 +260,10 @@
               <option value="group_only">Group Only</option>
               <option value="blocked">Blocked</option>
             </select>
+            {#if lanOutbound !== 'allowed'}
+              <div class="exc-label">Exceptions (always allowed):</div>
+              <LanPeerPicker bind:value={lanOutboundAllow} />
+            {/if}
           </div>
           <div class="lan-control">
             <label for="cg-lan-in">Inbound</label>
@@ -239,9 +272,13 @@
               <option value="group_only">Group Only</option>
               <option value="blocked">Blocked</option>
             </select>
+            {#if lanInbound !== 'allowed'}
+              <div class="exc-label">Exceptions (always allowed):</div>
+              <LanPeerPicker bind:value={lanInboundAllow} />
+            {/if}
           </div>
         </div>
-        <div class="lan-hint">Controls whether devices in this group can communicate with devices in other groups on the local network.</div>
+        <div class="lan-hint">Controls whether devices in this group can communicate with devices in other groups on the local network. Exceptions pierce a Group Only or Blocked posture for specific peers without weakening it for everyone else.</div>
       </div>
 
       {#if error}<div class="error-msg">{error}</div>{/if}
@@ -293,4 +330,5 @@
   .lan-control label { display: block; font-size: .75rem; color: var(--fg3); margin-bottom: 4px; text-transform: uppercase; letter-spacing: .05em; }
   .lan-control select { width: 100%; padding: 8px; background: var(--bg3); border: 1px solid var(--border2); border-radius: var(--radius-xs); color: var(--fg); font-size: .85rem; }
   .lan-hint { font-size: .75rem; color: var(--fg3); margin-top: 8px; line-height: 1.4; }
+  .exc-label { font-size: .68rem; color: var(--fg3); margin-top: 8px; text-transform: uppercase; letter-spacing: .04em; }
 </style>
