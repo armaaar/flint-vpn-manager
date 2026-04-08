@@ -1,0 +1,490 @@
+"""Tests for proton_api.py — ProtonVPN API wrapper.
+
+Unit tests mock the underlying Proton library.
+Integration tests (marked @pytest.mark.integration) use a live ProtonVPN session.
+"""
+
+import pytest
+from unittest.mock import MagicMock, patch, PropertyMock
+
+import proton_api
+from proton_api import ProtonAPI, FEATURE_MAP, NETSHIELD_DNS
+from proton.vpn.session.servers.types import ServerFeatureEnum, LogicalServer, PhysicalServer
+
+
+# ── Fixtures ──────────────────────────────────────────────────────────────────
+
+def _make_logical(name="CH#1", country="CH", city="Zurich", load=20,
+                  score=1.0, features=0, tier=2, enabled=True,
+                  entry_ip="1.2.3.4", x25519_pk="fakepk==", domain="node.protonvpn.net"):
+    """Create a minimal LogicalServer dict for testing."""
+    return LogicalServer({
+        "ID": f"id-{name}",
+        "Name": name,
+        "EntryCountry": country,
+        "ExitCountry": country,
+        "City": city,
+        "Load": load,
+        "Score": score,
+        "Features": features,
+        "Tier": tier,
+        "Status": 1 if enabled else 0,
+        "Region": city,
+        "Location": {"Lat": 47.0, "Long": 8.0},
+        "Servers": [
+            {
+                "ID": f"phys-{name}",
+                "EntryIP": entry_ip,
+                "ExitIP": "5.6.7.8",
+                "Domain": domain,
+                "Status": 1,
+                "Generation": "1",
+                "Label": "",
+                "X25519PublicKey": x25519_pk,
+            }
+        ],
+    })
+
+
+def _make_server_list(logicals, user_tier=2):
+    """Create a ServerList from a list of LogicalServers."""
+    from proton.vpn.session.servers.logicals import ServerList
+    return ServerList(user_tier=user_tier, logicals=logicals)
+
+
+@pytest.fixture
+def mock_api():
+    """Create a ProtonAPI with mocked internals, bypassing sync_wrapper."""
+    with patch("proton_api.ProtonVPNAPI") as MockVPNAPI, \
+         patch("proton_api.sync_wrapper", side_effect=lambda f: f):
+        mock_instance = MockVPNAPI.return_value
+
+        # Default: not logged in
+        mock_instance.is_user_logged_in.return_value = False
+        mock_instance.vpn_session_loaded = False
+        mock_instance.server_list = None
+
+        api = ProtonAPI()
+        api._api = mock_instance
+        yield api, mock_instance
+
+
+# ── Unit Tests ────────────────────────────────────────────────────────────────
+
+class TestProtonAPIInit:
+    def test_creates_instance(self, mock_api):
+        api, _ = mock_api
+        assert api is not None
+
+    def test_not_logged_in_by_default(self, mock_api):
+        api, mock = mock_api
+        mock.is_user_logged_in.return_value = False
+        assert api.is_logged_in is False
+
+
+class TestLogin:
+    def test_successful_login(self, mock_api):
+        api, mock = mock_api
+        from proton.vpn.session.dataclasses import LoginResult
+        expected = LoginResult(success=True, authenticated=True, twofa_required=False)
+        api._sync_login = MagicMock(return_value=expected)
+
+        result = api.login("user", "pass")
+        assert result.success is True
+        assert result.twofa_required is False
+        api._sync_login.assert_called_once_with("user", "pass")
+
+    def test_2fa_required(self, mock_api):
+        api, mock = mock_api
+        from proton.vpn.session.dataclasses import LoginResult
+        expected = LoginResult(success=False, authenticated=True, twofa_required=True)
+        api._sync_login = MagicMock(return_value=expected)
+
+        result = api.login("user", "pass")
+        assert result.success is False
+        assert result.twofa_required is True
+
+    def test_bad_credentials(self, mock_api):
+        api, mock = mock_api
+        from proton.vpn.session.dataclasses import LoginResult
+        expected = LoginResult(success=False, authenticated=False, twofa_required=False)
+        api._sync_login = MagicMock(return_value=expected)
+
+        result = api.login("user", "wrong")
+        assert result.success is False
+        assert result.authenticated is False
+
+
+class TestSubmit2FA:
+    def test_valid_code(self, mock_api):
+        api, mock = mock_api
+        from proton.vpn.session.dataclasses import LoginResult
+        expected = LoginResult(success=True, authenticated=True, twofa_required=False)
+        api._sync_2fa = MagicMock(return_value=expected)
+
+        result = api.submit_2fa("123456")
+        assert result.success is True
+        api._sync_2fa.assert_called_once_with("123456")
+
+
+class TestGetServers:
+    def test_not_logged_in_raises(self, mock_api):
+        api, mock = mock_api
+        mock.vpn_session_loaded = False
+        with pytest.raises(RuntimeError, match="Not logged in"):
+            api.get_servers()
+
+    def test_returns_all_servers(self, mock_api):
+        api, mock = mock_api
+        logicals = [
+            _make_logical("CH#1", "CH", "Zurich", 20),
+            _make_logical("US#1", "US", "New York", 30),
+            _make_logical("UK#1", "UK", "London", 40),
+        ]
+        mock.vpn_session_loaded = True
+        mock.server_list = _make_server_list(logicals)
+
+        servers = api.get_servers()
+        assert len(servers) == 3
+        names = {s["name"] for s in servers}
+        assert names == {"CH#1", "US#1", "UK#1"}
+
+    def test_filter_by_country(self, mock_api):
+        api, mock = mock_api
+        logicals = [
+            _make_logical("CH#1", "CH", "Zurich"),
+            _make_logical("CH#2", "CH", "Geneva"),
+            _make_logical("US#1", "US", "New York"),
+        ]
+        mock.vpn_session_loaded = True
+        mock.server_list = _make_server_list(logicals)
+
+        servers = api.get_servers(country="CH")
+        assert len(servers) == 2
+        assert all(s["country_code"] == "CH" for s in servers)
+
+    def test_filter_by_city(self, mock_api):
+        api, mock = mock_api
+        logicals = [
+            _make_logical("CH#1", "CH", "Zurich"),
+            _make_logical("CH#2", "CH", "Geneva"),
+        ]
+        mock.vpn_session_loaded = True
+        mock.server_list = _make_server_list(logicals)
+
+        servers = api.get_servers(city="Zurich")
+        assert len(servers) == 1
+        assert servers[0]["city"] == "Zurich"
+
+    def test_filter_by_feature_streaming(self, mock_api):
+        api, mock = mock_api
+        logicals = [
+            _make_logical("CH#1", features=ServerFeatureEnum.STREAMING),
+            _make_logical("CH#2", features=0),
+            _make_logical("CH#3", features=ServerFeatureEnum.STREAMING | ServerFeatureEnum.P2P),
+        ]
+        mock.vpn_session_loaded = True
+        mock.server_list = _make_server_list(logicals)
+
+        servers = api.get_servers(feature="streaming")
+        assert len(servers) == 2
+        assert all("streaming" in s["features"] for s in servers)
+
+    def test_filter_by_feature_p2p(self, mock_api):
+        api, mock = mock_api
+        logicals = [
+            _make_logical("CH#1", features=ServerFeatureEnum.P2P),
+            _make_logical("CH#2", features=0),
+        ]
+        mock.vpn_session_loaded = True
+        mock.server_list = _make_server_list(logicals)
+
+        servers = api.get_servers(feature="p2p")
+        assert len(servers) == 1
+        assert servers[0]["p2p"] is True
+
+    def test_filter_available_only(self, mock_api):
+        api, mock = mock_api
+        logicals = [
+            _make_logical("CH#1", tier=2, enabled=True),    # accessible (user tier 2)
+            _make_logical("CH#2", tier=3, enabled=True),    # PM only, not accessible
+            _make_logical("CH#3", tier=2, enabled=False),   # disabled
+        ]
+        mock.vpn_session_loaded = True
+        mock.server_list = _make_server_list(logicals, user_tier=2)
+
+        servers = api.get_servers(available_only=True)
+        assert len(servers) == 1
+        assert servers[0]["name"] == "CH#1"
+
+    def test_combined_filters(self, mock_api):
+        api, mock = mock_api
+        logicals = [
+            _make_logical("UK#1", "UK", "London", features=ServerFeatureEnum.STREAMING),
+            _make_logical("UK#2", "UK", "Manchester", features=ServerFeatureEnum.STREAMING),
+            _make_logical("UK#3", "UK", "London", features=0),
+            _make_logical("US#1", "US", "New York", features=ServerFeatureEnum.STREAMING),
+        ]
+        mock.vpn_session_loaded = True
+        mock.server_list = _make_server_list(logicals)
+
+        servers = api.get_servers(country="UK", feature="streaming")
+        assert len(servers) == 2
+        assert all(s["country_code"] == "UK" and s["streaming"] for s in servers)
+
+
+class TestServerToDict:
+    def test_contains_required_fields(self, mock_api):
+        api, _ = mock_api
+        server = _make_logical("CH#1", "CH", "Zurich", 25, 1.5,
+                               features=ServerFeatureEnum.P2P | ServerFeatureEnum.STREAMING)
+        result = api._server_to_dict(server)
+
+        assert result["id"] == "id-CH#1"
+        assert result["name"] == "CH#1"
+        assert result["country_code"] == "CH"
+        assert result["city"] == "Zurich"
+        assert result["load"] == 25
+        assert result["score"] == 1.5
+        assert result["p2p"] is True
+        assert result["streaming"] is True
+        assert result["secure_core"] is False
+        assert "p2p" in result["features"]
+        assert "streaming" in result["features"]
+
+
+class TestGenerateWireGuardConfig:
+    def test_generates_valid_config(self, mock_api):
+        api, mock = mock_api
+        server = _make_logical("CH#1", entry_ip="1.2.3.4", x25519_pk="serverpk==")
+
+        # Mock account data
+        mock_creds = MagicMock()
+        mock_creds.wg_private_key = "clientprivatekey=="
+        mock_account = MagicMock()
+        mock_account.vpn_credentials.pubkey_credentials = mock_creds
+        mock.account_data = mock_account
+
+        config, info = api.generate_wireguard_config(server)
+
+        assert "[Interface]" in config
+        assert "PrivateKey = clientprivatekey==" in config
+        assert "Address = 10.2.0.2/32" in config
+        assert "[Peer]" in config
+        assert "PublicKey = serverpk==" in config
+        assert "AllowedIPs = 0.0.0.0/0" in config
+        assert "Endpoint = 1.2.3.4:51820" in config
+        assert "::" not in config  # No IPv6
+
+    def test_netshield_dns(self, mock_api):
+        api, mock = mock_api
+        server = _make_logical("CH#1")
+        mock_creds = MagicMock()
+        mock_creds.wg_private_key = "key=="
+        mock_account = MagicMock()
+        mock_account.vpn_credentials.pubkey_credentials = mock_creds
+        mock.account_data = mock_account
+
+        # NetShield off
+        config0, _ = api.generate_wireguard_config(server, netshield=0)
+        assert "DNS = 10.2.0.1" in config0
+
+        # NetShield malware
+        config1, _ = api.generate_wireguard_config(server, netshield=1)
+        assert "DNS = 10.2.0.1" in config1
+
+        # NetShield malware+ads (all levels use 10.2.0.1 — filtering is server-side)
+        config2, _ = api.generate_wireguard_config(server, netshield=2)
+        assert "DNS = 10.2.0.1" in config2
+
+    def test_returns_server_info(self, mock_api):
+        api, mock = mock_api
+        server = _make_logical("UK#5", "UK", "London", 43)
+        mock_creds = MagicMock()
+        mock_creds.wg_private_key = "key=="
+        mock_account = MagicMock()
+        mock_account.vpn_credentials.pubkey_credentials = mock_creds
+        mock.account_data = mock_account
+
+        _, info = api.generate_wireguard_config(server)
+
+        assert info["name"] == "UK#5"
+        assert info["country_code"] == "UK"
+        assert info["city"] == "London"
+        assert info["load"] == 43
+        assert "endpoint" in info
+        assert "physical_server_domain" in info
+
+
+class TestGenerateOpenVPNConfig:
+    def test_generates_valid_config(self, mock_api):
+        api, mock = mock_api
+        server = _make_logical("CH#1", entry_ip="1.2.3.4")
+
+        mock_up = MagicMock()
+        mock_up.username = "vpnuser"
+        mock_up.password = "vpnpass"
+        mock_creds = MagicMock()
+        mock_creds.userpass_credentials = mock_up
+        mock_account = MagicMock()
+        mock_account.vpn_credentials = mock_creds
+        mock.account_data = mock_account
+
+        config, info, username, password = api.generate_openvpn_config(server)
+
+        assert "client" in config
+        assert "remote 1.2.3.4" in config
+        assert "proto udp" in config
+        assert "auth-user-pass" in config
+        assert "<ca>" in config
+        assert "<tls-crypt>" in config
+        assert username == "vpnuser"
+        assert password == "vpnpass"
+        assert info["protocol"] == "openvpn-udp"
+
+    def test_tcp_protocol(self, mock_api):
+        api, mock = mock_api
+        server = _make_logical("CH#1", entry_ip="1.2.3.4")
+        mock_up = MagicMock()
+        mock_up.username = "vpnuser"
+        mock_up.password = "vpnpass"
+        mock_creds = MagicMock()
+        mock_creds.userpass_credentials = mock_up
+        mock_account = MagicMock()
+        mock_account.vpn_credentials = mock_creds
+        mock.account_data = mock_account
+
+        config, info, _, _ = api.generate_openvpn_config(server, protocol="tcp")
+        assert "proto tcp" in config
+        assert "remote 1.2.3.4 443" in config
+        assert info["protocol"] == "openvpn-tcp"
+
+    def test_netshield_suffix(self, mock_api):
+        api, mock = mock_api
+        server = _make_logical("CH#1")
+        mock_up = MagicMock()
+        mock_up.username = "vpnuser"
+        mock_up.password = "vpnpass"
+        mock_creds = MagicMock()
+        mock_creds.userpass_credentials = mock_up
+        mock_account = MagicMock()
+        mock_account.vpn_credentials = mock_creds
+        mock.account_data = mock_account
+
+        _, _, user0, _ = api.generate_openvpn_config(server, netshield=0)
+        assert user0 == "vpnuser"
+
+        _, _, user1, _ = api.generate_openvpn_config(server, netshield=1)
+        assert user1 == "vpnuser+f1"
+
+        _, _, user2, _ = api.generate_openvpn_config(server, netshield=2)
+        assert user2 == "vpnuser+f2"
+
+
+class TestGetCountries:
+    def test_returns_grouped_countries(self, mock_api):
+        api, mock = mock_api
+        logicals = [
+            _make_logical("CH#1", "CH", "Zurich"),
+            _make_logical("CH#2", "CH", "Geneva"),
+            _make_logical("US#1", "US", "New York"),
+        ]
+        mock.vpn_session_loaded = True
+        mock.server_list = _make_server_list(logicals)
+
+        countries = api.get_countries()
+        assert len(countries) == 2
+        codes = {c["code"] for c in countries}
+        assert "CH" in codes
+        assert "US" in codes
+
+        ch = next(c for c in countries if c["code"] == "CH")
+        assert ch["server_count"] == 2
+        assert len(ch["cities"]) == 2
+
+
+class TestGetServerByName:
+    def test_finds_server(self, mock_api):
+        api, mock = mock_api
+        logicals = [_make_logical("CH#10")]
+        mock.vpn_session_loaded = True
+        mock.server_list = _make_server_list(logicals)
+
+        server = api.get_server_by_name("CH#10")
+        assert server.name == "CH#10"
+
+    def test_not_found_raises(self, mock_api):
+        api, mock = mock_api
+        logicals = [_make_logical("CH#1")]
+        mock.vpn_session_loaded = True
+        mock.server_list = _make_server_list(logicals)
+
+        from proton.vpn.session.exceptions import ServerNotFoundError
+        with pytest.raises(ServerNotFoundError):
+            api.get_server_by_name("NONEXISTENT#99")
+
+
+# ── Integration Tests ─────────────────────────────────────────────────────────
+
+@pytest.mark.integration
+class TestProtonAPIIntegration:
+    """Integration tests using a live ProtonVPN session.
+
+    These require an active ProtonVPN session (e.g. from the GTK app).
+    Run with: pytest tests/test_proton_api.py -m integration
+    """
+
+    @pytest.fixture
+    def live_api(self):
+        api = ProtonAPI()
+        if not api.is_logged_in:
+            pytest.skip("No active ProtonVPN session found")
+        return api
+
+    def test_is_logged_in(self, live_api):
+        assert live_api.is_logged_in is True
+
+    def test_has_server_list(self, live_api):
+        assert live_api.server_list is not None
+        assert len(live_api.server_list) > 0
+
+    def test_get_servers_returns_data(self, live_api):
+        servers = live_api.get_servers()
+        assert len(servers) > 100  # Should have thousands
+        first = servers[0]
+        assert "name" in first
+        assert "country_code" in first
+        assert "load" in first
+
+    def test_get_servers_by_country(self, live_api):
+        servers = live_api.get_servers(country="US")
+        assert len(servers) > 10
+        assert all(s["country_code"] == "US" for s in servers)
+
+    def test_get_servers_by_feature(self, live_api):
+        streaming = live_api.get_servers(feature="streaming")
+        assert len(streaming) > 0
+        assert all("streaming" in s["features"] for s in streaming)
+
+    def test_get_countries(self, live_api):
+        countries = live_api.get_countries()
+        assert len(countries) > 50
+        us = next((c for c in countries if c["code"] == "US"), None)
+        assert us is not None
+        assert us["server_count"] > 100
+
+    def test_generate_wireguard_config(self, live_api):
+        servers = live_api.get_servers(country="US")
+        server = live_api.get_server_by_id(servers[0]["id"])
+        config, info = live_api.generate_wireguard_config(server)
+
+        assert "[Interface]" in config
+        assert "PrivateKey" in config
+        assert "[Peer]" in config
+        assert "PublicKey" in config
+        assert "Endpoint" in config
+        assert "::" not in config  # No IPv6
+        assert info["country_code"] == "US"
+
+    def test_user_tier(self, live_api):
+        assert live_api.user_tier >= 2  # Plus or higher

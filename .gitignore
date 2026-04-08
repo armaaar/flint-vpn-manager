@@ -1,0 +1,52 @@
+# Secrets & local state (NEVER commit)
+secrets.enc
+profile_store.json
+config.json
+.env
+.env.*
+*.pem
+*.key
+id_ed25519*
+id_rsa*
+
+# Python
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node / frontend build
+node_modules/
+frontend/node_modules/
+frontend/dist/
+static/assets/
+.vite/
+
+# VPN configs / certs
+*.conf
+*.ovpn
+*.crt
+
+# Logs
+logs/
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Tooling / scratch
+.playwright-mcp/
+/tmp/

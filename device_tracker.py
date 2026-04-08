@@ -1,0 +1,146 @@
+"""Device tracker — minimal background thread for new-device auto-assignment.
+
+Stage 8: This thread no longer caches device data on disk. All device fields
+(hostname, IP, online, class, label, speeds) are read live from the router via
+`router.get_dhcp_leases()` + `router.get_client_details()` in `app._build_devices_live`.
+
+The tracker's only remaining job is detecting NEW MACs that appear on the
+network and auto-assigning them to the guest profile (if one exists). This
+prevents random visitors from getting unrestricted internet by default.
+
+The `lan_rules_stale` flag is also maintained — when a restricted device's IP
+changes, LAN iptables rules need to be rebuilt.
+"""
+
+import threading
+import time
+from typing import Optional
+
+import profile_store
+from router_api import RouterAPI
+
+# Global tracker instance
+_tracker: Optional["DeviceTracker"] = None
+
+
+class DeviceTracker:
+    """Polls router every 30s, auto-assigns new MACs to the guest profile.
+
+    Maintains in-memory state only — no JSON writes for device discovery.
+    """
+
+    def __init__(self, router: RouterAPI, poll_interval: int = 30):
+        self.router = router
+        self.poll_interval = poll_interval
+        self._thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
+        self._known_macs: set[str] = set()
+        self._prev_device_ips: dict[str, str] = {}
+        self.lan_rules_stale = False  # Set when restricted device IPs change
+
+    def start(self):
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._poll_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=5)
+
+    def _poll_loop(self):
+        while not self._stop_event.is_set():
+            try:
+                self.poll_once()
+            except Exception:
+                pass
+            self._stop_event.wait(self.poll_interval)
+
+    def poll_once(self):
+        """Detect new devices and auto-assign them to the guest profile.
+
+        Reads DHCP leases from router (live). For each MAC not seen before:
+          1. Check if it's already assigned anywhere (router VPN rule or local
+             non-VPN store) — if so, skip and just remember it.
+          2. If a guest profile exists, assign the new MAC to it:
+             - VPN guest → router.set_device_vpn() + ipset
+             - NoVPN/NoInternet guest → local profile_store.device_assignments
+        """
+        try:
+            leases = self.router.get_dhcp_leases()
+        except Exception:
+            return  # Router unreachable — try again next tick
+
+        try:
+            router_assignments = self.router.get_device_assignments()
+        except Exception:
+            router_assignments = {}
+
+        data = profile_store.load()
+        guest = profile_store.get_guest_profile(data)
+
+        new_macs_to_assign = []
+        for lease in leases:
+            mac = lease["mac"].lower()
+            if mac in self._known_macs:
+                continue
+            self._known_macs.add(mac)
+
+            if not guest:
+                continue
+            # Already assigned somewhere on the router?
+            if mac in router_assignments:
+                continue
+            # Already assigned to a non-VPN profile locally?
+            if data.get("device_assignments", {}).get(mac):
+                continue
+            new_macs_to_assign.append(mac)
+
+        # Apply auto-assignments
+        if new_macs_to_assign and guest:
+            guest_type = guest.get("type")
+            guest_rule_name = (guest.get("router_info") or {}).get("rule_name", "")
+            for mac in new_macs_to_assign:
+                if guest_type == "vpn" and guest_rule_name:
+                    try:
+                        self.router.set_device_vpn(mac, guest_rule_name)
+                    except Exception:
+                        pass
+                else:
+                    # NoVPN / NoInternet — write to local store
+                    data["device_assignments"][mac] = guest["id"]
+            # Persist non-VPN auto-assignments
+            if guest_type in ("no_vpn", "no_internet"):
+                profile_store.save(data)
+
+        # Detect IP changes that affect LAN rules (still needed for rebuild trigger)
+        new_ips = {l["mac"].lower(): l.get("ip", "") for l in leases}
+        for mac, ip in new_ips.items():
+            if self._prev_device_ips.get(mac) != ip:
+                effective = profile_store.get_effective_lan_access(mac, data)
+                if effective["inbound"] != "allowed":
+                    self.lan_rules_stale = True
+                    break
+        self._prev_device_ips = new_ips
+
+
+def get_tracker() -> Optional[DeviceTracker]:
+    return _tracker
+
+
+def start_tracker(router: RouterAPI, poll_interval: int = 30) -> DeviceTracker:
+    global _tracker
+    if _tracker:
+        _tracker.stop()
+    _tracker = DeviceTracker(router, poll_interval)
+    _tracker.start()
+    return _tracker
+
+
+def stop_tracker():
+    global _tracker
+    if _tracker:
+        _tracker.stop()
+        _tracker = None

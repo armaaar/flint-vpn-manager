@@ -1,0 +1,8 @@
+flask>=3.0.0
+paramiko>=3.4.0
+requests>=2.31.0
+cryptography>=42.0.0
+python-glinet>=0.2.0
+proton-vpn-api-core>=4.0.0
+click>=8.0.0
+pytest>=8.0.0
