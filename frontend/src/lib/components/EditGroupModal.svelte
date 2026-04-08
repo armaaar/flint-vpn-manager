@@ -3,6 +3,7 @@
   import { profiles, showToast } from '../stores/app.js';
   import EmojiPicker from './EmojiPicker.svelte';
   import ColorPicker from './ColorPicker.svelte';
+  import LanPeerPicker from './LanPeerPicker.svelte';
   import { createEventDispatcher } from 'svelte';
 
   // The parent passes a profile reference via bind:profile, but we
@@ -16,6 +17,22 @@
 
   let name = '', icon = '🔒', color = '#00aaff', isGuest = false;
   let lanOutbound = 'allowed', lanInbound = 'allowed';
+  // Allow lists for the group itself. Plain entries: [{value, type}]
+  // (no source tag — at the group layer everything IS the source).
+  let lanOutboundAllow = [];
+  let lanInboundAllow = [];
+
+  // Detect if a string looks like a MAC.
+  const MAC_RE = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i;
+  function rawListToEntries(raw) {
+    return (raw || []).map(v => ({
+      value: v,
+      type: MAC_RE.test(v) ? 'mac' : 'profile',
+    }));
+  }
+  function entriesToRawList(entries) {
+    return (entries || []).map(e => e.value);
+  }
   // VPN options
   let killSwitch = false;
   let netshield = '0';
@@ -40,6 +57,8 @@
     isGuest = liveProfile.is_guest || false;
     lanOutbound = liveProfile.lan_access?.outbound || 'allowed';
     lanInbound = liveProfile.lan_access?.inbound || 'allowed';
+    lanOutboundAllow = rawListToEntries(liveProfile.lan_access?.outbound_allow);
+    lanInboundAllow = rawListToEntries(liveProfile.lan_access?.inbound_allow);
     // Router-canonical kill_switch — defaults to false when undefined.
     killSwitch = liveProfile.kill_switch === true;
     const opts = liveProfile.options || {};
@@ -77,7 +96,12 @@
       }
       await api.updateProfile(liveProfile.id, update);
       if (isGuest) await api.setGuestProfile(liveProfile.id);
-      await api.setProfileLanAccess(liveProfile.id, { outbound: lanOutbound, inbound: lanInbound });
+      await api.setProfileLanAccess(liveProfile.id, {
+        outbound: lanOutbound,
+        inbound: lanInbound,
+        outbound_allow: entriesToRawList(lanOutboundAllow),
+        inbound_allow: entriesToRawList(lanInboundAllow),
+      });
 
       // NetShield / Accelerator / Moderate NAT / NAT-PMP are baked into the
       // generated WG/OVPN config — changing them requires regenerating the
@@ -222,6 +246,10 @@
               <option value="group_only">Group Only</option>
               <option value="blocked">Blocked</option>
             </select>
+            {#if lanOutbound !== 'allowed'}
+              <div class="exc-label">Exceptions (always allowed):</div>
+              <LanPeerPicker bind:value={lanOutboundAllow} excludeProfileId={liveProfile?.id} />
+            {/if}
           </div>
           <div class="lan-control">
             <label for="eg-lan-in">Inbound</label>
@@ -230,9 +258,13 @@
               <option value="group_only">Group Only</option>
               <option value="blocked">Blocked</option>
             </select>
+            {#if lanInbound !== 'allowed'}
+              <div class="exc-label">Exceptions (always allowed):</div>
+              <LanPeerPicker bind:value={lanInboundAllow} excludeProfileId={liveProfile?.id} />
+            {/if}
           </div>
         </div>
-        <div class="lan-hint">Controls whether devices in this group can communicate with devices in other groups on the local network.</div>
+        <div class="lan-hint">Controls whether devices in this group can communicate with devices in other groups on the local network. Exceptions pierce a Group Only or Blocked posture for specific peers without weakening it for everyone else.</div>
       </div>
 
       <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
@@ -277,4 +309,5 @@
   .lan-control label { display: block; font-size: .75rem; color: var(--fg3); margin-bottom: 4px; text-transform: uppercase; letter-spacing: .05em; }
   .lan-control select { width: 100%; padding: 8px; background: var(--bg3); border: 1px solid var(--border2); border-radius: var(--radius-xs); color: var(--fg); font-size: .85rem; }
   .lan-hint { font-size: .75rem; color: var(--fg3); margin-top: 8px; line-height: 1.4; }
+  .exc-label { font-size: .68rem; color: var(--fg3); margin-top: 8px; text-transform: uppercase; letter-spacing: .04em; }
 </style>

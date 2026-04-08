@@ -58,8 +58,8 @@ describe('isStale', () => {
     expect(isStale(d)).toBe(true);
   });
 
-  it('returns true for null last_seen', () => {
-    expect(isStale({ last_seen: null })).toBe(true);
+  it('returns false for null last_seen (Stage 8: not tracked)', () => {
+    expect(isStale({ last_seen: null })).toBe(false);
   });
 });
 

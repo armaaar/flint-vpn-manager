@@ -9,7 +9,9 @@ network and auto-assigning them to the guest profile (if one exists). This
 prevents random visitors from getting unrestricted internet by default.
 
 The `lan_rules_stale` flag is also maintained — when a restricted device's IP
-changes, LAN iptables rules need to be rebuilt.
+changes, the SSE tick triggers `lan_sync.sync_lan_to_router` to update the
+relevant ipset entries (membership-only, no firewall reload) or the device
+override rule sections (structural, with a ~0.22s reload).
 """
 
 import threading
@@ -115,12 +117,15 @@ class DeviceTracker:
             if guest_type in ("no_vpn", "no_internet"):
                 profile_store.save(data)
 
-        # Detect IP changes that affect LAN rules (still needed for rebuild trigger)
+        # Detect IP changes that affect LAN rules. Set the stale flag for any
+        # device whose IP changed AND has any LAN restriction (inbound OR
+        # outbound — both directions now use IP-based ipset matching in the
+        # new UCI execution layer). The SSE tick will reconcile.
         new_ips = {l["mac"].lower(): l.get("ip", "") for l in leases}
         for mac, ip in new_ips.items():
             if self._prev_device_ips.get(mac) != ip:
                 effective = profile_store.get_effective_lan_access(mac, data)
-                if effective["inbound"] != "allowed":
+                if effective["inbound"] != "allowed" or effective["outbound"] != "allowed":
                     self.lan_rules_stale = True
                     break
         self._prev_device_ips = new_ips

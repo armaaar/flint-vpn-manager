@@ -58,9 +58,20 @@ Granular firewall rules controlling device-to-device LAN traffic. Independent of
   - `group_only` — can only talk to other devices in the same group
   - `blocked` — no LAN access at all
 - **Per-group settings** — `outbound` and `inbound` configured in the EditGroup modal
-- **Per-device overrides** — individual devices can override group settings (set in DeviceModal)
-- **Implementation** — iptables rules in the `fvpn_lan` chain; ipsets `fvpn_lmac_<short>` (MAC set) and `fvpn_lip_<short>` (IP set) per group that needs them
-- **Live IP source** — device IPs come from `router.get_dhcp_leases()` at rule-build time, not from any local cache
+- **Per-device overrides** — individual devices can override group settings (set in DeviceModal). Overrides are partial — you can override just one direction, or just add an exception, without touching the others.
+- **Exception lists (allow lists)** — each direction (`outbound`/`inbound`) accepts a list of "always-allowed" peers that pierce a `group_only`/`blocked` posture for specific peers without weakening it for everyone else. Entries can be:
+  - **A specific device** (MAC string) — survives the device moving between groups, but breaks if the device uses a randomized MAC that changes on reconnect
+  - **A whole group** (profile ID) — auto-tracks the group's current membership at rule-build time, so devices joining/leaving the referenced group take effect on the next rebuild without re-editing the exception
+- **Common patterns enabled by exceptions**:
+  - *"Locked-down group, except this one peer can reach in"* — `inbound: group_only` + `inbound_allow: [<that peer's MAC>]`
+  - *"Outbound only to Group X, nothing else"* — `outbound: blocked` + `outbound_allow: [<group X's profile id>]`
+  - *"Outbound to my own group AND Group X"* — `outbound: group_only` + `outbound_allow: [<group X's profile id>]`
+- **Inheritance** — at the device-override layer, exception lists **merge additively** with the group's (`group ∪ device`). State fields still *replace* the group's. In the DeviceModal, group-inherited exceptions appear greyed out and are removed by editing the group, not the device.
+- **Direction is one-way** — `inbound_allow` opens inbound only; the reverse direction is unaffected. (If you want symmetric access, also add the corresponding `outbound_allow` on the other side, or rely on the other group already being open in that direction.)
+- **No subtraction (v1)** — there's no way to express *"all of Group X except this one member"*. Forward-compatible with adding deny lists later if a real case appears.
+- **Profile-deletion cleanup** — deleting a group automatically strips its profile ID from every other group's and device override's allow lists.
+- **Implementation** — iptables rules in the `fvpn_lan` chain; ipsets `fvpn_lmac_<short>` (MAC set) and `fvpn_lip_<short>` (IP set) per group that needs them. Allow-list ACCEPT rules are emitted **before** the corresponding DROP rule for each device, with device-override rules taking priority over group rules.
+- **Live IP source** — device IPs come from `router.get_dhcp_leases()` at rule-build time, not from any local cache. Allow-list peers with no resolvable DHCP IP are silently skipped.
 - **Triggers** — rules are rebuilt on session unlock, profile create/delete, device assignment change, LAN setting change, and when the device tracker detects an IP change for a restricted device
 
 ---
@@ -110,8 +121,8 @@ PUT    /api/profiles/:id/guest          → set as guest group
 GET    /api/devices                     → live device list (5s in-memory TTL)
 PUT    /api/devices/:mac/profile        → assign device to a profile
 PUT    /api/devices/:mac/label          → set custom name + device class
-PUT    /api/profiles/:id/lan-access     → set group LAN policy
-PUT    /api/devices/:mac/lan-access     → set per-device LAN override
+PUT    /api/profiles/:id/lan-access     → set group LAN policy + exception lists
+PUT    /api/devices/:mac/lan-access     → set per-device LAN override + exception lists
 
 POST   /api/refresh                     → trigger device tracker poll
 GET    /api/stream                      → SSE: live state push (10s tick)

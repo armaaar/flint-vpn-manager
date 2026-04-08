@@ -75,7 +75,12 @@ Fields with no router or Proton native source:
       "server": { "id": "...", "endpoint": "...", "physical_server_domain": "...", "protocol": "openvpn-tcp" },
       "server_scope": { "type": "country", "country_code": "DE" },
       "options": { "netshield": 2, "moderate_nat": false, "nat_pmp": false, "vpn_accelerator": true, "secure_core": false },
-      "lan_access": { "outbound": "allowed", "inbound": "allowed" }
+      "lan_access": {
+        "outbound": "group_only",
+        "inbound": "group_only",
+        "outbound_allow": [],
+        "inbound_allow": ["aa:bb:cc:dd:ee:ff", "<other-profile-uuid>"]
+      }
     },
     {
       "id": "<uuid>",
@@ -84,12 +89,19 @@ Fields with no router or Proton native source:
       "color": "#888",
       "icon": "🌐",
       "is_guest": false,
-      "lan_access": { "outbound": "allowed", "inbound": "allowed" },
+      "lan_access": { "outbound": "allowed", "inbound": "allowed", "outbound_allow": [], "inbound_allow": [] },
       "display_order": 1
     }
   ],
   "device_assignments": { "aa:bb:cc:dd:ee:ff": "<non-vpn profile uuid>" },
-  "device_lan_overrides": { "aa:bb:cc:dd:ee:ff": { "outbound": "blocked", "inbound": "allowed" } }
+  "device_lan_overrides": {
+    "aa:bb:cc:dd:ee:ff": {
+      "outbound": "blocked",
+      "inbound": null,
+      "outbound_allow": ["<group-uuid>"],
+      "inbound_allow": []
+    }
+  }
 }
 ```
 
@@ -104,8 +116,9 @@ Notes:
 
 - **Color, icon, is_guest, server_scope, options, lan_access**: pure UI/intent metadata, no router-native concept
 - **`server_id`**: the link from a local profile to a Proton server (no way to derive it from the router config alone)
-- **`lan_access` 3-state policy** (`allowed`/`group_only`/`blocked`): iptables rules can't be parsed back to that semantic, even though they're applied on the router
-- **`device_lan_overrides`**: same — local source, iptables is the execution layer
+- **`lan_access` 3-state policy** (`allowed`/`group_only`/`blocked`): UCI rules + ipsets are the execution layer (per-group `fvpn_lan_<short_id>_ips` ipsets, `fvpn_lan_<short_id>_<dir>drop` rule sections), but they can't be parsed back to the 3-state semantic. The router stores intent in its native format (UCI), but the *interpretation* (what counts as `allowed` vs `group_only`) lives in the local store.
+- **`lan_access.{outbound,inbound}_allow` exception lists**: narrow allow lists that pierce a `group_only`/`blocked` posture for specific peers (MAC strings or profile-UUID strings). Same source-of-truth reasoning — iptables ACCEPT rules can't be parsed back to "this was an exception" semantics. Profile-UUID entries reference target groups' ipsets by name (so membership propagates automatically); MAC entries get per-(group, direction) extras ipsets.
+- **`device_lan_overrides`**: same — local source, UCI rules are the execution layer. Per-device override sections (`fvpn_devovr_<mac>_*`) are emitted before group sections in UCI section order so they take precedence in the iptables chain.
 - **NoVPN/NoInternet group identity**: multiple no-internet groups can coexist with identical router-side firewall rules; only the local store can distinguish them
 - **Non-VPN device assignments**: derived from local store (router has no concept)
 
@@ -123,11 +136,37 @@ Live device list builder. Queries `router.get_dhcp_leases()` + `router.get_clien
 ### `_resolve_device_assignments(router, store_data)` — `app.py`
 Returns `{mac: profile_id}` merging router VPN assignments (canonical via `from_mac`) with local non-VPN assignments. Matching VPN rules to local profiles uses the stable `(protocol, peer_id|client_id)` key.
 
-### `_reconcile_no_internet_rules()` — `app.py`
-NoInternet firewall rules (`firewall.fvpn_noinet_<mac>_*`) are the **execution layer**; local `device_assignments` is the source. This helper makes the router state match the local source by adding/removing firewall rules. Triggered on session unlock, `api_assign_device` (when old or new profile is no_internet), and `api_delete_profile` (when a no_internet profile is removed). Self-healing after router reboot.
+### `_sync_lan_to_router()` — `app.py` (delegates to `lan_sync.sync_lan_to_router`)
+Single reconciler that handles BOTH LAN access (3-state policy + exceptions) and NoInternet enforcement. Replaces the legacy `_rebuild_lan_rules` + `_reconcile_no_internet_rules` pair. The router-side execution is pure UCI: per-group `config ipset` (hash:ip) sections + `config rule` sections referencing them via `option ipset 'name dir'`, with `option extra '-m set ! --match-set X'` for the `group_only` negation case. No custom `fvpn_lan` chain. fw3 manages everything; the rules survive reboot natively from the UCI `list entry` lines.
 
-### `_rebuild_lan_rules()` — `app.py`
-Rebuilds the entire `fvpn_lan` iptables chain from local LAN settings. Triggered on session unlock, profile create/delete, device assignment change, LAN setting change, and SSE tick when `tracker.lan_rules_stale` is set (an IP for a restricted device changed). Device IPs come live from `router.get_dhcp_leases()`, not from any local cache.
+Triggered on: session unlock, profile create/delete, device assignment, LAN setting change, and SSE tick when `tracker.lan_rules_stale` is set (an IP for a restricted device changed).
+
+Internally:
+1. `lan_sync.serialize_lan_state(store, device_ips, assignment_map)` (pure) emits the desired UCI sections + ipset memberships from local intent.
+2. `router.fvpn_lan_full_state()` reads live router state.
+3. `lan_sync.diff_state(live, desired)` computes a UCI batch + per-ipset add/remove ops.
+4. Membership-only changes apply via `ipset add/del` (no firewall reload). Structural changes (rule shape, new/deleted sections) apply via `uci batch` + `firewall reload` (~0.22s, no VPN disruption — empirically verified on Flint 2 firmware 4.8.4).
+
+Section/ipset naming:
+- `fvpn_lan_<short_id>_ips` — per-group IP membership
+- `fvpn_lan_<short_id>_<dir>drop` / `_<dir>acc_<role>` — per-group rule sections
+- `fvpn_extra_<short_id>_<dir>_ips` — per-(group, direction) MAC-exception IP set
+- `fvpn_devovr_<mac_no_colons>_<dir>_<role>` — per-device override rule sections
+- `fvpn_devovr_<mac_no_colons>_<dir>_ips` — per-device override exception IP set
+- `fvpn_noint_ips` + `fvpn_noint_block` — single global NoInternet ipset + rule (handles ALL no-internet groups; the local store distinguishes them, the router only needs membership)
+
+Device overrides emit per-device sections BEFORE group sections in UCI section order so they take precedence in the iptables chain. Outbound override rules use `option src_mac '<mac>'` (no IP needed); inbound override rules use `option dest_ip '<live IP>'` (a DHCP renewal for an overridden device triggers a structural rebuild). Profile-UUID exception entries reference the target group's existing ipset by name, so membership changes propagate automatically without rule rewrites.
+
+### Backup / restore — `_backup_local_state_to_router` + `_check_and_auto_restore` in `app.py`
+The router doubles as a disaster-recovery store for the local intent. After every successful `profile_store.save()`, the wrapper pushes the JSON (with a `_meta` envelope: version, ISO timestamp, `br-lan` MAC fingerprint) to `/etc/fvpn/profile_store.bak.json` on the router via `router.write_file`. Best-effort: SSH failures log a warning but never propagate.
+
+On unlock, before any other post-unlock work, `_check_and_auto_restore()` reads the backup file and:
+- If missing: no-op.
+- If router fingerprint mismatches the live `br-lan` MAC: log warning and skip (the backup belongs to a different router).
+- If backup `_meta.saved_at` is NEWER than local file mtime (or local is missing/unparseable): atomically restore the backup data over `profile_store.json`.
+- If local is NEWER: push local back to the router as a fresh backup (self-heal stale backup — handles "SSH was down when last save fired").
+
+Both timestamps come from the same machine (the Surface Go), so there's no clock-skew issue. Operation is silent — no UI banners, no toasts. The CLI command `python cli.py reset-local-state` wipes both local and the router backup atomically when you want to start fresh without auto-restoring.
 
 ### SSE stream — `api_stream()` in `app.py`
 Every 10 seconds, builds the merged profile list and pushes:
@@ -155,7 +194,8 @@ Background thread. At a configured time of day (within a 2-minute window to tole
 | **Private MAC** | Randomized MAC (2nd hex char ∈ `{2,6,A,E}`). VPN routing by MAC won't persist across reconnects. |
 | **Server Scope** | How a group selects its server: `country` (best in country), `city` (best in city), or `server` (specific, never auto-switched). |
 | **Auto-Optimizer** | Background thread that periodically switches VPN groups to better-loaded servers. Only profiles with scope ≠ `server`. |
-| **LAN Access** | Per-group or per-device firewall rules controlling LAN-to-LAN traffic. Three states: `allowed`, `group_only`, `blocked`. Inbound and outbound independent. |
+| **LAN Access** | Per-group or per-device firewall rules controlling LAN-to-LAN traffic. Three states: `allowed`, `group_only`, `blocked`. Inbound and outbound independent. Each direction may also carry an **exception list** (allowlist of MACs or profile IDs) that pierces `group_only`/`blocked` for specific peers — e.g. `outbound: blocked` + `outbound_allow: [<group X>]` means *"outbound only to Group X, nothing else."* |
+| **LAN Exception** | An entry in `lan_access.{outbound,inbound}_allow`. Either a MAC string (specific device) or a profile ID (the whole group, members tracked live). At the device-override layer, exception lists merge additively with the group's. Forward-compatible with future deny-list subtraction; not implemented in v1. |
 | **NetShield** | ProtonVPN DNS-level ad/malware blocking. Level 0=off, 1=malware, 2=malware+ads+trackers. Baked into the WG/OVPN config at generation time. |
 | **Guest Group** | The group new (previously unseen) MACs are auto-assigned to by the device tracker. Any group type (VPN/NoVPN/NoInternet) can be the guest group. |
 | **Anonymous section** | A `@rule[N]` route_policy section (positional reference) created when the GL.iNet UI edits one of our rules. We self-heal these back to `fvpn_rule_*` named sections by matching on `peer_id`/`client_id`. |
@@ -163,13 +203,16 @@ Background thread. At a configured time of day (within a 2-minute window to tole
 ## Backend Modules
 
 ### `app.py` — Flask REST API + SSE
-Main server. All API endpoints, SSE stream, profile-list builder, device-list builder, NoInternet reconciler, LAN rule rebuilder.
+Main server. All API endpoints, SSE stream, profile-list builder, device-list builder. LAN/NoInternet reconciliation delegated to `lan_sync.sync_lan_to_router`. Backup-to-router and auto-restore-on-unlock helpers.
+
+### `lan_sync.py` — UCI-native LAN access execution layer
+Pure emitter `serialize_lan_state(store, device_ips, assignment_map)` produces a deterministic dict of desired UCI ipset + rule sections. `diff_state(live, desired)` computes a UCI batch + per-ipset add/remove ops. `sync_lan_to_router(router, ...)` orchestrates: reads live state via `router.fvpn_lan_full_state`, applies the diff via `router.fvpn_uci_apply` (membership-only ops skip the firewall reload). Replaces the legacy `router_api.generate_lan_rules` + the imperative `fvpn_lan` chain.
 
 ### `proton_api.py` — ProtonVPN wrapper
 Thin synchronous wrapper around `proton-vpn-api-core`. Login (with 2FA), server list, WG/OVPN config generation. Exposes `server_to_dict()` for live server resolution by `build_profile_list`.
 
 ### `router_api.py` — Router SSH management
-SSH-based API (Paramiko + key auth) for the Flint 2. Manages WG/OVPN configs via UCI, route policy rules, ipset membership, firewall rules, DHCP leases, gl-clients metadata. Helpers: `get_flint_vpn_rules`, `get_device_assignments`, `get_tunnel_health`, `get_kill_switch`, `get_profile_name`, `rename_profile`, `reorder_vpn_rules`, `heal_anonymous_rule_section`, `_from_mac_tokens` (for case-preserving del_list).
+SSH-based API (Paramiko + key auth) for the Flint 2. Manages WG/OVPN configs via UCI, route policy rules, ipset membership, firewall rules, DHCP leases, gl-clients metadata. Helpers: `get_flint_vpn_rules`, `get_device_assignments`, `get_tunnel_health`, `get_kill_switch`, `get_profile_name`, `rename_profile`, `reorder_vpn_rules`, `heal_anonymous_rule_section`, `_from_mac_tokens` (for case-preserving del_list). FlintVPN UCI helpers: `fvpn_uci_apply`, `fvpn_ipset_membership`, `fvpn_lan_full_state`, `fvpn_lan_wipe_all`. Also `read_file`/`write_file` for the disaster-recovery backup file at `/etc/fvpn/profile_store.bak.json`, and `get_router_fingerprint` (br-lan MAC) for the restore-on-unlock fingerprint check.
 
 ### `profile_store.py` — Local JSON persistence
 Atomic JSON read/write for the slim local store (UI metadata + non-VPN assignments + LAN overrides). `_sanitize_mac_keys()` strips legacy fields on every save so post-refactor data is automatically cleaned up.
@@ -201,8 +244,9 @@ Built with Svelte 5 + Vite. Source in `frontend/src/`, builds to `static/`.
 | `DeviceRow.svelte` | Device in a group: icon, name, online dot, IP, speed, signal, private-MAC badge |
 | `DeviceModal.svelte` | Device settings: custom name, device type (synced to router gl-client), group assignment |
 | `CreateGroupModal.svelte` | New group: type selector, protocol cards (WG/OVPN UDP/OVPN TCP), server picker trigger |
-| `EditGroupModal.svelte` | Edit existing group: name, icon, color, guest toggle, **VPN Options section** (kill switch, NetShield, accelerator, NAT options), LAN access, delete |
+| `EditGroupModal.svelte` | Edit existing group: name, icon, color, guest toggle, **VPN Options section** (kill switch, NetShield, accelerator, NAT options), LAN access (3-state + exceptions per direction), delete |
 | `ServerPicker.svelte` | 3-level server browser: Country → City → Server. Filters, scope selector. **No VPN options** — those live in EditGroupModal |
+| `LanPeerPicker.svelte` | Multi-select chip picker for LAN access exception lists. Searchable dropdown grouped into Groups + Devices. Inherited (group-source) entries are greyed out and non-removable in DeviceModal. |
 | `EmojiPicker.svelte` | Categorized emoji grid with search |
 | `ColorPicker.svelte` | Color selection for card accent |
 | `SettingsModal.svelte` | Router IP, credentials, master password change |
@@ -239,8 +283,8 @@ PUT  /api/profiles/:id/guest            → set as guest group
 GET  /api/devices                       → live device list (5s in-memory TTL)
 PUT  /api/devices/:mac/profile          → assign device (router for VPN, local for non-VPN)
 PUT  /api/devices/:mac/label            → write to gl-client.alias and .class on router
-PUT  /api/profiles/:id/lan-access       → set group LAN policy
-PUT  /api/devices/:mac/lan-access       → set per-device LAN override
+PUT  /api/profiles/:id/lan-access       → set group LAN policy + exception lists
+PUT  /api/devices/:mac/lan-access       → set per-device LAN override + exception lists
 
 POST /api/refresh                       → trigger device tracker poll
 GET  /api/stream                        → SSE: tunnel_health + kill_switch + profile_names + devices (10s)
@@ -264,15 +308,16 @@ GET  /                                  → serve Svelte frontend (static/index.
 ### SAFE commands (OK to run via SSH):
 - `uci show/get/set/add_list/del_list/delete/commit/reorder/rename` — config reads/writes
 - `/etc/init.d/vpn-client restart` — only when no tunnels are stuck connecting
-- `ipset add/del` — for `src_mac{tunnel_id}` ipsets (the safe MAC-assignment path)
+- `ipset add/del` — for `src_mac{tunnel_id}` ipsets (the safe MAC-assignment path) AND for `fvpn_lan_*_ips`/`fvpn_noint_ips`/etc. (the LAN access execution layer)
+- `/etc/init.d/firewall reload` — empirically verified safe on Flint 2 firmware 4.8.4: ~0.22s, WG handshake unchanged, transfer counters keep incrementing through the reload, mangle MARK rules survive (fw3 surgically updates only its own `!fw3`-marked rules). Use sparingly for structural UCI changes (rule add/delete, ipset add/delete). The dangerous variant is `firewall restart` (which calls stop+start and re-runs `rtp2.sh` via `firewall.vpnclient` include with `option reload='0'`).
 - `wg show`, `ifstatus`, `ipset list`, `iptables -L -n` — read-only
 - `ubus call gl-clients list/status` — read-only
 - `cat`, `grep`, `ls`, `ps` — read-only
 
 ### NEVER run these:
 - `/etc/init.d/network reload` or `restart` — bricks all routing
-- `/etc/init.d/firewall reload` — can break active connections
-- `rtp2.sh` — takes locks, deletes our interfaces, corrupts route policy rules
+- `/etc/init.d/firewall restart` — re-runs the `firewall.vpnclient=include` script (`/usr/bin/rtp2.sh`) on the start cycle, which takes locks, deletes our interfaces, and corrupts route policy rules
+- `rtp2.sh` directly — same reason as above
 - `ifup` / `ifdown` — bypasses vpn-client, creates catch-all routes
 - `conntrack -D` — breaks active connections
 

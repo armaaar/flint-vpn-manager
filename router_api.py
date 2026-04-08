@@ -19,8 +19,6 @@ from typing import Optional
 
 import paramiko
 
-import profile_store as ps
-
 # WireGuard mark base for route policy (matches rtp2.sh)
 WG_MARK_BASE = 0x1000
 
@@ -94,6 +92,23 @@ class RouterAPI:
         stdout.channel.sendall(content.encode("utf-8"))
         stdout.channel.shutdown_write()
         stdout.channel.recv_exit_status()
+
+    def read_file(self, remote_path: str) -> Optional[str]:
+        """Read a file from the router. Returns None if missing or empty."""
+        try:
+            raw = self.exec(f"cat {remote_path} 2>/dev/null || true")
+        except Exception:
+            return None
+        return raw if raw else None
+
+    def get_router_fingerprint(self) -> str:
+        """Stable identifier for the physical router (br-lan MAC)."""
+        try:
+            return self.exec(
+                "cat /sys/class/net/br-lan/address 2>/dev/null || true"
+            ).strip()
+        except Exception:
+            return ""
 
     def disconnect(self):
         """Close SSH connection."""
@@ -748,44 +763,6 @@ class RouterAPI:
         if any_removed:
             self.exec("uci commit route_policy")
 
-    # ── No Internet (Firewall) ────────────────────────────────────────────
-
-    def set_device_no_internet(self, mac: str, ip: str):
-        """Block a device's WAN traffic while allowing LAN access.
-
-        Creates firewall rules: allow LAN traffic, reject WAN traffic from this IP.
-        """
-        rule_name = f"fvpn_noinet_{mac.replace(':', '')}"
-
-        # Remove from any VPN policy first
-        self.remove_device_from_all_vpn(mac)
-
-        # Batch UCI commands in a single SSH call
-        self.exec(
-            f"uci set firewall.{rule_name}_lan=rule && "
-            f"uci set firewall.{rule_name}_lan.name='FlintVPN NoInternet LAN {mac}' && "
-            f"uci set firewall.{rule_name}_lan.src='lan' && "
-            f"uci set firewall.{rule_name}_lan.src_ip='{ip}' && "
-            f"uci set firewall.{rule_name}_lan.dest='lan' && "
-            f"uci set firewall.{rule_name}_lan.target='ACCEPT' && "
-            f"uci set firewall.{rule_name}_drop=rule && "
-            f"uci set firewall.{rule_name}_drop.name='FlintVPN NoInternet DROP {mac}' && "
-            f"uci set firewall.{rule_name}_drop.src='lan' && "
-            f"uci set firewall.{rule_name}_drop.src_ip='{ip}' && "
-            f"uci set firewall.{rule_name}_drop.dest='wan' && "
-            f"uci set firewall.{rule_name}_drop.target='REJECT' && "
-            "uci commit firewall && "
-            "/etc/init.d/firewall reload &>/dev/null &"
-        )
-
-    def remove_device_no_internet(self, mac: str):
-        """Remove no-internet firewall rules for a device."""
-        rule_name = f"fvpn_noinet_{mac.replace(':', '')}"
-        self.exec(f"uci delete firewall.{rule_name}_lan 2>/dev/null")
-        self.exec(f"uci delete firewall.{rule_name}_drop 2>/dev/null")
-        self.exec("uci commit firewall")
-        self.exec("/etc/init.d/firewall reload &>/dev/null &")
-
     # ── Kill Switch ───────────────────────────────────────────────────────
 
     def set_kill_switch(self, rule_name: str, enabled: bool):
@@ -1047,179 +1024,217 @@ class RouterAPI:
                     active.append(iface)
         return active
 
-    # ── LAN Access Control ───────────────────────────────────────────────
+    # ── FlintVPN UCI Helpers ───────────────────────────────────────────────
+    #
+    # The new LAN access execution layer is pure UCI: per-group `config ipset`
+    # (hash:ip) sections + `config rule` sections referencing them via
+    # `option ipset 'name dir'` and `option extra '-m set ! ...'` for negation.
+    # No custom `fvpn_lan` chain. fw3 manages everything; rules survive reboot
+    # natively from `list entry` lines.
+    #
+    # Spike-validated on Flint 2 firmware 4.8.4: `firewall reload` is ~0.22s
+    # and does NOT disrupt VPN tunnels (handshake unchanged, mangle table
+    # preserved, MARK rules survived).
+    #
+    # Naming conventions (all UCI section names + ipset names):
+    #   fvpn_lan_<short_id>_ips      — per-group IP membership
+    #   fvpn_extra_<short_id>_<dir>_ips — per-(group, direction) MAC-exception IPs
+    #   fvpn_devovr_<mac_no_colons>_<dir>_ips — per-device override exception IPs
+    #   fvpn_noint_ips               — global NoInternet membership
+    #   fvpn_lan_<short_id>_<dir>_<role>  — UCI rule sections (role = drop/accept/excN)
+    #   fvpn_devovr_<mac_no_colons>_<dir>_<role>
+    #   fvpn_noint_block             — single global rule for noint
 
-    def lan_init_chain(self, lan_subnet: str = "192.168.8.0/24",
-                       gateway_ip: str = "192.168.8.1"):
-        """Create fvpn_lan chain in FORWARD with base rules. Idempotent."""
-        self.exec(
-            "iptables -N fvpn_lan 2>/dev/null; "
-            "iptables -C FORWARD -j fvpn_lan 2>/dev/null || "
-            "iptables -I FORWARD 1 -j fvpn_lan"
-        )
+    def fvpn_uci_apply(self, uci_batch: str, reload: bool = True) -> None:
+        """Apply a multi-line UCI batch script and optionally reload firewall.
 
-    def lan_sync_group_ipsets(self, short_id: str, macs: list[str],
-                               ips: list[str]):
-        """Create/update MAC and IP ipsets for a group."""
-        mac_set = f"fvpn_lmac_{short_id}"
-        ip_set = f"fvpn_lip_{short_id}"
+        The batch is piped to `uci batch` via SSH stdin (so single-quote
+        escaping in values is safe). After the batch, `uci commit firewall`
+        runs unconditionally. If `reload=True`, also runs
+        `/etc/init.d/firewall reload` in the foreground.
 
-        cmds = [
-            f"ipset create {mac_set} hash:mac -exist",
-            f"ipset flush {mac_set}",
-            f"ipset create {ip_set} hash:ip -exist",
-            f"ipset flush {ip_set}",
-        ]
-        for mac in macs:
-            cmds.append(f"ipset add {mac_set} {mac}")
-        for ip in ips:
-            if ip:
-                cmds.append(f"ipset add {ip_set} {ip}")
-
-        self.exec(" && ".join(cmds))
-
-    def lan_destroy_group_ipsets(self, short_id: str):
-        """Remove both ipsets for a group."""
-        self.exec(
-            f"ipset destroy fvpn_lmac_{short_id} 2>/dev/null; "
-            f"ipset destroy fvpn_lip_{short_id} 2>/dev/null"
-        )
-
-    def lan_rebuild_rules(self, rules: list[str],
-                          lan_subnet: str = "192.168.8.0/24",
-                          gateway_ip: str = "192.168.8.1"):
-        """Flush and rebuild all rules in the fvpn_lan chain.
-
-        Args:
-            rules: List of iptables rule strings (without 'iptables -A fvpn_lan')
-            lan_subnet: LAN subnet in CIDR notation
-            gateway_ip: Router gateway IP (always allowed)
+        Empty batch is a no-op.
         """
-        cmds = ["iptables -F fvpn_lan"]
+        if not uci_batch.strip() and not reload:
+            return
+        self.connect()
+        if uci_batch.strip():
+            _, stdout, _ = self._client.exec_command("uci batch", timeout=30)
+            stdout.channel.sendall(uci_batch.encode("utf-8"))
+            stdout.channel.shutdown_write()
+            stdout.channel.recv_exit_status()
+            self.exec("uci commit firewall")
+        if reload:
+            # Foreground reload — spike confirms ~0.22s, no VPN drop.
+            self.exec("/etc/init.d/firewall reload 2>&1 | grep -v '^ \\*' >&2; true")
 
-        # Base rules
-        cmds.append(
-            "iptables -A fvpn_lan -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN"
-        )
-        cmds.append(f"iptables -A fvpn_lan ! -s {lan_subnet} -j RETURN")
-        cmds.append(f"iptables -A fvpn_lan ! -d {lan_subnet} -j RETURN")
-        cmds.append(f"iptables -A fvpn_lan -s {gateway_ip} -j RETURN")
-        cmds.append(f"iptables -A fvpn_lan -d {gateway_ip} -j RETURN")
+    def fvpn_ipset_membership(
+        self, set_name: str, add: list, remove: list
+    ) -> None:
+        """Apply add/remove ipset membership ops for one set in a single SSH call.
 
-        # Device override + group rules
-        for rule in rules:
-            cmds.append(f"iptables -A fvpn_lan {rule}")
+        Idempotent: uses `-exist` and `|| true` so duplicates / missing
+        entries don't error out. Caller is responsible for the matching UCI
+        dual-write (via fvpn_uci_apply with add_list/del_list).
+        """
+        if not add and not remove:
+            return
+        cmds = []
+        for entry in remove:
+            cmds.append(f"ipset del {set_name} {entry} 2>/dev/null || true")
+        for entry in add:
+            cmds.append(f"ipset add {set_name} {entry} -exist 2>/dev/null || true")
+        if cmds:
+            self.exec(" ; ".join(cmds))
 
-        self.exec(" && ".join(cmds))
+    def fvpn_ipset_create(self, set_name: str, set_type: str = "hash:ip") -> None:
+        """Create a kernel ipset if it doesn't exist (for runtime use)."""
+        self.exec(f"ipset create {set_name} {set_type} -exist 2>/dev/null || true")
 
-    def lan_cleanup_all(self):
-        """Remove the fvpn_lan chain and all fvpn_l* ipsets."""
+    def fvpn_ipset_destroy(self, set_name: str) -> None:
+        """Destroy a kernel ipset (best-effort)."""
+        self.exec(f"ipset destroy {set_name} 2>/dev/null || true")
+
+    def fvpn_lan_full_state(self) -> dict:
+        """Read live router state for FlintVPN LAN sections + ipsets.
+
+        Returns a dict matching the shape produced by
+        `lan_sync.serialize_lan_state` so the reconciler can compute a diff:
+
+            {
+              "ipsets": {set_name: [ip, ...], ...},
+              "rules": {section_name: {field: value, ...}, ...},
+            }
+
+        Only `fvpn_*` sections and ipsets are returned. The kernel ipset
+        membership is read live; the UCI `entry` lists are not consulted
+        (they're the persistence layer, not the runtime truth).
+        """
+        out = {"ipsets": {}, "rules": {}}
+
+        # 1. UCI rule + ipset sections
+        try:
+            raw = self.exec("uci show firewall 2>/dev/null | grep -E '\\.fvpn_'")
+        except Exception:
+            raw = ""
+        # uci show output: firewall.<section>=<type> or firewall.<section>.<field>=<value>
+        for line in raw.strip().splitlines():
+            line = line.strip()
+            if not line or "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            val = val.strip("'")
+            if not key.startswith("firewall."):
+                continue
+            after = key[len("firewall."):]
+            if "." in after:
+                section, field = after.split(".", 1)
+            else:
+                section, field = after, None
+            if not section.startswith("fvpn_"):
+                continue
+            entry = out["rules"].setdefault(section, {})
+            if field is None:
+                entry["_type"] = val
+            else:
+                # UCI list values come back with each item on its own line in
+                # `uci show` (multiple lines like firewall.X.entry='ip1' and
+                # firewall.X.entry='ip2'). We collect them.
+                if field in entry:
+                    cur = entry[field]
+                    if isinstance(cur, list):
+                        cur.append(val)
+                    else:
+                        entry[field] = [cur, val]
+                else:
+                    entry[field] = val
+
+        # Separate config-ipset sections from config-rule sections.
+        ipset_sections = {}
+        rule_sections = {}
+        for section, fields in out["rules"].items():
+            if fields.get("_type") == "ipset":
+                # Pull entries (may be string or list) into a list
+                entries = fields.get("entry", [])
+                if isinstance(entries, str):
+                    entries = [entries]
+                # Use the UCI section's `name` if set, else section name
+                ipset_name = fields.get("name", section)
+                ipset_sections[ipset_name] = {
+                    "section": section,
+                    "entries": list(entries),
+                    "match": fields.get("match", "ip"),
+                    "storage": fields.get("storage", "hash"),
+                }
+            elif fields.get("_type") == "rule":
+                rule_sections[section] = {k: v for k, v in fields.items() if k != "_type"}
+
+        # 2. Live kernel ipset membership for the sets we know about
+        live_membership = {}
+        for ipset_name in ipset_sections.keys():
+            try:
+                raw = self.exec(
+                    f"ipset list {ipset_name} 2>/dev/null | "
+                    "awk 'p{print} /^Members:/{p=1}' || true"
+                )
+                live_membership[ipset_name] = [
+                    l.strip() for l in raw.strip().splitlines() if l.strip()
+                ]
+            except Exception:
+                live_membership[ipset_name] = []
+
+        # Final shape: ipsets keyed by set_name → live IP list
+        out["ipsets"] = live_membership
+        # Also expose UCI section names so the diff can issue add_list/del_list
+        # against the right firewall.X.entry field.
+        out["ipset_uci"] = {
+            name: info["section"] for name, info in ipset_sections.items()
+        }
+        out["ipset_uci_entries"] = {
+            name: info["entries"] for name, info in ipset_sections.items()
+        }
+        out["rules"] = rule_sections
+        return out
+
+    def fvpn_lan_wipe_all(self) -> None:
+        """Delete every fvpn_* UCI section and destroy every fvpn_* kernel ipset.
+
+        Used by `cli.py reset-local-state` and the migration step. Reloads
+        firewall once at the end to clear any leftover iptables rules.
+        """
+        # 1. Delete all fvpn_* UCI sections
+        try:
+            raw = self.exec(
+                "uci show firewall 2>/dev/null | grep -oE 'fvpn_[a-zA-Z0-9_]+' | sort -u"
+            )
+        except Exception:
+            raw = ""
+        sections = [s.strip() for s in raw.strip().splitlines() if s.strip()]
+        if sections:
+            cmds = [f"uci -q delete firewall.{s}" for s in sections]
+            cmds.append("uci commit firewall")
+            self.exec(" ; ".join(cmds))
+        # 2. Destroy all fvpn_* kernel ipsets
+        try:
+            raw = self.exec(
+                "ipset list -n 2>/dev/null | grep -E '^fvpn_' || true"
+            )
+        except Exception:
+            raw = ""
+        for name in raw.strip().splitlines():
+            name = name.strip()
+            if name.startswith("fvpn_"):
+                self.exec(f"ipset destroy {name} 2>/dev/null || true")
+        # 3. Tear down the legacy fvpn_lan chain if it still exists
         self.exec(
             "iptables -D FORWARD -j fvpn_lan 2>/dev/null; "
             "iptables -F fvpn_lan 2>/dev/null; "
-            "iptables -X fvpn_lan 2>/dev/null"
+            "iptables -X fvpn_lan 2>/dev/null; true"
         )
-        # Destroy all our ipsets
-        raw = self.exec("ipset list -n 2>/dev/null || echo ''")
-        for name in raw.strip().splitlines():
-            name = name.strip()
-            if name.startswith("fvpn_lmac_") or name.startswith("fvpn_lip_"):
-                self.exec(f"ipset destroy {name} 2>/dev/null")
+        # 4. Reload firewall to clear any orphan iptables rules
+        try:
+            self.exec("/etc/init.d/firewall reload 2>&1 >/dev/null; true")
+        except Exception:
+            pass
 
 
-def generate_lan_rules(data: dict, device_ips: Optional[dict] = None) -> tuple[list, dict]:
-    """Generate iptables rules and ipset contents from profile store data.
-
-    Stage 8: device_ips is now passed in by the caller (sourced live from
-    router DHCP leases) instead of read from profile_store. The legacy field
-    is still honored as a fallback for tests / backwards compat.
-
-    Returns:
-        (rules, ipsets) where:
-        - rules: list of iptables rule arg strings for fvpn_lan chain
-          (device overrides first, then group rules)
-        - ipsets: {short_id: (macs, ips)} for each group needing an ipset
-    """
-    rules_device = []  # Higher priority
-    rules_group = []
-    ipsets = {}  # short_id -> (macs, ips)
-
-    # Build group membership maps
-    profiles = {p["id"]: p for p in data.get("profiles", [])}
-    assignments = data.get("device_assignments", {})
-    if device_ips is None:
-        device_ips = data.get("device_ips", {})  # legacy fallback
-    overrides = data.get("device_lan_overrides", {})
-
-    # Group members: {profile_id: [(mac, ip), ...]}
-    group_members = {}
-    for mac, pid in assignments.items():
-        if pid and pid in profiles:
-            group_members.setdefault(pid, []).append(
-                (mac, device_ips.get(mac, ""))
-            )
-
-    def _short_id(profile_id: str) -> str:
-        return profile_id[:8]
-
-    # Determine which groups need ipsets (any non-allowed setting references them)
-    groups_needing_ipsets = set()
-
-    # Check group-level settings
-    for pid, p in profiles.items():
-        lan = p.get("lan_access", {})
-        if lan.get("outbound") == "group_only" or lan.get("inbound") == "group_only":
-            groups_needing_ipsets.add(pid)
-
-    # Check device overrides that use group_only
-    for mac, ovr in overrides.items():
-        pid = assignments.get(mac)
-        if pid and (ovr.get("outbound") == "group_only" or ovr.get("inbound") == "group_only"):
-            groups_needing_ipsets.add(pid)
-
-    # Build ipsets for groups that need them
-    for pid in groups_needing_ipsets:
-        members = group_members.get(pid, [])
-        macs = [m for m, _ in members]
-        ips = [ip for _, ip in members if ip]
-        ipsets[_short_id(pid)] = (macs, ips)
-
-    # Generate rules for each device
-    all_restricted_macs = set()
-
-    for mac, pid in assignments.items():
-        if not pid or pid not in profiles:
-            continue
-
-        effective = ps.get_effective_lan_access(mac, data)
-        ip = device_ips.get(mac, "")
-        short = _short_id(pid)
-        has_override = mac in overrides and overrides[mac].get("outbound") is not None or \
-                       mac in overrides and overrides[mac].get("inbound") is not None
-
-        target_list = rules_device if has_override else rules_group
-
-        # Outbound rules (MAC-based, always reliable)
-        if effective["outbound"] == "blocked":
-            target_list.append(f"-m mac --mac-source {mac} -j DROP")
-            all_restricted_macs.add(mac)
-        elif effective["outbound"] == "group_only":
-            target_list.append(
-                f"-m mac --mac-source {mac} "
-                f"-m set ! --match-set fvpn_lip_{short} dst -j DROP"
-            )
-            all_restricted_macs.add(mac)
-
-        # Inbound rules (IP-based, needs IP)
-        if ip and effective["inbound"] == "blocked":
-            target_list.append(f"-d {ip} -j DROP")
-            all_restricted_macs.add(mac)
-        elif ip and effective["inbound"] == "group_only":
-            target_list.append(
-                f"-d {ip} "
-                f"-m set ! --match-set fvpn_lmac_{short} src -j DROP"
-            )
-            all_restricted_macs.add(mac)
-
-    # Device overrides first (higher priority), then group rules
-    return rules_device + rules_group, ipsets

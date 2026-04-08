@@ -12,12 +12,13 @@ Data model (profile_store.json):
 """
 
 import json
+import logging
 import os
 import re
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 DATA_DIR = Path(__file__).parent
 STORE_FILE = DATA_DIR / "profile_store.json"
@@ -25,6 +26,23 @@ STORE_FILE = DATA_DIR / "profile_store.json"
 VALID_TYPES = {"vpn", "no_vpn", "no_internet"}
 VALID_LAN_ACCESS = {"allowed", "group_only", "blocked"}
 _MAC_RE = re.compile(r'^([0-9a-f]{2}:){5}[0-9a-f]{2}$', re.IGNORECASE)
+
+# Optional callback fired after every successful save() — used by app.py to
+# push a copy of profile_store.json to the router as a disaster-recovery
+# backup. Best-effort: failures are logged but never propagate.
+_save_callback: Optional[Callable[[Path], None]] = None
+_log = logging.getLogger("flintvpn.profile_store")
+
+
+def register_save_callback(fn: Optional[Callable[[Path], None]]):
+    """Register (or clear) a callback to fire after every successful save().
+
+    The callback receives the absolute path to the freshly-written
+    profile_store.json. Exceptions raised by the callback are caught and
+    logged but do not propagate (the local save is the source of truth).
+    """
+    global _save_callback
+    _save_callback = fn
 
 
 def _validate_mac(mac: str) -> str:
@@ -52,7 +70,12 @@ def load() -> dict:
 
 
 def save(data: dict):
-    """Atomically write the profile store to disk."""
+    """Atomically write the profile store to disk.
+
+    After a successful write, fires the registered save callback (if any)
+    so the caller can push the new content to the router as a backup.
+    Callback failures are caught and logged but never propagate.
+    """
     _sanitize_mac_keys(data)
     fd, tmp_path = tempfile.mkstemp(dir=DATA_DIR, suffix=".tmp")
     try:
@@ -62,6 +85,12 @@ def save(data: dict):
     except Exception:
         os.unlink(tmp_path)
         raise
+
+    if _save_callback is not None:
+        try:
+            _save_callback(STORE_FILE)
+        except Exception as e:
+            _log.warning(f"profile_store save callback failed: {e}")
 
 
 def _sanitize_mac_keys(data: dict):
@@ -249,6 +278,23 @@ def delete_profile(profile_id: str) -> bool:
             data["device_assignments"][mac] = None
             lan_overrides.pop(mac, None)
 
+    # Strip the deleted profile's ID from any *_allow lists on remaining
+    # profiles' lan_access and on every device override (entries can be MAC
+    # strings OR profile IDs — only the latter need cleanup here).
+    for p in data["profiles"]:
+        lan = p.get("lan_access")
+        if not lan:
+            continue
+        for key in ("outbound_allow", "inbound_allow"):
+            lst = lan.get(key)
+            if lst:
+                lan[key] = [e for e in lst if e != profile_id]
+    for mac, ovr in lan_overrides.items():
+        for key in ("outbound_allow", "inbound_allow"):
+            lst = ovr.get(key)
+            if lst:
+                ovr[key] = [e for e in lst if e != profile_id]
+
     save(data)
     return True
 
@@ -346,10 +392,51 @@ def get_unassigned_devices(data: Optional[dict] = None) -> list[str]:
 
 # ── LAN Access Control ───────────────────────────────────────────────────────
 
-_DEFAULT_LAN = {"outbound": "allowed", "inbound": "allowed"}
+_DEFAULT_LAN = {
+    "outbound": "allowed",
+    "inbound": "allowed",
+    "outbound_allow": [],
+    "inbound_allow": [],
+}
 
 
-def set_profile_lan_access(profile_id: str, outbound: str, inbound: str) -> Optional[dict]:
+def _validate_allow_list(lst, profile_ids: set) -> list:
+    """Validate an allow list. Each entry is a MAC string or a profile ID.
+
+    Returns a normalized copy (MACs lowercased). Raises ValueError on invalid
+    entries (bad MAC, or unknown profile ID).
+    """
+    if lst is None:
+        return []
+    if not isinstance(lst, (list, tuple)):
+        raise ValueError(f"allow list must be a list, got {type(lst).__name__}")
+    out = []
+    for entry in lst:
+        if not isinstance(entry, str):
+            raise ValueError(f"allow list entry must be a string, got {entry!r}")
+        if _MAC_RE.match(entry):
+            out.append(entry.lower())
+        elif entry in profile_ids:
+            out.append(entry)
+        else:
+            raise ValueError(f"Invalid allow list entry: {entry!r} (not a MAC or known profile ID)")
+    # de-dup preserving order
+    seen = set()
+    deduped = []
+    for e in out:
+        if e not in seen:
+            seen.add(e)
+            deduped.append(e)
+    return deduped
+
+
+def set_profile_lan_access(
+    profile_id: str,
+    outbound: str,
+    inbound: str,
+    outbound_allow: Optional[list] = None,
+    inbound_allow: Optional[list] = None,
+) -> Optional[dict]:
     """Set LAN access rules for a profile. Returns the profile or None."""
     if outbound not in VALID_LAN_ACCESS:
         raise ValueError(f"Invalid outbound: {outbound}")
@@ -357,28 +444,52 @@ def set_profile_lan_access(profile_id: str, outbound: str, inbound: str) -> Opti
         raise ValueError(f"Invalid inbound: {inbound}")
 
     data = load()
+    profile_ids = {p["id"] for p in data["profiles"]}
+    out_allow = _validate_allow_list(outbound_allow, profile_ids - {profile_id})
+    in_allow = _validate_allow_list(inbound_allow, profile_ids - {profile_id})
+
     for p in data["profiles"]:
         if p["id"] == profile_id:
-            p["lan_access"] = {"outbound": outbound, "inbound": inbound}
+            p["lan_access"] = {
+                "outbound": outbound,
+                "inbound": inbound,
+                "outbound_allow": out_allow,
+                "inbound_allow": in_allow,
+            }
             save(data)
             return p
     return None
 
 
 def get_profile_lan_access(profile_id: str, data: Optional[dict] = None) -> dict:
-    """Get LAN access for a profile. Returns default if not set."""
+    """Get LAN access for a profile. Returns default if not set.
+
+    Always returns a dict with all four keys present (state + allow lists).
+    """
     if data is None:
         data = load()
     for p in data["profiles"]:
         if p["id"] == profile_id:
-            return p.get("lan_access", {**_DEFAULT_LAN})
-    return {**_DEFAULT_LAN}
+            lan = p.get("lan_access") or {}
+            return {
+                "outbound": lan.get("outbound", "allowed"),
+                "inbound": lan.get("inbound", "allowed"),
+                "outbound_allow": list(lan.get("outbound_allow", [])),
+                "inbound_allow": list(lan.get("inbound_allow", [])),
+            }
+    return {**_DEFAULT_LAN, "outbound_allow": [], "inbound_allow": []}
 
 
-def set_device_lan_override(mac: str, outbound=None, inbound=None):
-    """Set per-device LAN overrides. None values mean inherit from group.
+def set_device_lan_override(
+    mac: str,
+    outbound=None,
+    inbound=None,
+    outbound_allow: Optional[list] = None,
+    inbound_allow: Optional[list] = None,
+):
+    """Set per-device LAN overrides. None state values mean inherit from group.
 
-    If both are None, removes the override entirely.
+    If state and allow lists are all empty, removes the override entirely.
     """
     mac = mac.lower()
     if outbound is not None and outbound not in VALID_LAN_ACCESS:
@@ -387,12 +498,21 @@ def set_device_lan_override(mac: str, outbound=None, inbound=None):
         raise ValueError(f"Invalid inbound: {inbound}")
 
     data = load()
+    profile_ids = {p["id"] for p in data["profiles"]}
+    out_allow = _validate_allow_list(outbound_allow, profile_ids)
+    in_allow = _validate_allow_list(inbound_allow, profile_ids)
+
     overrides = data.setdefault("device_lan_overrides", {})
 
-    if outbound is None and inbound is None:
+    if outbound is None and inbound is None and not out_allow and not in_allow:
         overrides.pop(mac, None)
     else:
-        overrides[mac] = {"outbound": outbound, "inbound": inbound}
+        overrides[mac] = {
+            "outbound": outbound,
+            "inbound": inbound,
+            "outbound_allow": out_allow,
+            "inbound_allow": in_allow,
+        }
 
     save(data)
 
@@ -407,7 +527,17 @@ def get_device_lan_override(mac: str, data: Optional[dict] = None) -> Optional[d
 def get_effective_lan_access(mac: str, data: Optional[dict] = None) -> dict:
     """Resolve effective LAN access: device override → group → default.
 
-    Returns {"outbound": str, "inbound": str, "inherited": bool}.
+    State fields (outbound/inbound): device override REPLACES group when set.
+    Allow lists: group + device override merged additively (union, dedup).
+
+    Returns {
+        "outbound": str, "inbound": str,
+        "outbound_allow": [{"value", "type", "source"}],
+        "inbound_allow": [...],
+        "inherited": bool,  # True iff state fields fully inherited from group
+    }
+    Each allow-list entry carries a `source` of "group" or "device" so the UI
+    can grey out inherited entries.
     """
     if data is None:
         data = load()
@@ -417,20 +547,62 @@ def get_effective_lan_access(mac: str, data: Optional[dict] = None) -> dict:
 
     # Get group setting
     profile_id = data["device_assignments"].get(mac)
-    group_lan = {**_DEFAULT_LAN}
+    group_lan = None
     if profile_id:
         for p in data["profiles"]:
             if p["id"] == profile_id:
-                group_lan = p.get("lan_access", {**_DEFAULT_LAN})
+                group_lan = p.get("lan_access")
                 break
+    if not group_lan:
+        group_lan = {}
+
+    group_out = group_lan.get("outbound", "allowed")
+    group_in = group_lan.get("inbound", "allowed")
+    group_out_allow = group_lan.get("outbound_allow", []) or []
+    group_in_allow = group_lan.get("inbound_allow", []) or []
 
     if override:
-        outbound = override.get("outbound") or group_lan["outbound"]
-        inbound = override.get("inbound") or group_lan["inbound"]
-        inherited = override.get("outbound") is None and override.get("inbound") is None
+        ov_out = override.get("outbound")
+        ov_in = override.get("inbound")
+        outbound = ov_out if ov_out is not None else group_out
+        inbound = ov_in if ov_in is not None else group_in
+        inherited = ov_out is None and ov_in is None
+        ov_out_allow = override.get("outbound_allow", []) or []
+        ov_in_allow = override.get("inbound_allow", []) or []
     else:
-        outbound = group_lan["outbound"]
-        inbound = group_lan["inbound"]
+        outbound = group_out
+        inbound = group_in
         inherited = True
+        ov_out_allow = []
+        ov_in_allow = []
 
-    return {"outbound": outbound, "inbound": inbound, "inherited": inherited}
+    def _tag_entries(group_lst, device_lst):
+        seen = set()
+        result = []
+        for e in group_lst:
+            if e in seen:
+                continue
+            seen.add(e)
+            result.append({
+                "value": e,
+                "type": "mac" if _MAC_RE.match(e) else "profile",
+                "source": "group",
+            })
+        for e in device_lst:
+            if e in seen:
+                continue
+            seen.add(e)
+            result.append({
+                "value": e,
+                "type": "mac" if _MAC_RE.match(e) else "profile",
+                "source": "device",
+            })
+        return result
+
+    return {
+        "outbound": outbound,
+        "inbound": inbound,
+        "outbound_allow": _tag_entries(group_out_allow, ov_out_allow),
+        "inbound_allow": _tag_entries(group_in_allow, ov_in_allow),
+        "inherited": inherited,
+    }

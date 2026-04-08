@@ -3,6 +3,7 @@
   import { profiles, showToast } from '../stores/app.js';
   import { timeAgo, isOnline, isRandomMac, formatBytes, formatSpeed, DEVICE_TYPES, deviceTypeLabel } from '../utils.js';
   import { createEventDispatcher } from 'svelte';
+  import LanPeerPicker from './LanPeerPicker.svelte';
 
   export let device = null;
   const dispatch = createEventDispatcher();
@@ -12,6 +13,10 @@
   let targetProfileId = '';
   let lanOutbound = null;
   let lanInbound = null;
+  // Effective allow lists (tagged with source: 'group' | 'device').
+  // Group-source entries are greyed-out and non-removable in the picker.
+  let lanOutboundAllow = [];
+  let lanInboundAllow = [];
 
   $: if (device) {
     label = device.label || '';
@@ -20,6 +25,9 @@
     // null means inherit from group
     lanOutbound = device.lan_inherited ? null : (device.lan_outbound || null);
     lanInbound = device.lan_inherited ? null : (device.lan_inbound || null);
+    // Effective allow lists from backend (already merged group ∪ device with source tags)
+    lanOutboundAllow = (device.lan_outbound_allow || []).map(e => ({ ...e }));
+    lanInboundAllow = (device.lan_inbound_allow || []).map(e => ({ ...e }));
   }
 
   $: online = device ? isOnline(device) : false;
@@ -47,9 +55,16 @@
         if (res.error) { showToast(res.error, true); saving = false; return; }
       }
 
-      // Save LAN access overrides if device is assigned
+      // Save LAN access overrides if device is assigned. Send only the
+      // device-source allow entries (group-source entries are inherited and
+      // owned by the group, not this override).
       if (newPid || device.profile_id) {
-        await api.setDeviceLanAccess(mac, { outbound: lanOutbound, inbound: lanInbound });
+        await api.setDeviceLanAccess(mac, {
+          outbound: lanOutbound,
+          inbound: lanInbound,
+          outbound_allow: lanOutboundAllow.filter(e => e.source !== 'group').map(e => e.value),
+          inbound_allow: lanInboundAllow.filter(e => e.source !== 'group').map(e => e.value),
+        });
       }
 
       dispatch('close');
@@ -147,6 +162,10 @@
                 <option value="group_only">Group Only</option>
                 <option value="blocked">Blocked</option>
               </select>
+              {#if (lanOutbound ?? groupLanOut) !== 'allowed'}
+                <div class="exc-label">Additional exceptions:</div>
+                <LanPeerPicker bind:value={lanOutboundAllow} excludeProfileId={device?.profile_id} />
+              {/if}
             </div>
             <div class="lan-control">
               <label for="dl-lan-in">Inbound</label>
@@ -156,9 +175,13 @@
                 <option value="group_only">Group Only</option>
                 <option value="blocked">Blocked</option>
               </select>
+              {#if (lanInbound ?? groupLanIn) !== 'allowed'}
+                <div class="exc-label">Additional exceptions:</div>
+                <LanPeerPicker bind:value={lanInboundAllow} excludeProfileId={device?.profile_id} />
+              {/if}
             </div>
           </div>
-          <div class="lan-hint">Override the group's LAN access settings for this specific device. "Inherit" uses the group setting.</div>
+          <div class="lan-hint">Override the group's LAN access settings for this specific device. "Inherit" uses the group setting. Exceptions inherited from the group appear greyed out — edit the group to remove them.</div>
         </div>
       {/if}
     </div>
@@ -189,4 +212,5 @@
   .lan-control label { display: block; font-size: .75rem; color: var(--fg3); margin-bottom: 4px; text-transform: uppercase; letter-spacing: .05em; }
   .lan-control select { width: 100%; padding: 8px; background: var(--bg3); border: 1px solid var(--border2); border-radius: var(--radius-xs); color: var(--fg); font-size: .85rem; }
   .lan-hint { font-size: .75rem; color: var(--fg3); margin-top: 8px; line-height: 1.4; }
+  .exc-label { font-size: .68rem; color: var(--fg3); margin-top: 8px; text-transform: uppercase; letter-spacing: .04em; }
 </style>

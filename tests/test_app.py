@@ -1105,6 +1105,24 @@ class TestLanAccessEndpoints:
         assert resp.json["success"] is True
         assert resp.json["lan_access"]["outbound"] == "group_only"
 
+    def test_set_profile_lan_access_with_allow_lists(self, unlocked_client):
+        c, _ = unlocked_client
+        a = c.post("/api/profiles", json={"name": "A", "type": "no_vpn"}).json
+        b = c.post("/api/profiles", json={"name": "B", "type": "no_vpn"}).json
+        resp = c.put(f"/api/profiles/{a['id']}/lan-access", json={
+            "outbound": "group_only",
+            "inbound": "group_only",
+            "outbound_allow": [],
+            "inbound_allow": [b["id"], "aa:bb:cc:dd:ee:ff"],
+        })
+        assert resp.status_code == 200
+        # Round-trip via /api/profiles
+        plist = c.get("/api/profiles").json
+        a_out = next(p for p in plist if p["id"] == a["id"])
+        assert b["id"] in a_out["lan_access"]["inbound_allow"]
+        assert "aa:bb:cc:dd:ee:ff" in a_out["lan_access"]["inbound_allow"]
+        assert a_out["lan_access"]["outbound_allow"] == []
+
     def test_set_device_lan_access(self, unlocked_client):
         c, _ = unlocked_client
         create = c.post("/api/profiles", json={"name": "LAN", "type": "no_vpn"})
@@ -1115,12 +1133,29 @@ class TestLanAccessEndpoints:
         })
         assert resp.json["success"] is True
 
+    def test_set_device_lan_access_with_allow_lists(self, unlocked_client):
+        c, _ = unlocked_client
+        pid = c.post("/api/profiles", json={"name": "A", "type": "no_vpn"}).json["id"]
+        other = c.post("/api/profiles", json={"name": "B", "type": "no_vpn"}).json["id"]
+        ps.assign_device("aa:bb:cc:dd:ee:ff", pid)
+        resp = c.put("/api/devices/aa:bb:cc:dd:ee:ff/lan-access", json={
+            "outbound": None, "inbound": None,
+            "outbound_allow": [], "inbound_allow": [other],
+        })
+        assert resp.status_code == 200
+        ovr = ps.get_device_lan_override("aa:bb:cc:dd:ee:ff")
+        assert ovr is not None
+        assert ovr["inbound_allow"] == [other]
+
     def test_profiles_include_lan_access(self, unlocked_client):
         c, _ = unlocked_client
         c.post("/api/profiles", json={"name": "LAN", "type": "no_vpn"})
         profiles = c.get("/api/profiles").json
         assert "lan_access" in profiles[0]
         assert profiles[0]["lan_access"]["outbound"] == "allowed"
+        # Allow lists must always be present in the API shape (even when empty)
+        assert profiles[0]["lan_access"]["outbound_allow"] == []
+        assert profiles[0]["lan_access"]["inbound_allow"] == []
 
     def test_devices_include_lan_fields(self, unlocked_client):
         c, app_mod = unlocked_client
@@ -1143,6 +1178,8 @@ class TestLanAccessEndpoints:
         assert "lan_outbound" in d
         assert "lan_inbound" in d
         assert "lan_inherited" in d
+        assert "lan_outbound_allow" in d
+        assert "lan_inbound_allow" in d
 
     def test_invalid_lan_value(self, unlocked_client):
         c, _ = unlocked_client
@@ -1161,3 +1198,145 @@ class TestRefreshEndpoint:
             mock_tracker.return_value = MagicMock()
             resp = c.post("/api/refresh")
         assert resp.json["success"] is True
+
+
+class TestBackupAndRestore:
+    """Backup-to-router on save() + auto-restore-on-unlock from router."""
+
+    def test_backup_callback_pushes_to_router_after_save(self, unlocked_client):
+        c, app_mod = unlocked_client
+        # Configure mocks: router fingerprint is a string (not MagicMock) so
+        # the backup wrapper can JSON-serialize it.
+        app_mod._router_api.get_router_fingerprint.return_value = "aa:bb:cc:11:22:33"
+        app_mod._router_api.write_file.reset_mock()
+        # Backup wrapper writes via router.write_file
+        ps.save({**ps._EMPTY_STORE, "profiles": [
+            {"id": "p1", "type": "no_vpn", "name": "Test",
+             "color": "#000", "icon": "🔒", "is_guest": False},
+        ]})
+        # write_file should have been called with the backup path
+        write_calls = app_mod._router_api.write_file.call_args_list
+        assert any(
+            call.args[0] == app_mod.ROUTER_BACKUP_PATH for call in write_calls
+        )
+        # The wrapped JSON should contain the profile data + _meta
+        last_call = next(
+            call for call in write_calls
+            if call.args[0] == app_mod.ROUTER_BACKUP_PATH
+        )
+        wrapped = json.loads(last_call.args[1])
+        assert wrapped["_meta"]["version"] == 1
+        assert "saved_at" in wrapped["_meta"]
+        assert wrapped["data"]["profiles"][0]["id"] == "p1"
+
+    def test_backup_failure_does_not_break_save(self, unlocked_client):
+        c, app_mod = unlocked_client
+        app_mod._router_api.write_file.side_effect = RuntimeError("ssh down")
+        # Save should still succeed even though backup fails
+        ps.save({**ps._EMPTY_STORE, "profiles": [
+            {"id": "p2", "type": "no_vpn", "name": "Test2",
+             "color": "#000", "icon": "🔒", "is_guest": False},
+        ]})
+        # Local file is intact
+        loaded = ps.load()
+        assert loaded["profiles"][0]["id"] == "p2"
+
+    def test_auto_restore_when_local_missing(self, unlocked_client):
+        c, app_mod = unlocked_client
+        # Make sure local store is missing
+        if ps.STORE_FILE.exists():
+            ps.STORE_FILE.unlink()
+
+        # Mock router's read_file to return a backup with newer timestamp
+        from datetime import datetime, timezone, timedelta
+        backup = {
+            "_meta": {
+                "version": 1,
+                "saved_at": (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat(),
+                "router_fingerprint": "aa:bb:cc:11:22:33",
+            },
+            "data": {
+                "profiles": [{"id": "restored-id", "type": "no_vpn", "name": "Restored",
+                              "color": "#000", "icon": "🔒", "is_guest": False}],
+                "device_assignments": {},
+                "device_lan_overrides": {},
+            },
+        }
+        app_mod._router_api.read_file.return_value = json.dumps(backup)
+        app_mod._router_api.get_router_fingerprint.return_value = "aa:bb:cc:11:22:33"
+
+        app_mod._check_and_auto_restore()
+
+        loaded = ps.load()
+        assert any(p["id"] == "restored-id" for p in loaded["profiles"])
+
+    def test_auto_restore_skipped_on_fingerprint_mismatch(self, unlocked_client):
+        c, app_mod = unlocked_client
+        if ps.STORE_FILE.exists():
+            ps.STORE_FILE.unlink()
+        from datetime import datetime, timezone
+        backup = {
+            "_meta": {
+                "version": 1,
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+                "router_fingerprint": "aa:bb:cc:11:22:33",
+            },
+            "data": {"profiles": [{"id": "wrong-router", "type": "no_vpn",
+                                   "name": "X", "color": "#000", "icon": "🔒",
+                                   "is_guest": False}],
+                     "device_assignments": {}, "device_lan_overrides": {}},
+        }
+        app_mod._router_api.read_file.return_value = json.dumps(backup)
+        # Different fingerprint
+        app_mod._router_api.get_router_fingerprint.return_value = "ff:ee:dd:cc:bb:aa"
+
+        app_mod._check_and_auto_restore()
+
+        # Local store should still be missing (no restore)
+        assert not ps.STORE_FILE.exists()
+
+    def test_auto_restore_self_heal_when_local_newer(self, unlocked_client):
+        c, app_mod = unlocked_client
+        # Local store with current mtime
+        ps.save({
+            **ps._EMPTY_STORE,
+            "profiles": [{"id": "local-newer", "type": "no_vpn",
+                          "name": "X", "color": "#000", "icon": "🔒",
+                          "is_guest": False}],
+        })
+        # Backup timestamp from 1 hour ago (older than local)
+        from datetime import datetime, timezone, timedelta
+        backup = {
+            "_meta": {
+                "version": 1,
+                "saved_at": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+                "router_fingerprint": "aa:bb:cc:11:22:33",
+            },
+            "data": {"profiles": [{"id": "old-backup", "type": "no_vpn",
+                                   "name": "Old", "color": "#000", "icon": "🔒",
+                                   "is_guest": False}],
+                     "device_assignments": {}, "device_lan_overrides": {}},
+        }
+        app_mod._router_api.read_file.return_value = json.dumps(backup)
+        app_mod._router_api.get_router_fingerprint.return_value = "aa:bb:cc:11:22:33"
+        app_mod._router_api.write_file.reset_mock()
+
+        app_mod._check_and_auto_restore()
+
+        # Local should still be the local-newer version
+        loaded = ps.load()
+        assert any(p["id"] == "local-newer" for p in loaded["profiles"])
+        # Self-heal should have called write_file with backup path
+        write_calls = app_mod._router_api.write_file.call_args_list
+        assert any(
+            call.args[0] == app_mod.ROUTER_BACKUP_PATH for call in write_calls
+        )
+
+    def test_auto_restore_no_op_when_no_backup(self, unlocked_client):
+        c, app_mod = unlocked_client
+        if ps.STORE_FILE.exists():
+            ps.STORE_FILE.unlink()
+        app_mod._router_api.read_file.return_value = None
+        # Should not raise, should not restore
+        app_mod._check_and_auto_restore()
+        assert not ps.STORE_FILE.exists()

@@ -186,6 +186,66 @@ def status(ctx):
     # Future: show profiles, tunnels, devices when those modules exist
 
 
+@cli.command("reset-local-state")
+@click.option("--yes", is_flag=True, help="Skip confirmation")
+@click.option("--keep-router", is_flag=True,
+              help="Don't wipe fvpn_* sections / ipsets on the router")
+def reset_local_state(yes, keep_router):
+    """Wipe local profile_store.json AND router backup, optionally also wipe
+    all fvpn_* router state.
+
+    Use this to start fresh: deletes all groups, device assignments, LAN
+    settings, and the router-side disaster-recovery backup. Without --yes,
+    confirms before each step.
+
+    The next unlock will start with an empty store and will NOT auto-restore
+    (because the router backup is also gone).
+
+    \b
+    Examples:
+      ./cli.py reset-local-state                # interactive
+      ./cli.py reset-local-state --yes          # full wipe, no prompts
+      ./cli.py reset-local-state --keep-router  # only wipe local + backup
+    """
+    import profile_store as pstore
+
+    if not yes:
+        click.echo("This will permanently delete:")
+        click.echo("  - profile_store.json (groups, assignments, LAN settings)")
+        click.echo("  - /etc/fvpn/profile_store.bak.json on the router")
+        if not keep_router:
+            click.echo("  - All fvpn_* UCI sections and ipsets on the router")
+        click.echo("It will NOT touch secrets.enc, config.json, or VPN tunnels.")
+        if not click.confirm("Continue?"):
+            return
+
+    # 1. Wipe local profile_store.json
+    if pstore.STORE_FILE.exists():
+        pstore.STORE_FILE.unlink()
+        click.echo(f"Deleted {pstore.STORE_FILE}")
+    else:
+        click.echo("Local profile_store.json already absent.")
+
+    # 2. Delete router backup file (best-effort)
+    try:
+        router = get_router_api()
+        router.exec("rm -f /etc/fvpn/profile_store.bak.json 2>/dev/null || true")
+        click.echo("Deleted /etc/fvpn/profile_store.bak.json on router")
+    except Exception as e:
+        click.echo(f"Warning: failed to delete router backup: {e}")
+
+    # 3. Wipe router fvpn_* state (UCI + ipsets)
+    if not keep_router:
+        try:
+            router = get_router_api()
+            router.fvpn_lan_wipe_all()
+            click.echo("Wiped all fvpn_* router state (UCI sections + ipsets)")
+        except Exception as e:
+            click.echo(f"Warning: router wipe failed: {e}")
+
+    click.echo("Done. Restart the app and unlock to start fresh.")
+
+
 @cli.group()
 def config():
     """View or update non-sensitive configuration (config.json).
@@ -756,25 +816,23 @@ def devices_assign(mac, profile_id):
         return
 
     # Apply router-level changes
+    import lan_sync
     try:
         router = get_router_api()
         if profile["type"] == "vpn" and profile.get("router_info"):
             router.set_device_vpn(mac, profile["router_info"]["rule_name"])
-        elif profile["type"] == "no_internet":
-            # Stage 8: device IPs come from live router DHCP leases, not local cache
-            try:
-                leases = router.get_dhcp_leases()
-                ip = next((l["ip"] for l in leases if l["mac"].lower() == mac.lower()), "")
-            except Exception:
-                ip = ""
-            if ip:
-                router.set_device_no_internet(mac, ip)
-            else:
-                click.echo("Warning: No IP known for device. Firewall rule not created.")
+        # NoInternet: handled by lan_sync below (single global ipset)
     except Exception as e:
         click.echo(f"Warning: Router update failed: {e}")
 
     pstore.assign_device(mac, profile_id)
+
+    # Reconcile router LAN execution layer (UCI ipsets + rules)
+    try:
+        lan_sync.sync_lan_to_router(get_router_api())
+    except Exception as e:
+        click.echo(f"Warning: LAN sync failed: {e}")
+
     click.echo(f"Assigned {mac} → {profile['icon']} {profile['name']}")
 
 
@@ -787,15 +845,21 @@ def devices_unassign(mac):
     Example: ./cli.py devices unassign aa:bb:cc:dd:ee:ff
     """
     import profile_store as pstore
+    import lan_sync
 
     try:
         router = get_router_api()
         router.remove_device_from_all_vpn(mac)
-        router.remove_device_no_internet(mac)
     except Exception as e:
         click.echo(f"Warning: Router update failed: {e}")
 
     pstore.assign_device(mac, None)
+
+    try:
+        lan_sync.sync_lan_to_router(get_router_api())
+    except Exception as e:
+        click.echo(f"Warning: LAN sync failed: {e}")
+
     click.echo(f"Unassigned {mac}")
 
 

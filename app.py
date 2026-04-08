@@ -12,6 +12,7 @@ import json
 import logging
 import time
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -19,11 +20,16 @@ from flask import Flask, request, jsonify, Response, send_from_directory
 
 import secrets_manager as sm
 import profile_store as ps
+import lan_sync
 from proton_api import ProtonAPI
-from router_api import RouterAPI, generate_lan_rules
+from router_api import RouterAPI
 from device_tracker import start_tracker, stop_tracker, get_tracker
 from server_optimizer import find_better_server
 from auto_optimizer import start_optimizer, stop_optimizer
+
+# Backup file path on the router (single static JSON, no scripts).
+ROUTER_BACKUP_PATH = "/etc/fvpn/profile_store.bak.json"
+BACKUP_FORMAT_VERSION = 1
 
 app = Flask(__name__, static_folder="static", static_url_path="")
 
@@ -97,97 +103,202 @@ def _require_unlocked():
     return None
 
 
-def _rebuild_lan_rules():
-    """Rebuild all LAN access control rules on the router from current store state.
+def _normalize_lan_access(lan):
+    """Always return a dict with all four LAN access fields present.
 
-    Stage 8: device IPs are read live from the router's DHCP leases (not the
-    removed device_ips local cache). LAN policies and assignments still come
-    from local profile_store (no native router source for the 3-state policy).
+    Used when surfacing profile data to the API so the frontend can rely on a
+    stable shape (state + allow lists) regardless of when the profile was
+    created.
     """
-    data = ps.load()
-    router = _get_router()
-    try:
-        leases = router.get_dhcp_leases()
-        device_ips = {l["mac"].lower(): l.get("ip", "") for l in leases}
-    except Exception:
-        device_ips = {}
-    rules, ipsets = generate_lan_rules(data, device_ips=device_ips)
-    for short_id, (macs, ips) in ipsets.items():
-        router.lan_sync_group_ipsets(short_id, macs, ips)
-    router.lan_rebuild_rules(rules)
+    lan = lan or {}
+    return {
+        "outbound": lan.get("outbound", "allowed"),
+        "inbound": lan.get("inbound", "allowed"),
+        "outbound_allow": list(lan.get("outbound_allow", [])),
+        "inbound_allow": list(lan.get("inbound_allow", [])),
+    }
 
 
-def _reconcile_no_internet_rules():
-    """Stage 9: Ensure firewall.fvpn_noinet_* rules match local NoInternet assignments.
+def _sync_lan_to_router():
+    """Reconcile router LAN execution state with local intent.
 
-    The local store is the source of truth for NoInternet group identity (the
-    router can't distinguish multiple no_internet groups since the iptables
-    DROP rules per device look identical). This reconciles the two sides:
+    Replaces the legacy `_rebuild_lan_rules` + `_reconcile_no_internet_rules`
+    pair. Delegates to `lan_sync.sync_lan_to_router` which:
+      - Reads live DHCP leases for device IPs
+      - Reads router VPN device assignments from from_mac
+      - Computes desired UCI ipset/rule sections from local intent
+      - Diffs against current router state
+      - Applies via uci batch (+ firewall reload if structural changes)
 
-      - For every MAC assigned to a no_internet profile in the local store,
-        ensure firewall.fvpn_noinet_<mac>_* exists on the router.
-      - For every firewall.fvpn_noinet_<mac>_* on the router NOT matching a
-        local no_internet assignment, remove it.
-
-    Called on: session unlock, after api_assign_device when old/new is
-    no_internet, after api_delete_profile when a no_internet profile is gone.
+    Best-effort: any exception is logged but doesn't propagate.
     """
     try:
         router = _get_router()
-        data = ps.load()
-        no_int_profile_ids = {
-            p["id"] for p in data.get("profiles", [])
-            if p.get("type") == "no_internet"
-        }
-        should_block = set()
-        for mac, pid in data.get("device_assignments", {}).items():
-            if pid in no_int_profile_ids:
-                should_block.add(mac.lower())
+        result = lan_sync.sync_lan_to_router(router, store=ps.load())
+        if result.get("applied"):
+            log.info(
+                f"LAN sync applied: uci_lines={result.get('uci_lines', 0)}, "
+                f"membership_ops={result.get('membership_ops', 0)}, "
+                f"reload={result.get('reload', False)}"
+            )
+    except Exception as e:
+        log.warning(f"LAN sync failed: {e}")
 
-        # Read currently-blocked MACs from router firewall
-        raw = router.exec(
-            "uci show firewall 2>/dev/null | grep 'fvpn_noinet_' | grep '_drop=rule'"
-        )
-        currently_blocked = set()
-        for line in raw.strip().splitlines():
-            # firewall.fvpn_noinet_aabbccddeeff_drop=rule
-            if "fvpn_noinet_" not in line:
-                continue
-            try:
-                sec = line.split(".")[1].split("=")[0]
-            except IndexError:
-                continue
-            mac_part = sec.replace("fvpn_noinet_", "").replace("_drop", "").replace("_lan", "")
-            if len(mac_part) == 12:
-                mac = ":".join(mac_part[i:i + 2] for i in (0, 2, 4, 6, 8, 10)).lower()
-                currently_blocked.add(mac)
 
-        leases = []
+# ── Backup / Restore (router-side disaster recovery) ─────────────────────
+
+
+def _backup_local_state_to_router(store_path: Path):
+    """Push profile_store.json to the router as a static backup file.
+
+    Wraps the JSON in a small `_meta` envelope (timestamp, router fingerprint,
+    format version) so the auto-restore path on unlock can verify it before
+    overwriting local state.
+
+    Best-effort: SSH failures log a warning and never propagate.
+    """
+    try:
+        if not store_path.exists():
+            return
         try:
-            leases = router.get_dhcp_leases()
+            content = store_path.read_text()
+            data = json.loads(content)
+        except Exception as e:
+            log.warning(f"Backup skipped (local store unreadable): {e}")
+            return
+
+        router = _get_router()
+        try:
+            fingerprint = router.get_router_fingerprint()
+        except Exception:
+            fingerprint = ""
+
+        wrapped = {
+            "_meta": {
+                "version": BACKUP_FORMAT_VERSION,
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+                "router_fingerprint": fingerprint,
+            },
+            "data": data,
+        }
+
+        # Make sure /etc/fvpn/ exists (idempotent)
+        try:
+            router.exec("mkdir -p /etc/fvpn 2>/dev/null || true")
         except Exception:
             pass
-        ip_by_mac = {l["mac"].lower(): l.get("ip", "") for l in leases}
 
-        # Add new blocks
-        for mac in should_block - currently_blocked:
-            ip = ip_by_mac.get(mac, "")
-            if ip:
-                try:
-                    router.set_device_no_internet(mac, ip)
-                    log.info(f"NoInternet reconcile: blocked {mac} ({ip})")
-                except Exception as e:
-                    log.warning(f"NoInternet reconcile: failed to block {mac}: {e}")
-
-        # Remove stale blocks
-        for mac in currently_blocked - should_block:
-            try:
-                router.remove_device_no_internet(mac)
-                log.info(f"NoInternet reconcile: unblocked {mac}")
-            except Exception as e:
-                log.warning(f"NoInternet reconcile: failed to unblock {mac}: {e}")
+        router.write_file(ROUTER_BACKUP_PATH, json.dumps(wrapped, indent=2))
     except Exception as e:
-        log.error(f"_reconcile_no_internet_rules failed: {e}")
+        log.warning(f"Backup to router failed: {e}")
+
+
+def _check_and_auto_restore():
+    """On unlock, restore profile_store.json from the router backup if newer.
+
+    Comparison rules:
+      - If no backup file on the router → no-op.
+      - If backup `_meta.version` doesn't match current → log warning, no-op.
+      - If router fingerprint mismatches the live router → log warning, no-op
+        (the backup belongs to a different router).
+      - If local profile_store.json is missing/unparseable → restore.
+      - Else compare backup `_meta.saved_at` with local file mtime:
+          backup newer  → restore
+          local newer   → push local back to router (self-heal stale backup)
+          equal         → no-op
+
+    Both timestamps are sourced from the same machine's clock (this Surface
+    Go), so there's no clock-skew issue.
+
+    Silent operation per user instruction — no UX, no toasts, no banners.
+    """
+    try:
+        router = _get_router()
+        try:
+            raw = router.read_file(ROUTER_BACKUP_PATH)
+        except Exception as e:
+            log.warning(f"Auto-restore: read failed: {e}")
+            return
+        if not raw:
+            return  # No backup to restore from
+        try:
+            wrapped = json.loads(raw)
+        except json.JSONDecodeError as e:
+            log.warning(f"Auto-restore: backup file is unparseable: {e}")
+            return
+
+        meta = wrapped.get("_meta") or {}
+        if meta.get("version") != BACKUP_FORMAT_VERSION:
+            log.warning(
+                f"Auto-restore: backup version {meta.get('version')} != "
+                f"{BACKUP_FORMAT_VERSION}, skipping"
+            )
+            return
+
+        # Fingerprint check — if it doesn't match, the backup is from a
+        # different router and we should NOT silently overwrite.
+        try:
+            current_fingerprint = router.get_router_fingerprint()
+        except Exception:
+            current_fingerprint = ""
+        backup_fp = meta.get("router_fingerprint", "")
+        if current_fingerprint and backup_fp and current_fingerprint != backup_fp:
+            log.warning(
+                f"Auto-restore: router fingerprint mismatch "
+                f"(backup={backup_fp}, current={current_fingerprint}), skipping"
+            )
+            return
+
+        backup_data = wrapped.get("data") or {}
+        backup_saved_at = meta.get("saved_at", "")
+        try:
+            backup_dt = datetime.fromisoformat(backup_saved_at)
+        except (ValueError, TypeError):
+            log.warning(f"Auto-restore: invalid saved_at {backup_saved_at!r}")
+            return
+
+        # Compare to local file mtime
+        if not ps.STORE_FILE.exists():
+            local_dt = datetime.fromtimestamp(0, tz=timezone.utc)
+            local_state = "missing"
+        else:
+            try:
+                # Verify local is parseable; if not, treat as missing
+                _ = json.loads(ps.STORE_FILE.read_text())
+                local_dt = datetime.fromtimestamp(
+                    ps.STORE_FILE.stat().st_mtime, tz=timezone.utc
+                )
+                local_state = "valid"
+            except Exception:
+                local_dt = datetime.fromtimestamp(0, tz=timezone.utc)
+                local_state = "unparseable"
+
+        if backup_dt > local_dt:
+            log.info(
+                f"Auto-restore: backup ({backup_saved_at}) is newer than "
+                f"local ({local_state}), restoring"
+            )
+            ps.save(backup_data)
+            # The save() call would normally fire the backup callback; but
+            # because the data is identical to the backup, the next backup
+            # push is essentially a no-op (idempotent).
+        elif backup_dt < local_dt:
+            log.info(
+                "Auto-restore: local is newer than backup, self-healing by "
+                "pushing local state to router"
+            )
+            try:
+                _backup_local_state_to_router(ps.STORE_FILE)
+            except Exception as e:
+                log.warning(f"Auto-restore self-heal failed: {e}")
+        # else: equal — no-op
+    except Exception as e:
+        log.warning(f"Auto-restore check failed: {e}")
+
+
+# Register the backup callback so every successful save() pushes to the
+# router. Idempotent — safe to call from module init.
+ps.register_save_callback(_backup_local_state_to_router)
 
 
 # ── Status / Setup / Unlock ───────────────────────────────────────────────────
@@ -236,23 +347,26 @@ def api_unlock():
         sm.unlock(data["master_password"])
         _session_unlocked = True
 
+        # Auto-restore local state from router backup if newer (silent disaster
+        # recovery — must run BEFORE the device tracker / LAN sync since they
+        # depend on the local store).
+        try:
+            _check_and_auto_restore()
+        except Exception as e:
+            log.warning(f"Auto-restore check failed: {e}")
+
         # Start device tracker and poll immediately so devices are ready
         router = _get_router()
         tracker = start_tracker(router)
         tracker.poll_once()
 
-        # Initialize LAN access control chain and rebuild rules
+        # Reconcile router LAN execution layer (UCI ipsets + rules) with the
+        # restored / local intent. Replaces lan_init_chain + _rebuild_lan_rules
+        # + _reconcile_no_internet_rules.
         try:
-            router.lan_init_chain()
-            _rebuild_lan_rules()
+            _sync_lan_to_router()
         except Exception as e:
-            log.warning(f"LAN access control init failed: {e}")
-
-        # Stage 9: reconcile NoInternet firewall rules with local assignments
-        try:
-            _reconcile_no_internet_rules()
-        except Exception as e:
-            log.warning(f"NoInternet reconcile on unlock failed: {e}")
+            log.warning(f"LAN sync on unlock failed: {e}")
 
         # Start auto-optimizer (Stage 11: uses live router health via build_profile_list)
         try:
@@ -426,7 +540,7 @@ def build_profile_list(router, store_data: dict, proton=None) -> list:
             "server": _resolve_server_live(proton, local),
             "server_scope": local.get("server_scope", {"type": "server"}),
             "options": local.get("options", {}),
-            "lan_access": local.get("lan_access", {"outbound": "allowed", "inbound": "allowed"}),
+            "lan_access": _normalize_lan_access(local.get("lan_access")),
             "router_info": ri,
             "device_count": 0,  # filled below
         }
@@ -451,8 +565,7 @@ def build_profile_list(router, store_data: dict, proton=None) -> list:
         ghost["kill_switch"] = False
         ghost["_ghost"] = True
         ghost.pop("status", None)
-        if "lan_access" not in ghost:
-            ghost["lan_access"] = {"outbound": "allowed", "inbound": "allowed"}
+        ghost["lan_access"] = _normalize_lan_access(ghost.get("lan_access"))
         ghost["device_count"] = 0
         vpn_profiles.append(ghost)
 
@@ -465,8 +578,7 @@ def build_profile_list(router, store_data: dict, proton=None) -> list:
             1 for mac, pid in store_data.get("device_assignments", {}).items()
             if pid == p["id"]
         )
-        if "lan_access" not in p:
-            p["lan_access"] = {"outbound": "allowed", "inbound": "allowed"}
+        p["lan_access"] = _normalize_lan_access(p.get("lan_access"))
         vpn_profiles.append(p)
 
     return vpn_profiles
@@ -767,40 +879,17 @@ def api_delete_profile(profile_id):
         except Exception:
             pass  # Best effort cleanup
 
-    elif profile["type"] == "no_internet":
-        # Remove firewall rules for all assigned devices
-        data = ps.load()
-        for mac, pid in data["device_assignments"].items():
-            if pid == profile_id:
-                try:
-                    router.remove_device_no_internet(mac)
-                except Exception:
-                    pass
-
     log.info(f"Deleted profile '{profile['name']}' (id={profile_id})")
 
-    # Clean up LAN ipsets for this group
-    short_id = profile_id[:8]
-    try:
-        router.lan_destroy_group_ipsets(short_id)
-    except Exception:
-        pass
-
-    deleted_type = profile["type"]
     ps.delete_profile(profile_id)
 
-    # Rebuild LAN rules (device overrides cleaned up by delete_profile)
+    # Sync router LAN state — handles ipset removal, rule deletion, and
+    # NoInternet reconciliation in a single pass via the new UCI execution
+    # layer (membership + structural diff against live router state).
     try:
-        _rebuild_lan_rules()
+        _sync_lan_to_router()
     except Exception as e:
-        log.warning(f"LAN rule rebuild after delete failed: {e}")
-
-    # Stage 9: reconcile NoInternet firewall rules if a no_internet profile was deleted
-    if deleted_type == "no_internet":
-        try:
-            _reconcile_no_internet_rules()
-        except Exception as e:
-            log.warning(f"NoInternet reconcile after delete failed: {e}")
+        log.warning(f"LAN sync after delete failed: {e}")
 
     return jsonify({"success": True})
 
@@ -1263,6 +1352,8 @@ def _build_devices_live(router) -> list:
         d["lan_outbound"] = eff["outbound"]
         d["lan_inbound"] = eff["inbound"]
         d["lan_inherited"] = eff["inherited"]
+        d["lan_outbound_allow"] = eff.get("outbound_allow", [])
+        d["lan_inbound_allow"] = eff.get("inbound_allow", [])
         d["last_seen"] = None  # legacy field, no longer tracked
         out.append(d)
     return out
@@ -1313,18 +1404,9 @@ def api_assign_device(mac):
     router = _get_router()
     store_data = ps.load()
 
-    # Find current assignment from BOTH sources (router for VPN, local for non-VPN)
-    current_map = _resolve_device_assignments(router, store_data)
-    old_pid = current_map.get(mac)
-
-    # Tear down any existing assignment cleanly
-    if old_pid:
-        old_profile = ps.get_profile(old_pid)
-        if old_profile:
-            if old_profile["type"] == "no_internet":
-                router.remove_device_no_internet(mac)
-            # For VPN: removed below via remove_device_from_all_vpn
-    # Always clear any router VPN rule containing this MAC (idempotent)
+    # Always clear any router VPN rule containing this MAC (idempotent).
+    # NoInternet membership is handled by the LAN sync at the end (single
+    # ipset, derived from local assignments).
     try:
         router.remove_device_from_all_vpn(mac)
     except Exception as e:
@@ -1343,40 +1425,21 @@ def api_assign_device(mac):
         if new_profile["type"] == "vpn" and new_profile.get("router_info"):
             # Router is the source for VPN assignments
             router.set_device_vpn(mac, new_profile["router_info"]["rule_name"])
-        elif new_profile["type"] == "no_internet":
-            # Local store is the source for assignment; the firewall rule is
-            # the execution layer. Look up the device IP from live DHCP leases
-            # (Stage 8: no longer cached locally).
-            ps.assign_device(mac, profile_id)
-            try:
-                leases = router.get_dhcp_leases()
-                ip = next((l["ip"] for l in leases if l["mac"].lower() == mac), "")
-                if ip:
-                    router.set_device_no_internet(mac, ip)
-            except Exception as e:
-                log.warning(f"NoInternet firewall apply for {mac} failed: {e}")
         else:
-            # no_vpn — local store only
+            # no_vpn / no_internet — local store; LAN sync below applies the
+            # router-side execution (NoInternet ipset membership).
             ps.assign_device(mac, profile_id)
 
     target = ps.get_profile(profile_id)["name"] if profile_id and ps.get_profile(profile_id) else "Unassigned"
     log.info(f"Device {mac} assigned to '{target}'")
 
-    # Stage 9: reconcile NoInternet rules if either side touched no_internet
-    old_profile = ps.get_profile(old_pid) if old_pid else None
-    new_profile_obj = ps.get_profile(profile_id) if profile_id else None
-    if (old_profile and old_profile.get("type") == "no_internet") or \
-       (new_profile_obj and new_profile_obj.get("type") == "no_internet"):
-        try:
-            _reconcile_no_internet_rules()
-        except Exception as e:
-            log.warning(f"NoInternet reconcile after assign failed: {e}")
-
-    # Rebuild LAN rules (device changed groups, effective settings may differ)
+    # Single sync handles both LAN access (per-group ipsets) and NoInternet
+    # (the global fvpn_noint_ips ipset). Replaces _rebuild_lan_rules +
+    # _reconcile_no_internet_rules.
     try:
-        _rebuild_lan_rules()
+        _sync_lan_to_router()
     except Exception as e:
-        log.warning(f"LAN rule rebuild after assignment failed: {e}")
+        log.warning(f"LAN sync after assignment failed: {e}")
 
     # Invalidate the device cache so the next /api/devices call sees the new assignment
     _invalidate_device_cache()
@@ -1400,9 +1463,14 @@ def api_set_profile_lan_access(profile_id):
     data = request.json
     outbound = data.get("outbound", "allowed")
     inbound = data.get("inbound", "allowed")
+    outbound_allow = data.get("outbound_allow", [])
+    inbound_allow = data.get("inbound_allow", [])
 
     try:
-        result = ps.set_profile_lan_access(profile_id, outbound, inbound)
+        result = ps.set_profile_lan_access(
+            profile_id, outbound, inbound,
+            outbound_allow=outbound_allow, inbound_allow=inbound_allow,
+        )
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
@@ -1410,9 +1478,9 @@ def api_set_profile_lan_access(profile_id):
         return jsonify({"error": "Profile not found"}), 404
 
     try:
-        _rebuild_lan_rules()
+        _sync_lan_to_router()
     except Exception as e:
-        log.warning(f"LAN rule rebuild failed: {e}")
+        log.warning(f"LAN sync failed: {e}")
 
     log.info(f"LAN access for profile '{result['name']}': out={outbound}, in={inbound}")
     return jsonify({"success": True, "lan_access": result.get("lan_access")})
@@ -1433,16 +1501,21 @@ def api_set_device_lan_access(mac):
     data = request.json
     outbound = data.get("outbound")
     inbound = data.get("inbound")
+    outbound_allow = data.get("outbound_allow", [])
+    inbound_allow = data.get("inbound_allow", [])
 
     try:
-        ps.set_device_lan_override(mac, outbound, inbound)
+        ps.set_device_lan_override(
+            mac, outbound, inbound,
+            outbound_allow=outbound_allow, inbound_allow=inbound_allow,
+        )
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
     try:
-        _rebuild_lan_rules()
+        _sync_lan_to_router()
     except Exception as e:
-        log.warning(f"LAN rule rebuild failed: {e}")
+        log.warning(f"LAN sync failed: {e}")
 
     log.info(f"LAN override for {mac}: out={outbound}, in={inbound}")
     return jsonify({"success": True})
@@ -1506,10 +1579,10 @@ def api_stream():
                     if p.get("name"):
                         profile_names[pid] = p["name"]
 
-                # Rebuild LAN rules if device IPs changed
+                # Sync LAN rules if device IPs changed
                 if tracker and tracker.lan_rules_stale:
                     try:
-                        _rebuild_lan_rules()
+                        _sync_lan_to_router()
                         tracker.lan_rules_stale = False
                     except Exception:
                         pass

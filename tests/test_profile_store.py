@@ -234,12 +234,18 @@ class TestProfileLanAccess:
         p = ps.create_profile("VPN1", "vpn")
         ps.set_profile_lan_access(p["id"], "group_only", "blocked")
         result = ps.get_profile_lan_access(p["id"])
-        assert result == {"outbound": "group_only", "inbound": "blocked"}
+        assert result["outbound"] == "group_only"
+        assert result["inbound"] == "blocked"
+        assert result["outbound_allow"] == []
+        assert result["inbound_allow"] == []
 
     def test_default_is_allowed(self, tmp_store):
         p = ps.create_profile("VPN1", "vpn")
         result = ps.get_profile_lan_access(p["id"])
-        assert result == {"outbound": "allowed", "inbound": "allowed"}
+        assert result["outbound"] == "allowed"
+        assert result["inbound"] == "allowed"
+        assert result["outbound_allow"] == []
+        assert result["inbound_allow"] == []
 
     def test_invalid_value_raises(self, tmp_store):
         p = ps.create_profile("VPN1", "vpn")
@@ -250,12 +256,65 @@ class TestProfileLanAccess:
         result = ps.set_profile_lan_access("nonexistent", "allowed", "allowed")
         assert result is None
 
+    def test_set_with_allow_lists(self, tmp_store):
+        p = ps.create_profile("G1", "vpn")
+        other = ps.create_profile("G2", "vpn")
+        ps.set_profile_lan_access(
+            p["id"], "group_only", "group_only",
+            outbound_allow=["AA:BB:CC:DD:EE:FF"],  # MAC, gets lowercased
+            inbound_allow=[other["id"], "11:22:33:44:55:66"],
+        )
+        result = ps.get_profile_lan_access(p["id"])
+        assert result["outbound_allow"] == ["aa:bb:cc:dd:ee:ff"]
+        assert other["id"] in result["inbound_allow"]
+        assert "11:22:33:44:55:66" in result["inbound_allow"]
+
+
+class TestAllowListValidation:
+    def test_invalid_mac_rejected(self, tmp_store):
+        p = ps.create_profile("G1", "vpn")
+        with pytest.raises(ValueError):
+            ps.set_profile_lan_access(
+                p["id"], "group_only", "allowed",
+                outbound_allow=["not-a-mac"],
+            )
+
+    def test_unknown_profile_id_rejected(self, tmp_store):
+        p = ps.create_profile("G1", "vpn")
+        with pytest.raises(ValueError):
+            ps.set_profile_lan_access(
+                p["id"], "group_only", "allowed",
+                outbound_allow=["nonexistent-profile-id"],
+            )
+
+    def test_self_reference_rejected(self, tmp_store):
+        # A group cannot reference itself in its own allow list (it's already
+        # the source of "group_only" semantics).
+        p = ps.create_profile("G1", "vpn")
+        with pytest.raises(ValueError):
+            ps.set_profile_lan_access(
+                p["id"], "group_only", "allowed",
+                outbound_allow=[p["id"]],
+            )
+
+    def test_dedups_entries(self, tmp_store):
+        p = ps.create_profile("G1", "vpn")
+        ps.set_profile_lan_access(
+            p["id"], "group_only", "allowed",
+            outbound_allow=["aa:bb:cc:dd:ee:ff", "AA:BB:CC:DD:EE:FF"],
+        )
+        result = ps.get_profile_lan_access(p["id"])
+        assert result["outbound_allow"] == ["aa:bb:cc:dd:ee:ff"]
+
 
 class TestDeviceLanOverride:
     def test_set_and_get(self, tmp_store):
         ps.set_device_lan_override("aa:bb:cc:dd:ee:ff", "blocked", "allowed")
         result = ps.get_device_lan_override("aa:bb:cc:dd:ee:ff")
-        assert result == {"outbound": "blocked", "inbound": "allowed"}
+        assert result["outbound"] == "blocked"
+        assert result["inbound"] == "allowed"
+        assert result["outbound_allow"] == []
+        assert result["inbound_allow"] == []
 
     def test_none_clears_override(self, tmp_store):
         ps.set_device_lan_override("aa:bb:cc:dd:ee:ff", "blocked", None)
@@ -265,6 +324,28 @@ class TestDeviceLanOverride:
     def test_invalid_value_raises(self, tmp_store):
         with pytest.raises(ValueError):
             ps.set_device_lan_override("aa:bb:cc:dd:ee:ff", "bad", None)
+
+    def test_only_allow_list_persisted(self, tmp_store):
+        # Partial override with no state change but with allow lists must
+        # persist (not be auto-cleared as if empty).
+        p = ps.create_profile("G1", "vpn")
+        ps.set_device_lan_override(
+            "aa:bb:cc:dd:ee:ff", None, None,
+            inbound_allow=[p["id"]],
+        )
+        ovr = ps.get_device_lan_override("aa:bb:cc:dd:ee:ff")
+        assert ovr is not None
+        assert ovr["outbound"] is None
+        assert ovr["inbound"] is None
+        assert ovr["inbound_allow"] == [p["id"]]
+
+    def test_fully_empty_clears(self, tmp_store):
+        ps.set_device_lan_override("aa:bb:cc:dd:ee:ff", "blocked", None)
+        ps.set_device_lan_override(
+            "aa:bb:cc:dd:ee:ff", None, None,
+            outbound_allow=[], inbound_allow=[],
+        )
+        assert ps.get_device_lan_override("aa:bb:cc:dd:ee:ff") is None
 
 
 class TestEffectiveLanAccess:
@@ -293,6 +374,41 @@ class TestEffectiveLanAccess:
         assert result["outbound"] == "allowed"
         assert result["inbound"] == "allowed"
 
+    def test_allow_lists_merge_additively(self, tmp_store):
+        # Group has one entry, device override adds another → effective union.
+        p = ps.create_profile("Trusted", "vpn")
+        ps.set_profile_lan_access(
+            p["id"], "group_only", "group_only",
+            inbound_allow=["aa:aa:aa:aa:aa:aa"],
+        )
+        ps.assign_device("11:22:33:44:55:66", p["id"])
+        ps.set_device_lan_override(
+            "11:22:33:44:55:66", None, None,
+            inbound_allow=["bb:bb:bb:bb:bb:bb"],
+        )
+        result = ps.get_effective_lan_access("11:22:33:44:55:66")
+        values = {e["value"]: e["source"] for e in result["inbound_allow"]}
+        assert values == {
+            "aa:aa:aa:aa:aa:aa": "group",
+            "bb:bb:bb:bb:bb:bb": "device",
+        }
+
+    def test_allow_lists_dedup_across_layers(self, tmp_store):
+        p = ps.create_profile("G1", "vpn")
+        ps.set_profile_lan_access(
+            p["id"], "group_only", "group_only",
+            inbound_allow=["aa:aa:aa:aa:aa:aa"],
+        )
+        ps.assign_device("11:22:33:44:55:66", p["id"])
+        ps.set_device_lan_override(
+            "11:22:33:44:55:66", None, None,
+            inbound_allow=["aa:aa:aa:aa:aa:aa"],
+        )
+        result = ps.get_effective_lan_access("11:22:33:44:55:66")
+        # Same MAC → dedup; group source wins (it was added first).
+        assert len(result["inbound_allow"]) == 1
+        assert result["inbound_allow"][0]["source"] == "group"
+
 
 class TestDeleteProfileCleansLanOverrides:
     def test_overrides_removed_on_delete(self, tmp_store):
@@ -301,3 +417,27 @@ class TestDeleteProfileCleansLanOverrides:
         ps.set_device_lan_override("aa:bb:cc:dd:ee:ff", "blocked", "blocked")
         ps.delete_profile(p["id"])
         assert ps.get_device_lan_override("aa:bb:cc:dd:ee:ff") is None
+
+    def test_profile_id_stripped_from_other_groups_allow_lists(self, tmp_store):
+        a = ps.create_profile("A", "vpn")
+        b = ps.create_profile("B", "vpn")
+        ps.set_profile_lan_access(
+            a["id"], "group_only", "group_only",
+            inbound_allow=[b["id"]],
+        )
+        ps.delete_profile(b["id"])
+        result = ps.get_profile_lan_access(a["id"])
+        assert b["id"] not in result["inbound_allow"]
+
+    def test_profile_id_stripped_from_device_override_allow_lists(self, tmp_store):
+        a = ps.create_profile("A", "vpn")
+        b = ps.create_profile("B", "vpn")
+        ps.assign_device("11:22:33:44:55:66", a["id"])
+        ps.set_device_lan_override(
+            "11:22:33:44:55:66", None, None,
+            inbound_allow=[b["id"]],
+        )
+        ps.delete_profile(b["id"])
+        ovr = ps.get_device_lan_override("11:22:33:44:55:66")
+        assert ovr is not None
+        assert b["id"] not in ovr["inbound_allow"]
