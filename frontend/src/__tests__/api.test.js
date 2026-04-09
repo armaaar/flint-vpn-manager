@@ -5,8 +5,8 @@ import { api } from '../lib/api.js';
 const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);
 
-function mockResponse(data) {
-  mockFetch.mockResolvedValueOnce({ json: () => Promise.resolve(data) });
+function mockResponse(data, ok = true) {
+  mockFetch.mockResolvedValueOnce({ json: () => Promise.resolve(data), ok });
 }
 
 beforeEach(() => {
@@ -144,5 +144,17 @@ describe('api.refresh', () => {
     await api.refresh();
     expect(mockFetch.mock.calls[0][0]).toBe('/api/refresh');
     expect(mockFetch.mock.calls[0][1].method).toBe('POST');
+  });
+});
+
+describe('error handling', () => {
+  it('throws on HTTP error with backend message', async () => {
+    mockResponse({ error: 'Session locked' }, false);
+    await expect(api.getStatus()).rejects.toThrow('Session locked');
+  });
+
+  it('throws generic message when no error field', async () => {
+    mockResponse({}, false);
+    await expect(api.getStatus()).rejects.toThrow('Request failed');
   });
 });

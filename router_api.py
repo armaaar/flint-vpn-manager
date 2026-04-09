@@ -13,11 +13,21 @@ Architecture:
     - Changes applied via `rtp2.sh` (route policy) or `ifup`/`ifdown`
 """
 
-import re
 import time
 from typing import Optional
 
 import paramiko
+
+from consts import (
+    HEALTH_AMBER,
+    HEALTH_CONNECTING,
+    HEALTH_GREEN,
+    HEALTH_RED,
+    PROTO_OPENVPN,
+    PROTO_WIREGUARD,
+    PROTO_WIREGUARD_TCP,
+    PROTO_WIREGUARD_TLS,
+)
 
 # WireGuard mark base for route policy (matches rtp2.sh)
 WG_MARK_BASE = 0x1000
@@ -138,106 +148,107 @@ class RouterAPI:
                     continue
                 raise RuntimeError(f"SSH connection lost: {e}") from e
 
-    # ── DHCP Leases ───────────────────────────────────────────────────────
+    def _uci_batch(self, section, fields, commit, add_lists=None):
+        """Execute a batch of UCI set commands atomically.
+
+        Args:
+            section: Full UCI section path, e.g. "wireguard.peer_9001"
+            fields: Dict of field_name → value. Key "_type" emits "uci set section=value".
+            commit: UCI config to commit, e.g. "wireguard"
+            add_lists: Optional dict of field_name → value for "uci add_list" commands.
+        """
+        cmds = []
+        for key, val in fields.items():
+            if key == "_type":
+                cmds.append(f"uci set {section}={val}")
+            else:
+                cmds.append(f"uci set {section}.{key}='{val}'")
+        for key, val in (add_lists or {}).items():
+            cmds.append(f"uci add_list {section}.{key}='{val}'")
+        cmds.append(f"uci commit {commit}")
+        self.exec(" && ".join(cmds))
+
+    @staticmethod
+    def _parse_uci_show(raw, prefix):
+        """Parse 'uci show <config>' output into {section: {field: value}}.
+
+        Args:
+            raw: Raw output from 'uci show ...'
+            prefix: The config prefix to strip, e.g. "route_policy"
+
+        Returns:
+            Dict mapping section names to field dicts. The "_type" key holds the
+            section type. Fields that appear multiple times become lists.
+        """
+        sections = {}
+        dot_prefix = prefix + "."
+        for line in raw.strip().splitlines():
+            line = line.strip()
+            if not line or "=" not in line:
+                continue
+            key, val = line.split("=", 1)
+            val = val.strip("'")
+            if not key.startswith(dot_prefix):
+                continue
+            after = key[len(dot_prefix):]
+            if "." in after:
+                section, field = after.split(".", 1)
+            else:
+                section = after
+                field = None
+            entry = sections.setdefault(section, {})
+            if field is None:
+                entry["_type"] = val
+            elif field in entry:
+                cur = entry[field]
+                if isinstance(cur, list):
+                    cur.append(val)
+                else:
+                    entry[field] = [cur, val]
+            else:
+                entry[field] = val
+        return sections
+
+    # ── Facade Properties ────────────────────────────────────────────────
+    #
+    # Lazy-initialized sub-modules that group related methods. The original
+    # methods are kept below as thin delegates for backward compatibility.
+
+    @property
+    def policy(self):
+        if not hasattr(self, "_policy_facade"):
+            from router_policy import RouterPolicy
+            self._policy_facade = RouterPolicy(self)
+        return self._policy_facade
+
+    @property
+    def tunnel(self):
+        if not hasattr(self, "_tunnel_facade"):
+            from router_tunnel import RouterTunnel
+            self._tunnel_facade = RouterTunnel(self)
+        return self._tunnel_facade
+
+    @property
+    def firewall(self):
+        if not hasattr(self, "_firewall_facade"):
+            from router_firewall import RouterFirewall
+            self._firewall_facade = RouterFirewall(self)
+        return self._firewall_facade
+
+    @property
+    def devices(self):
+        if not hasattr(self, "_devices_facade"):
+            from router_devices import RouterDevices
+            self._devices_facade = RouterDevices(self, self.policy)
+        return self._devices_facade
+
+    # ── Delegates: Devices ───────────────────────────────────────────────
 
     def get_dhcp_leases(self) -> list[dict]:
-        """Parse DHCP leases from /tmp/dhcp.leases.
-
-        Returns list of dicts with: mac, ip, hostname, expiry (unix timestamp).
-        """
-        raw = self.exec("cat /tmp/dhcp.leases 2>/dev/null || echo ''")
-        leases = []
-        for line in raw.strip().splitlines():
-            if not line.strip():
-                continue
-            parts = line.split()
-            if len(parts) >= 4:
-                leases.append({
-                    "expiry": int(parts[0]),
-                    "mac": parts[1].lower(),
-                    "ip": parts[2],
-                    "hostname": parts[3] if parts[3] != "*" else "",
-                })
-        return leases
+        return self.devices.get_dhcp_leases()
 
     def get_client_details(self) -> dict:
-        """Get rich client data from GL.iNet's client tracking.
-
-        Returns dict keyed by lowercase MAC with: name, alias, device_class,
-        online, iface (2.4G/5G/cable), rx (bytes/s), tx (bytes/s),
-        total_rx, total_tx, ip, signal_dbm, link_speed_mbps.
-        """
-        result = {}
-
-        # GL.iNet client list (live stats: speed, traffic, online status)
-        try:
-            raw = self.exec("ubus call gl-clients list 2>/dev/null || echo '{}'")
-            import json
-            data = json.loads(raw)
-            for mac_upper, info in data.get("clients", {}).items():
-                mac = mac_upper.lower()
-                result[mac] = {
-                    "name": info.get("name", ""),
-                    "online": info.get("online", False),
-                    "iface": info.get("iface", ""),
-                    "rx_speed": info.get("rx", 0),      # bytes/s
-                    "tx_speed": info.get("tx", 0),      # bytes/s
-                    "total_rx": int(info.get("total_rx", 0)),
-                    "total_tx": int(info.get("total_tx", 0)),
-                    "ip": info.get("ip", ""),
-                }
-        except Exception:
-            pass
-
-        # GL.iNet client config (user-set alias and device class)
-        try:
-            raw = self.exec(
-                "uci show gl-client 2>/dev/null | grep -E 'mac|alias|class'"
-            )
-            current_mac = None
-            for line in raw.strip().splitlines():
-                if ".mac=" in line:
-                    current_mac = line.split("=", 1)[1].strip("'").lower()
-                    if current_mac not in result:
-                        result[current_mac] = {}
-                elif ".alias=" in line and current_mac:
-                    result[current_mac]["alias"] = line.split("=", 1)[1].strip("'")
-                elif ".class=" in line and current_mac:
-                    result[current_mac]["device_class"] = line.split("=", 1)[1].strip("'")
-        except Exception:
-            pass
-
-        # WiFi signal strength from iwinfo
-        try:
-            raw = self.exec(
-                "for iface in $(iwinfo 2>&1 | grep ESSID | awk '{print $1}'); do "
-                "iwinfo $iface assoclist 2>&1; done"
-            )
-            current_mac = None
-            for line in raw.strip().splitlines():
-                line = line.strip()
-                # MAC line: "A4:F9:33:1C:B6:78  -18 dBm / ..."
-                if "dBm" in line and len(line) > 17 and line[2] == ":":
-                    parts = line.split()
-                    current_mac = parts[0].lower()
-                    if current_mac not in result:
-                        result[current_mac] = {}
-                    try:
-                        result[current_mac]["signal_dbm"] = int(parts[1])
-                    except (ValueError, IndexError):
-                        pass
-                # TX line with link speed
-                elif line.startswith("TX:") and current_mac:
-                    try:
-                        speed_str = line.split(",")[0].replace("TX:", "").strip()
-                        speed = float(speed_str.split()[0])
-                        result[current_mac]["link_speed_mbps"] = speed
-                    except (ValueError, IndexError):
-                        pass
-        except Exception:
-            pass
-
-        return result
+        return self.devices.get_client_details()
 
     # ── WireGuard Config Management ───────────────────────────────────────
 
@@ -333,21 +344,20 @@ class RouterAPI:
         group_id = "1957"  # GL.iNet's "FromApp" group for manual configs
 
         # Create WireGuard peer config (batched)
-        self.exec(
-            f"uci set wireguard.{peer_id}=peers && "
-            f"uci set wireguard.{peer_id}.group_id='{group_id}' && "
-            f"uci set wireguard.{peer_id}.name='{profile_name}' && "
-            f"uci set wireguard.{peer_id}.address_v4='{address}' && "
-            f"uci set wireguard.{peer_id}.private_key='{private_key}' && "
-            f"uci set wireguard.{peer_id}.public_key='{public_key}' && "
-            f"uci set wireguard.{peer_id}.end_point='{endpoint}' && "
-            f"uci set wireguard.{peer_id}.allowed_ips='{allowed_ips}' && "
-            f"uci set wireguard.{peer_id}.dns='{dns}' && "
-            f"uci set wireguard.{peer_id}.presharedkey='' && "
-            f"uci set wireguard.{peer_id}.mtu='{mtu}' && "
-            f"uci set wireguard.{peer_id}.persistent_keepalive='{keepalive}' && "
-            "uci commit wireguard"
-        )
+        self._uci_batch(f"wireguard.{peer_id}", {
+            "_type": "peers",
+            "group_id": group_id,
+            "name": profile_name,
+            "address_v4": address,
+            "private_key": private_key,
+            "public_key": public_key,
+            "end_point": endpoint,
+            "allowed_ips": allowed_ips,
+            "dns": dns,
+            "presharedkey": "",
+            "mtu": str(mtu),
+            "persistent_keepalive": str(keepalive),
+        }, "wireguard")
 
         # Create route policy rule (batched)
         # IMPORTANT: via_type MUST be 'wireguard' (not 'wgclient') for rtp2.sh
@@ -356,19 +366,18 @@ class RouterAPI:
         # We do NOT create the network interface ourselves — vpn-client does that.
         tunnel_id = self._next_tunnel_id()
         rule_name = f"fvpn_rule_{peer_num}"
-        self.exec(
-            f"uci set route_policy.{rule_name}=rule && "
-            f"uci set route_policy.{rule_name}.name='{profile_name}' && "
-            f"uci set route_policy.{rule_name}.enabled='0' && "
-            f"uci set route_policy.{rule_name}.killswitch='1' && "
-            f"uci set route_policy.{rule_name}.tunnel_id='{tunnel_id}' && "
-            f"uci set route_policy.{rule_name}.via_type='wireguard' && "
-            f"uci set route_policy.{rule_name}.peer_id='{peer_num}' && "
-            f"uci set route_policy.{rule_name}.group_id='{group_id}' && "
-            f"uci set route_policy.{rule_name}.from_type='ipset' && "
-            f"uci set route_policy.{rule_name}.from='src_mac_{tunnel_id}' && "
-            "uci commit route_policy"
-        )
+        self._uci_batch(f"route_policy.{rule_name}", {
+            "_type": "rule",
+            "name": profile_name,
+            "enabled": "0",
+            "killswitch": "1",
+            "tunnel_id": str(tunnel_id),
+            "via_type": "wireguard",
+            "peer_id": str(peer_num),
+            "group_id": group_id,
+            "from_type": "ipset",
+            "from": f"src_mac_{tunnel_id}",
+        }, "route_policy")
 
         return {
             "peer_id": peer_id,
@@ -376,7 +385,7 @@ class RouterAPI:
             "group_id": group_id,
             "tunnel_id": tunnel_id,
             "rule_name": rule_name,
-            "vpn_protocol": "wireguard",
+            "vpn_protocol": PROTO_WIREGUARD,
         }
 
     # ── OpenVPN Config Management ──────────────────────────────────────────
@@ -446,33 +455,31 @@ class RouterAPI:
         self.exec(f"chmod 600 {profile_dir}/auth/username_password.txt")
 
         # Create UCI client entry
-        self.exec(
-            f"uci set ovpnclient.{client_uci_id}=clients && "
-            f"uci set ovpnclient.{client_uci_id}.group_id='{group_id}' && "
-            f"uci set ovpnclient.{client_uci_id}.client_id='{client_num}' && "
-            f"uci set ovpnclient.{client_uci_id}.name='{profile_name}' && "
-            f"uci set ovpnclient.{client_uci_id}.path='{profile_dir}/config.ovpn' && "
-            f"uci set ovpnclient.{client_uci_id}.proto='udp' && "
-            f"uci set ovpnclient.{client_uci_id}.client_auth='1' && "
-            "uci commit ovpnclient"
-        )
+        self._uci_batch(f"ovpnclient.{client_uci_id}", {
+            "_type": "clients",
+            "group_id": group_id,
+            "client_id": str(client_num),
+            "name": profile_name,
+            "path": f"{profile_dir}/config.ovpn",
+            "proto": "udp",
+            "client_auth": "1",
+        }, "ovpnclient")
 
         # Create route policy rule
         tunnel_id = self._next_tunnel_id()
         rule_name = f"fvpn_rule_ovpn_{client_num}"
-        self.exec(
-            f"uci set route_policy.{rule_name}=rule && "
-            f"uci set route_policy.{rule_name}.name='{profile_name}' && "
-            f"uci set route_policy.{rule_name}.enabled='0' && "
-            f"uci set route_policy.{rule_name}.killswitch='1' && "
-            f"uci set route_policy.{rule_name}.tunnel_id='{tunnel_id}' && "
-            f"uci set route_policy.{rule_name}.via_type='openvpn' && "
-            f"uci set route_policy.{rule_name}.group_id='{group_id}' && "
-            f"uci set route_policy.{rule_name}.client_id='{client_num}' && "
-            f"uci set route_policy.{rule_name}.from_type='ipset' && "
-            f"uci set route_policy.{rule_name}.from='src_mac_{tunnel_id}' && "
-            "uci commit route_policy"
-        )
+        self._uci_batch(f"route_policy.{rule_name}", {
+            "_type": "rule",
+            "name": profile_name,
+            "enabled": "0",
+            "killswitch": "1",
+            "tunnel_id": str(tunnel_id),
+            "via_type": "openvpn",
+            "group_id": group_id,
+            "client_id": str(client_num),
+            "from_type": "ipset",
+            "from": f"src_mac_{tunnel_id}",
+        }, "route_policy")
 
         return {
             "client_id": str(client_num),
@@ -480,7 +487,7 @@ class RouterAPI:
             "group_id": group_id,
             "tunnel_id": tunnel_id,
             "rule_name": rule_name,
-            "vpn_protocol": "openvpn",
+            "vpn_protocol": PROTO_OPENVPN,
         }
 
     def delete_openvpn_config(self, client_uci_id: str, rule_name: str):
@@ -755,7 +762,7 @@ class RouterAPI:
             "table_num": table_num,
             "ipset_name": ipset_name,
             "socket_type": socket_type,
-            "vpn_protocol": f"wireguard-{socket_type}",
+            "vpn_protocol": {"tcp": PROTO_WIREGUARD_TCP, "tls": PROTO_WIREGUARD_TLS}[socket_type],
             "rule_name": f"fvpn_pwg_{iface}",  # pseudo rule_name for profile_store
         }
 
@@ -1089,771 +1096,127 @@ start_service() {
         # Check interface exists and is UP
         link = self.exec(f"ip link show {iface} 2>/dev/null | head -1")
         if iface not in link or "UP" not in link:
-            return "red"
+            return HEALTH_RED
 
         # Check handshake age (same logic as get_tunnel_health)
         hs_output = self.exec(f"wg show {iface} latest-handshakes 2>/dev/null").strip()
         if not hs_output:
-            return "connecting"
+            return HEALTH_CONNECTING
 
         try:
             parts = hs_output.split("\t")
             if len(parts) >= 2:
                 hs_time = int(parts[1])
                 if hs_time == 0:
-                    return "connecting"
+                    return HEALTH_CONNECTING
                 age = int(time.time()) - hs_time
                 if age <= 180:
-                    return "green"
+                    return HEALTH_GREEN
                 elif age <= 600:
-                    return "amber"
+                    return HEALTH_AMBER
         except (ValueError, IndexError):
             pass
-        return "red"
+        return HEALTH_RED
 
-    # ── Tunnel Control ────────────────────────────────────────────────────
-    #
-    # CRITICAL: We NEVER create network interfaces (wgclientN) directly.
-    # We NEVER call rtp2.sh directly. We NEVER call ifup/ifdown.
-    #
-    # The GL.iNet vpn-client system (rtp2.sh + setup_instance_via.lua)
-    # manages network interfaces. We only:
-    #   1. Set route policy rules (enabled/disabled, via_type, peer_id, etc.)
-    #   2. Run `/etc/init.d/vpn-client restart` to apply changes
-    #
-    # The vpn-client reads our rules, finds the matching wireguard peer,
-    # creates/destroys the network interface, and sets up routing.
+    # ── Delegates: Tunnel ───────────────────────────────────────────────
 
     def bring_tunnel_up(self, rule_name: str, **_kwargs):
-        """Bring a VPN tunnel up by enabling its route policy rule.
-
-        The vpn-client service will create the network interface and
-        start the WireGuard tunnel automatically.
-        """
-        # Verify the rule exists
-        rule_exists = self.exec(
-            f"uci get route_policy.{rule_name}.tunnel_id 2>/dev/null || echo 'MISSING'"
-        ).strip()
-        if rule_exists == "MISSING":
-            raise RuntimeError(f"Route policy rule {rule_name} does not exist.")
-
-        # Enable the rule
-        self.exec(
-            f"uci set route_policy.{rule_name}.enabled='1' && "
-            "uci commit route_policy"
-        )
-
-        # Let vpn-client create the interface and start the tunnel
-        self.exec("/etc/init.d/vpn-client restart")
+        return self.tunnel.bring_tunnel_up(rule_name, **_kwargs)
 
     def bring_tunnel_down(self, rule_name: str, **_kwargs):
-        """Bring a VPN tunnel down by disabling its route policy rule.
-
-        Disables kill switch before disabling the rule to prevent devices
-        from losing internet when the tunnel goes down.
-        """
-        # Disable kill switch first so devices don't lose internet
-        self.exec(
-            f"uci set route_policy.{rule_name}.killswitch='0' && "
-            f"uci set route_policy.{rule_name}.enabled='0' && "
-            "uci commit route_policy"
-        )
-
-        # Let vpn-client clean up
-        self.exec("/etc/init.d/vpn-client restart")
-
-        # Restore kill switch setting (stays saved for next connect)
-        self.exec(
-            f"uci set route_policy.{rule_name}.killswitch='1' && "
-            "uci commit route_policy"
-        )
+        return self.tunnel.bring_tunnel_down(rule_name, **_kwargs)
 
     def get_rule_interface(self, rule_name: str) -> Optional[str]:
-        """Get the network interface name assigned to a rule by vpn-client.
-
-        Returns the interface name (e.g. 'wgclient1') or None if not assigned.
-        """
-        via = self.exec(
-            f"uci get route_policy.{rule_name}.via 2>/dev/null || echo ''"
-        ).strip()
-        return via if via and (via.startswith("wgclient") or via.startswith("ovpnclient")) else None
+        return self.tunnel.get_rule_interface(rule_name)
 
     def get_tunnel_status(self, rule_name: str) -> dict:
-        """Get tunnel status by rule name.
-
-        Returns dict with: up, connecting, interface, handshake_seconds_ago, rx_bytes, tx_bytes
-        """
-        result = {"up": False, "connecting": False, "interface": None, "handshake_seconds_ago": None, "rx_bytes": 0, "tx_bytes": 0}
-
-        # Check if rule is enabled
-        enabled = self.exec(
-            f"uci get route_policy.{rule_name}.enabled 2>/dev/null || echo '0'"
-        ).strip()
-        if enabled != "1":
-            return result
-
-        iface = self.get_rule_interface(rule_name)
-        if not iface:
-            # Rule enabled but no interface yet — connecting
-            result["connecting"] = True
-            return result
-
-        result["interface"] = iface
-
-        # Check if interface is up
-        up_check = self.exec(
-            f"ifstatus {iface} 2>/dev/null | "
-            "jsonfilter -e '@.up' 2>/dev/null || echo 'false'"
-        )
-        result["up"] = up_check.strip().lower() == "true"
-
-        if not result["up"]:
-            # Interface exists but not up — connecting
-            if iface.startswith("wgclient"):
-                state = self.exec(f"cat /tmp/wireguard/{iface}_state 2>/dev/null || echo ''").strip()
-                if state == "connecting":
-                    result["connecting"] = True
-            elif iface.startswith("ovpnclient"):
-                # Check if openvpn process is running for this interface
-                proc = self.exec(f"ps | grep 'openvpn.*{iface}' | grep -v grep | head -1").strip()
-                if proc:
-                    result["connecting"] = True
-            return result
-
-        if iface.startswith("wgclient"):
-            # WireGuard: get handshake info
-            wg_output = self.exec(f"wg show {iface} latest-handshakes 2>/dev/null || echo ''")
-            for line in wg_output.strip().splitlines():
-                parts = line.split()
-                if len(parts) >= 2:
-                    try:
-                        handshake_ts = int(parts[1])
-                        if handshake_ts > 0:
-                            result["handshake_seconds_ago"] = int(time.time()) - handshake_ts
-                    except ValueError:
-                        pass
-        elif iface.startswith("ovpnclient"):
-            # OpenVPN: interface is up = connected (no handshake concept)
-            # Set handshake to 0 so health shows green
-            result["handshake_seconds_ago"] = 0
-
-        # Get transfer stats
-        transfer = self.exec(f"wg show {iface} transfer 2>/dev/null || echo ''")
-        for line in transfer.strip().splitlines():
-            parts = line.split()
-            if len(parts) >= 3:
-                try:
-                    result["rx_bytes"] = int(parts[1])
-                    result["tx_bytes"] = int(parts[2])
-                except ValueError:
-                    pass
-
-        return result
+        return self.tunnel.get_tunnel_status(rule_name)
 
     def get_tunnel_health(self, rule_name: str) -> str:
-        """Get tunnel health as a color/status: green, amber, red, connecting.
+        return self.tunnel.get_tunnel_health(rule_name)
 
-        green: handshake within 3 minutes (or OVPN interface up)
-        amber: handshake 3-10 minutes ago
-        red: no handshake in 10+ minutes or tunnel down
-        connecting: tunnel is being established
-        """
-        status = self.get_tunnel_status(rule_name)
-        if status.get("connecting"):
-            return "connecting"
-        if not status["up"]:
-            return "red"
-        if status["handshake_seconds_ago"] is None:
-            return "red"
-        if status["handshake_seconds_ago"] <= 180:
-            return "green"
-        if status["handshake_seconds_ago"] <= 600:
-            return "amber"
-        return "red"
+    # ── Delegates: Device Policy ────────────────────────────────────────
 
-    # ── Device Policy (MAC → Tunnel) ──────────────────────────────────────
-
-    def _from_mac_tokens(self, rule_name: str) -> list:
-        """Return the raw MAC tokens stored in route_policy.{rule}.from_mac.
-
-        Preserves case so del_list can match exactly. UCI returns list values
-        as space-separated tokens; some configs use literal-quoted form.
-        """
-        raw = self.exec(
-            f"uci -q get route_policy.{rule_name}.from_mac 2>/dev/null || echo ''"
-        )
-        tokens = []
-        for token in raw.replace("'", " ").split():
-            token = token.strip()
-            if ":" in token and len(token) == 17:
-                tokens.append(token)
-        return tokens
+    def from_mac_tokens(self, rule_name: str) -> list:
+        return self.policy.from_mac_tokens(rule_name)
 
     def set_device_vpn(self, mac: str, rule_name: str):
-        """Add a device (by MAC) to a VPN tunnel's route policy rule.
-
-        Uses ipset for immediate effect (no daemon restart) plus uci commit
-        for persistence across reboots. Never calls rtp2.sh — that script
-        takes locks and can corrupt route policies.
-        """
-        mac = mac.lower()
-        existing_tokens = [t.lower() for t in self._from_mac_tokens(rule_name)]
-        if mac in existing_tokens:
-            return  # Already assigned
-        ipset_name = self.exec(
-            f"uci get route_policy.{rule_name}.from 2>/dev/null || echo ''"
-        ).strip()
-        self.exec(f"uci add_list route_policy.{rule_name}.from_mac='{mac}'")
-        self.exec("uci commit route_policy")
-        if ipset_name:
-            self.exec(f"ipset add {ipset_name} {mac} 2>/dev/null || true")
+        return self.devices.set_device_vpn(mac, rule_name)
 
     def remove_device_from_vpn(self, mac: str, rule_name: str):
-        """Remove a device (by MAC) from a VPN tunnel's route policy rule.
-
-        Matches the stored MAC token case-insensitively but uses the EXACT
-        stored case in `uci del_list` (UCI requires exact-match for list
-        entries). Also tries the ipset in both cases as a safety net.
-        """
-        mac_lower = mac.lower()
-        for token in self._from_mac_tokens(rule_name):
-            if token.lower() == mac_lower:
-                # Use the EXACT stored case for del_list to match
-                self.exec(
-                    f"uci del_list route_policy.{rule_name}.from_mac='{token}'"
-                )
-                self.exec("uci commit route_policy")
-                ipset_name = self.exec(
-                    f"uci get route_policy.{rule_name}.from 2>/dev/null || echo ''"
-                ).strip()
-                if ipset_name:
-                    # ipset is case-insensitive but try both for safety
-                    self.exec(f"ipset del {ipset_name} {token} 2>/dev/null || true")
-                    if token != mac_lower:
-                        self.exec(f"ipset del {ipset_name} {mac_lower} 2>/dev/null || true")
-                return  # Done — there's at most one entry per rule
+        return self.devices.remove_device_from_vpn(mac, rule_name)
 
     def remove_device_from_all_vpn(self, mac: str):
-        """Remove a device from ALL FlintVPN route policy rules AND proton-wg ipsets.
+        return self.devices.remove_device_from_all_vpn(mac)
 
-        Iterates every fvpn rule, matches the MAC case-insensitively, and
-        deletes using the EXACT stored case so UCI del_list succeeds.
-        Also removes from any proton-wg src_mac_* ipsets.
-        """
-        mac_lower = mac.lower()
-        mac_upper = mac.upper()
-        rules = self.get_flint_vpn_rules()
-        any_removed = False
-        for rule in rules:
-            rule_name = rule.get("rule_name", "")
-            if not rule_name:
-                continue
-            tokens = self._from_mac_tokens(rule_name)
-            for token in tokens:
-                if token.lower() == mac_lower:
-                    self.exec(
-                        f"uci del_list route_policy.{rule_name}.from_mac='{token}'"
-                    )
-                    ipset_name = self.exec(
-                        f"uci get route_policy.{rule_name}.from 2>/dev/null || echo ''"
-                    ).strip()
-                    if ipset_name:
-                        self.exec(f"ipset del {ipset_name} {token} 2>/dev/null || true")
-                        if token != mac_lower:
-                            self.exec(f"ipset del {ipset_name} {mac_lower} 2>/dev/null || true")
-                    any_removed = True
-                    break  # next rule
-        if any_removed:
-            self.exec("uci commit route_policy")
-
-        # Also remove from proton-wg ipsets (managed outside route_policy)
-        pwg_ipsets = self.exec(
-            "ipset list -n 2>/dev/null | grep '^src_mac_'"
-        ).strip()
-        for ipset_name in pwg_ipsets.splitlines():
-            ipset_name = ipset_name.strip()
-            if not ipset_name:
-                continue
-            self.exec(
-                f"ipset del {ipset_name} {mac_upper} 2>/dev/null; "
-                f"ipset del {ipset_name} {mac_lower} 2>/dev/null; true"
-            )
-
-    # ── Kill Switch ───────────────────────────────────────────────────────
+    # ── Delegates: Kill Switch + Profile Naming ─────────────────────────
 
     def set_kill_switch(self, rule_name: str, enabled: bool):
-        """Enable or disable kill switch on a route policy rule.
-
-        When enabled and the tunnel drops, assigned devices lose WAN access.
-        Killswitch state is consulted by the next packet — no daemon restart
-        or rtp2.sh call needed. uci commit is sufficient for persistence.
-        """
-        self.exec(
-            f"uci set route_policy.{rule_name}.killswitch='{1 if enabled else 0}'"
-        )
-        self.exec("uci commit route_policy")
+        return self.policy.set_kill_switch(rule_name, enabled)
 
     def get_kill_switch(self, rule_name: str) -> bool:
-        """Read the live kill switch state for a route policy rule.
-
-        Source of truth is the router's UCI config. Never cached locally.
-        """
-        ks = self.exec(
-            f"uci get route_policy.{rule_name}.killswitch 2>/dev/null || echo '0'"
-        ).strip()
-        return ks == "1"
+        return self.policy.get_kill_switch(rule_name)
 
     def get_profile_name(self, rule_name: str) -> str:
-        """Read the live profile name from route_policy.{rule}.name."""
-        return self.exec(
-            f"uci get route_policy.{rule_name}.name 2>/dev/null || echo ''"
-        ).strip()
+        return self.policy.get_profile_name(rule_name)
 
     def get_device_assignments(self) -> dict:
-        """Return {mac: rule_name} for every device in any FlintVPN rule's from_mac.
-
-        Stage 5: VPN device assignments are router-canonical. This is the live
-        source of truth replacing local profile_store.device_assignments.
-
-        Recognizes both named sections (fvpn_rule_*) and anonymous sections
-        (@rule[N]) created by the GL.iNet UI when it edits a rule. Filters
-        to FlintVPN-managed rules by checking group_id.
-        """
-        rules = self.get_flint_vpn_rules()
-        out = {}
-        for rule in rules:
-            rule_name = rule.get("rule_name")
-            if not rule_name:
-                continue
-            # from_mac may already be parsed by uci show — could be a string
-            # like "'aa:bb:cc:dd:ee:ff' 'cc:dd:ee:ff:00:11'" or a single MAC.
-            raw = rule.get("from_mac", "")
-            if not raw:
-                continue
-            for token in raw.replace("'", " ").split():
-                token = token.strip().lower()
-                if ":" in token and len(token) == 17:
-                    out[token] = rule_name
-        return out
+        return self.devices.get_device_assignments()
 
     def rename_profile(self, rule_name: str, new_name: str,
                        peer_id: str = "", client_uci_id: str = ""):
-        """Rename a VPN profile by updating all 3 router UCI fields atomically.
+        return self.policy.rename_profile(rule_name, new_name, peer_id, client_uci_id)
 
-        Stage 4: profile name is router-canonical. The name lives in:
-          - route_policy.{rule_name}.name
-          - wireguard.{peer_id}.name        (for WireGuard tunnels)
-          - ovpnclient.{client_uci_id}.name (for OpenVPN tunnels)
-
-        At least one of peer_id or client_uci_id must be provided.
-        """
-        # Escape single quotes in the name to avoid shell injection
-        safe_name = new_name.replace("'", "'\\''")
-        cmds = [f"uci set route_policy.{rule_name}.name='{safe_name}'"]
-        commits = ["uci commit route_policy"]
-        if peer_id:
-            cmds.append(f"uci set wireguard.{peer_id}.name='{safe_name}'")
-            commits.append("uci commit wireguard")
-        if client_uci_id:
-            cmds.append(f"uci set ovpnclient.{client_uci_id}.name='{safe_name}'")
-            commits.append("uci commit ovpnclient")
-        self.exec(" && ".join(cmds + commits))
-
-    # ── Static DHCP Leases ────────────────────────────────────────────────
+    # ── Delegates: Static DHCP Leases ───────────────────────────────────
 
     def set_static_lease(self, mac: str, ip: str, hostname: str = ""):
-        """Create a static DHCP lease so the device always gets the same IP."""
-        mac = mac.lower()
-        lease_id = f"fvpn_{mac.replace(':', '')}"
-
-        self.exec(f"uci set dhcp.{lease_id}=host")
-        self.exec(f"uci set dhcp.{lease_id}.mac='{mac}'")
-        self.exec(f"uci set dhcp.{lease_id}.ip='{ip}'")
-        if hostname:
-            self.exec(f"uci set dhcp.{lease_id}.name='{hostname}'")
-        self.exec("uci commit dhcp")
-        self.exec("/etc/init.d/dnsmasq reload &>/dev/null &")
+        return self.devices.set_static_lease(mac, ip, hostname)
 
     def remove_static_lease(self, mac: str):
-        """Remove a static DHCP lease."""
-        lease_id = f"fvpn_{mac.replace(':', '')}"
-        self.exec(f"uci delete dhcp.{lease_id} 2>/dev/null; uci commit dhcp")
-        self.exec("/etc/init.d/dnsmasq reload &>/dev/null &")
+        return self.devices.remove_static_lease(mac)
 
-    # ── mDNS Reflection ──────────────────────────────────────────────────
+    # ── Delegates: mDNS ─────────────────────────────────────────────────
 
     def setup_mdns_reflection(self, interface_name: str):
-        """Enable mDNS/avahi reflection between a WG tunnel and LAN.
+        return self.firewall.setup_mdns_reflection(interface_name)
 
-        Needed for Chromecast/AirPlay discovery across tunnel boundaries.
-        """
-        # Check if avahi is installed
-        avahi_check = self.exec("which avahi-daemon 2>/dev/null || echo ''")
-        if not avahi_check:
-            return  # avahi not installed, skip
-
-        # Get the L3 device for this interface
-        l3_dev = self.exec(
-            f"ifstatus {interface_name} 2>/dev/null | "
-            "jsonfilter -e '@.l3_device' 2>/dev/null || echo ''"
-        ).strip()
-
-        if not l3_dev:
-            return
-
-        # Add to avahi reflector config
-        avahi_conf = "/etc/avahi/avahi-daemon.conf"
-        self.exec(
-            f"grep -q 'enable-reflector=yes' {avahi_conf} 2>/dev/null || "
-            f"sed -i 's/enable-reflector=no/enable-reflector=yes/' {avahi_conf} 2>/dev/null"
-        )
-        self.exec("/etc/init.d/avahi-daemon restart &>/dev/null &")
-
-    # ── Utility ───────────────────────────────────────────────────────────
+    # ── Delegates: Policy ───────────────────────────────────────────────
 
     def get_flint_vpn_rules(self) -> list[dict]:
-        """Get all FlintVPN route policy rules.
-
-        Returns rules whose UCI section starts with 'fvpn_rule' (created by us)
-        OR whose group_id matches the FlintVPN groups (1957 for WG, 28216 for OVPN).
-        The latter handles the case where the GL.iNet UI replaced our named
-        section with an anonymous '@rule[N]' section after editing.
-
-        Returns list of dicts with: rule_name (section name or '@rule[N]'),
-        name, enabled, tunnel_id, via, killswitch, from_mac, peer_id, client_id, etc.
-        """
-        # Pull the entire route_policy config in one SSH call so we can spot
-        # FlintVPN-managed rules even if the section was anonymized.
-        raw = self.exec("uci show route_policy 2>/dev/null || echo ''")
-        rules = {}
-        for line in raw.strip().splitlines():
-            if not line.strip() or "=" not in line:
-                continue
-            key, val = line.split("=", 1)
-            val = val.strip("'")
-            # key format: route_policy.<section>(.<field>)?
-            # where <section> may be 'fvpn_rule_9001' or '@rule[4]'
-            after_prefix = key[len("route_policy."):] if key.startswith("route_policy.") else key
-            if "." in after_prefix:
-                section, field = after_prefix.split(".", 1)
-            else:
-                section = after_prefix
-                field = None
-            if section not in rules:
-                rules[section] = {"rule_name": section}
-            if field is not None:
-                rules[section][field] = val
-            else:
-                rules[section]["_section_type"] = val
-
-        # Filter to FlintVPN-managed rules:
-        #   - section name starts with 'fvpn_rule' (the names we create), OR
-        #   - section is type 'rule' AND group_id is one of FlintVPN's groups
-        fvpn_rules = []
-        for section, data in rules.items():
-            if section.startswith("fvpn_rule"):
-                fvpn_rules.append(data)
-                continue
-            if data.get("_section_type") != "rule":
-                continue
-            gid = data.get("group_id", "")
-            if gid in ("1957", "28216"):  # FromApp groups for WG and OVPN
-                fvpn_rules.append(data)
-        return fvpn_rules
+        return self.policy.get_flint_vpn_rules()
 
     def reorder_vpn_rules(self, rule_names: list) -> None:
-        """Stage 10: reorder route_policy sections to match the given list.
-
-        Section order in /etc/config/route_policy IS the source of truth for
-        VPN display order (after Stage 5). This rewrites the file so subsequent
-        `uci show route_policy` queries return sections in the new order, and
-        the router evaluates rules in that priority.
-
-        Only the listed rule_names are reordered; other route_policy sections
-        (global, defaults, gl_process*) keep their existing positions.
-        """
-        if not rule_names:
-            return
-        cmds = []
-        for i, rule_name in enumerate(rule_names):
-            cmds.append(f"uci reorder route_policy.{rule_name}={i}")
-        cmds.append("uci commit route_policy")
-        self.exec(" && ".join(cmds))
+        return self.policy.reorder_vpn_rules(rule_names)
 
     def heal_anonymous_rule_section(self, anon_section: str, target_name: str):
-        """Rename an anonymous route_policy section back to its FlintVPN name.
-
-        When the GL.iNet UI edits a rule, it sometimes replaces the named
-        section (e.g. fvpn_rule_9001) with an anonymous one (@rule[4]).
-        This method restores the named section in-place.
-        """
-        if not anon_section.startswith("@rule"):
-            return  # Already named — nothing to do
-        if not target_name:
-            return
-        try:
-            self.exec(
-                f"uci rename route_policy.{anon_section}={target_name} && "
-                f"uci commit route_policy"
-            )
-        except Exception:
-            pass  # Best effort — won't break the read path
+        return self.policy.heal_anonymous_rule_section(anon_section, target_name)
 
     def get_flint_vpn_peers(self) -> list[dict]:
-        """Get all FlintVPN WireGuard peer configs (peer_9001 through peer_9099).
-
-        Returns list of dicts with peer UCI fields.
-        """
-        raw = self.exec(
-            "uci show wireguard 2>/dev/null | grep 'wireguard\\.peer_90'"
-        )
-        peers = {}
-        for line in raw.strip().splitlines():
-            if not line.strip() or "=" not in line:
-                continue
-            key, val = line.split("=", 1)
-            val = val.strip("'")
-            parts = key.split(".")
-            if len(parts) >= 3:
-                peer_id = parts[1]
-                field = parts[2]
-                if peer_id not in peers:
-                    peers[peer_id] = {"peer_id": peer_id}
-                peers[peer_id][field] = val
-
-        return list(peers.values())
+        return self.policy.get_flint_vpn_peers()
 
     def get_active_interfaces(self) -> list[str]:
-        """Get list of active WireGuard client interface names."""
-        raw = self.exec(
-            "uci show network 2>/dev/null | grep \"proto='wgclient'\" | "
-            "cut -d. -f2"
-        )
-        active = []
-        for iface in raw.strip().splitlines():
-            iface = iface.strip()
-            if iface:
-                disabled = self.exec(
-                    f"uci get network.{iface}.disabled 2>/dev/null || echo '1'"
-                ).strip()
-                if disabled != "1":
-                    active.append(iface)
-        return active
+        return self.policy.get_active_interfaces()
 
-    # ── FlintVPN UCI Helpers ───────────────────────────────────────────────
-    #
-    # The new LAN access execution layer is pure UCI: per-group `config ipset`
-    # (hash:ip) sections + `config rule` sections referencing them via
-    # `option ipset 'name dir'` and `option extra '-m set ! ...'` for negation.
-    # No custom `fvpn_lan` chain. fw3 manages everything; rules survive reboot
-    # natively from `list entry` lines.
-    #
-    # Spike-validated on Flint 2 firmware 4.8.4: `firewall reload` is ~0.22s
-    # and does NOT disrupt VPN tunnels (handshake unchanged, mangle table
-    # preserved, MARK rules survived).
-    #
-    # Naming conventions (all UCI section names + ipset names):
-    #   fvpn_lan_<short_id>_ips      — per-group IP membership
-    #   fvpn_extra_<short_id>_<dir>_ips — per-(group, direction) MAC-exception IPs
-    #   fvpn_devovr_<mac_no_colons>_<dir>_ips — per-device override exception IPs
-    #   fvpn_noint_ips               — global NoInternet membership
-    #   fvpn_lan_<short_id>_<dir>_<role>  — UCI rule sections (role = drop/accept/excN)
-    #   fvpn_devovr_<mac_no_colons>_<dir>_<role>
-    #   fvpn_noint_block             — single global rule for noint
+    # ── Delegates: Firewall ──────────────────────────────────────────────
 
     def fvpn_uci_apply(self, uci_batch: str, reload: bool = True) -> None:
-        """Apply a multi-line UCI batch script and optionally reload firewall.
-
-        Writes the batch to /tmp/fvpn_uci_batch.txt via write_file (which uses
-        the proven `cat >` stdin pipe), then `uci batch < /tmp/fvpn_uci_batch.txt
-        && uci commit firewall`. If `reload=True`, also runs
-        `/etc/init.d/firewall reload` in the foreground (~0.22s, no VPN drop).
-
-        Empty batch with reload=False is a no-op. Empty batch with reload=True
-        just reloads.
-        """
-        has_batch = bool(uci_batch.strip())
-        if not has_batch and not reload:
-            return
-
-        if has_batch:
-            tmp_path = "/tmp/fvpn_uci_batch.txt"
-            self.write_file(tmp_path, uci_batch)
-            self.exec(
-                f"uci batch < {tmp_path} && uci commit firewall && rm -f {tmp_path}"
-            )
-        if reload:
-            # Foreground reload. Suppress fw3's stdout chatter; let stderr
-            # warnings through. Spike confirms ~0.22s, no VPN drop.
-            self.exec("/etc/init.d/firewall reload >/dev/null 2>&1; true")
+        return self.firewall.fvpn_uci_apply(uci_batch, reload)
 
     def fvpn_ipset_membership(
         self, set_name: str, add: list, remove: list
     ) -> None:
-        """Apply add/remove ipset membership ops for one set in a single SSH call.
-
-        Idempotent: uses `-exist` and `|| true` so duplicates / missing
-        entries don't error out. Caller is responsible for the matching UCI
-        dual-write (via fvpn_uci_apply with add_list/del_list).
-        """
-        if not add and not remove:
-            return
-        cmds = []
-        for entry in remove:
-            cmds.append(f"ipset del {set_name} {entry} 2>/dev/null || true")
-        for entry in add:
-            cmds.append(f"ipset add {set_name} {entry} -exist 2>/dev/null || true")
-        if cmds:
-            self.exec(" ; ".join(cmds))
+        return self.firewall.fvpn_ipset_membership(set_name, add, remove)
 
     def fvpn_ipset_create(self, set_name: str, set_type: str = "hash:ip") -> None:
-        """Create a kernel ipset if it doesn't exist (for runtime use)."""
-        self.exec(f"ipset create {set_name} {set_type} -exist 2>/dev/null || true")
+        return self.firewall.fvpn_ipset_create(set_name, set_type)
 
     def fvpn_ipset_destroy(self, set_name: str) -> None:
-        """Destroy a kernel ipset (best-effort)."""
-        self.exec(f"ipset destroy {set_name} 2>/dev/null || true")
+        return self.firewall.fvpn_ipset_destroy(set_name)
 
     def fvpn_lan_full_state(self) -> dict:
-        """Read live router state for FlintVPN LAN sections + ipsets.
-
-        Returns a dict matching the shape produced by
-        `lan_sync.serialize_lan_state` so the reconciler can compute a diff:
-
-            {
-              "ipsets": {set_name: [ip, ...], ...},
-              "rules": {section_name: {field: value, ...}, ...},
-            }
-
-        Only `fvpn_*` sections and ipsets are returned. The kernel ipset
-        membership is read live; the UCI `entry` lists are not consulted
-        (they're the persistence layer, not the runtime truth).
-        """
-        out = {"ipsets": {}, "rules": {}}
-
-        # 1. UCI rule + ipset sections
-        try:
-            raw = self.exec("uci show firewall 2>/dev/null | grep -E '\\.fvpn_'")
-        except Exception:
-            raw = ""
-        # uci show output: firewall.<section>=<type> or firewall.<section>.<field>=<value>
-        for line in raw.strip().splitlines():
-            line = line.strip()
-            if not line or "=" not in line:
-                continue
-            key, val = line.split("=", 1)
-            val = val.strip("'")
-            if not key.startswith("firewall."):
-                continue
-            after = key[len("firewall."):]
-            if "." in after:
-                section, field = after.split(".", 1)
-            else:
-                section, field = after, None
-            if not section.startswith("fvpn_"):
-                continue
-            entry = out["rules"].setdefault(section, {})
-            if field is None:
-                entry["_type"] = val
-            else:
-                # UCI list values come back with each item on its own line in
-                # `uci show` (multiple lines like firewall.X.entry='ip1' and
-                # firewall.X.entry='ip2'). We collect them.
-                if field in entry:
-                    cur = entry[field]
-                    if isinstance(cur, list):
-                        cur.append(val)
-                    else:
-                        entry[field] = [cur, val]
-                else:
-                    entry[field] = val
-
-        # Separate config-ipset sections from config-rule sections.
-        ipset_sections = {}
-        rule_sections = {}
-        for section, fields in out["rules"].items():
-            if fields.get("_type") == "ipset":
-                # Pull entries (may be string or list) into a list
-                entries = fields.get("entry", [])
-                if isinstance(entries, str):
-                    entries = [entries]
-                # Use the UCI section's `name` if set, else section name
-                ipset_name = fields.get("name", section)
-                ipset_sections[ipset_name] = {
-                    "section": section,
-                    "entries": list(entries),
-                    "match": fields.get("match", "ip"),
-                    "storage": fields.get("storage", "hash"),
-                }
-            elif fields.get("_type") == "rule":
-                rule_sections[section] = {k: v for k, v in fields.items() if k != "_type"}
-
-        # 2. Live kernel ipset membership for the sets we know about
-        live_membership = {}
-        for ipset_name in ipset_sections.keys():
-            try:
-                raw = self.exec(
-                    f"ipset list {ipset_name} 2>/dev/null | "
-                    "awk 'p{print} /^Members:/{p=1}' || true"
-                )
-                live_membership[ipset_name] = [
-                    l.strip() for l in raw.strip().splitlines() if l.strip()
-                ]
-            except Exception:
-                live_membership[ipset_name] = []
-
-        # Final shape: ipsets keyed by set_name → live IP list
-        out["ipsets"] = live_membership
-        # Also expose UCI section names so the diff can issue add_list/del_list
-        # against the right firewall.X.entry field.
-        out["ipset_uci"] = {
-            name: info["section"] for name, info in ipset_sections.items()
-        }
-        out["ipset_uci_entries"] = {
-            name: info["entries"] for name, info in ipset_sections.items()
-        }
-        out["rules"] = rule_sections
-        return out
+        return self.firewall.fvpn_lan_full_state()
 
     def fvpn_lan_wipe_all(self) -> None:
-        """Delete every fvpn_* UCI section and destroy every fvpn_* kernel ipset.
-
-        Used by `cli.py reset-local-state` and the migration step. Reloads
-        firewall once at the end to clear any leftover iptables rules.
-        """
-        # 1. Delete all fvpn_* UCI sections
-        try:
-            raw = self.exec(
-                "uci show firewall 2>/dev/null | grep -oE 'fvpn_[a-zA-Z0-9_]+' | sort -u"
-            )
-        except Exception:
-            raw = ""
-        sections = [s.strip() for s in raw.strip().splitlines() if s.strip()]
-        if sections:
-            cmds = [f"uci -q delete firewall.{s}" for s in sections]
-            cmds.append("uci commit firewall")
-            self.exec(" ; ".join(cmds))
-        # 2. Destroy all fvpn_* kernel ipsets
-        try:
-            raw = self.exec(
-                "ipset list -n 2>/dev/null | grep -E '^fvpn_' || true"
-            )
-        except Exception:
-            raw = ""
-        for name in raw.strip().splitlines():
-            name = name.strip()
-            if name.startswith("fvpn_"):
-                self.exec(f"ipset destroy {name} 2>/dev/null || true")
-        # 3. Tear down the legacy fvpn_lan chain if it still exists
-        self.exec(
-            "iptables -D FORWARD -j fvpn_lan 2>/dev/null; "
-            "iptables -F fvpn_lan 2>/dev/null; "
-            "iptables -X fvpn_lan 2>/dev/null; true"
-        )
-        # 4. Reload firewall to clear any orphan iptables rules
-        try:
-            self.exec("/etc/init.d/firewall reload 2>&1 >/dev/null; true")
-        except Exception:
-            pass
+        return self.firewall.fvpn_lan_wipe_all()
 
 

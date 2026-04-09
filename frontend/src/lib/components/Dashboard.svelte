@@ -1,7 +1,7 @@
 <script>
   import { profiles, devices, unassignedDevices, protonLoggedIn, showToast, movingDevices } from '../stores/app.js';
   import { api } from '../api.js';
-  import { deviceIcon, isRandomMac, isOnline } from '../utils.js';
+  import { deviceIcon, isRandomMac, isOnline } from '../device-utils.js';
   import { dndzone } from 'svelte-dnd-action';
   import GroupCard from './GroupCard.svelte';
   import DeviceModal from './DeviceModal.svelte';

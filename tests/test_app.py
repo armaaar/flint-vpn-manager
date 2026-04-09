@@ -10,6 +10,9 @@ from unittest.mock import MagicMock, patch
 
 import profile_store as ps
 import secrets_manager as sm
+from vpn_service import (
+    check_and_auto_restore, ROUTER_BACKUP_PATH,
+)
 
 
 @pytest.fixture
@@ -55,10 +58,13 @@ def client(tmp_data):
 @pytest.fixture
 def unlocked_client(client):
     """Test client with session pre-unlocked."""
+    from vpn_service import VPNService
     c, app_mod = client
     # Setup secrets first
     sm.setup("user", "pass", "rpass", "master")
     app_mod._session_unlocked = True
+    # Create the service wrapping the same mock objects the tests configure
+    app_mod._service = VPNService(app_mod._router_api, app_mod._proton_api)
     return c, app_mod
 
 
@@ -217,15 +223,16 @@ class TestConnectDisconnect:
         stored = ps.get_profile("test-vpn-1")
         assert "status" not in stored
 
-    def test_connect_returns_loading_when_health_query_fails(self, unlocked_client):
+    def test_connect_returns_error_when_health_query_fails(self, unlocked_client):
+        """Strategy.connect() treats bring_up + health as atomic; health failure propagates."""
         c, app_mod = unlocked_client
         self._make_vpn_profile(app_mod)
         app_mod._router_api.bring_tunnel_up.return_value = None
         app_mod._router_api.get_tunnel_health.side_effect = Exception("ssh fail")
 
         resp = c.post("/api/profiles/test-vpn-1/connect")
-        assert resp.status_code == 200
-        assert resp.json["health"] == "loading"
+        assert resp.status_code == 500
+        assert "error" in resp.json
 
     def test_connect_returns_error_when_bring_up_fails(self, unlocked_client):
         c, app_mod = unlocked_client
@@ -840,8 +847,7 @@ class TestDeviceAssignmentsLive:
         app_mod._router_api.get_client_details.return_value = {}
         app_mod._router_api.get_flint_vpn_rules.return_value = []
         app_mod._router_api.get_device_assignments.return_value = {}
-        from app import _invalidate_device_cache
-        _invalidate_device_cache()
+        app_mod._service.invalidate_device_cache()
         resp = c.get("/api/devices")
         macs = {d["mac"]: d.get("profile_id") for d in resp.json}
         assert macs.get("aa:bb:cc:dd:ee:ff") == "novpn-1"
@@ -967,8 +973,7 @@ class TestDeviceEndpoints:
         app_mod._router_api.get_flint_vpn_rules.return_value = []
         app_mod._router_api.get_device_assignments.return_value = {}
         # Make sure cache is fresh
-        from app import _invalidate_device_cache
-        _invalidate_device_cache()
+        app_mod._service.invalidate_device_cache()
         resp = c.get("/api/devices")
         assert resp.json == []
 
@@ -985,13 +990,12 @@ class TestDeviceEndpoints:
         app_mod._router_api.get_client_details.return_value = {}
         app_mod._router_api.get_flint_vpn_rules.return_value = []
         app_mod._router_api.get_device_assignments.return_value = {}
-        from app import _invalidate_device_cache
-        _invalidate_device_cache()
+        app_mod._service.invalidate_device_cache()
 
         resp = c.put("/api/devices/aa:bb:cc:dd:ee:ff/profile", json={"profile_id": pid})
         assert resp.json["success"] is True
 
-        _invalidate_device_cache()
+        app_mod._service.invalidate_device_cache()
         devices = c.get("/api/devices").json
         dev = next(d for d in devices if d["mac"] == "aa:bb:cc:dd:ee:ff")
         assert dev["profile_id"] == pid
@@ -1215,8 +1219,7 @@ class TestLanAccessEndpoints:
         app_mod._router_api.get_client_details.return_value = {}
         app_mod._router_api.get_flint_vpn_rules.return_value = []
         app_mod._router_api.get_device_assignments.return_value = {}
-        from app import _invalidate_device_cache
-        _invalidate_device_cache()
+        app_mod._service.invalidate_device_cache()
 
         devices = c.get("/api/devices").json
         d = next(x for x in devices if x["mac"] == "aa:bb:cc:dd:ee:ff")
@@ -1262,12 +1265,12 @@ class TestBackupAndRestore:
         # write_file should have been called with the backup path
         write_calls = app_mod._router_api.write_file.call_args_list
         assert any(
-            call.args[0] == app_mod.ROUTER_BACKUP_PATH for call in write_calls
+            call.args[0] == ROUTER_BACKUP_PATH for call in write_calls
         )
         # The wrapped JSON should contain the profile data + _meta
         last_call = next(
             call for call in write_calls
-            if call.args[0] == app_mod.ROUTER_BACKUP_PATH
+            if call.args[0] == ROUTER_BACKUP_PATH
         )
         wrapped = json.loads(last_call.args[1])
         assert wrapped["_meta"]["version"] == 1
@@ -1310,7 +1313,7 @@ class TestBackupAndRestore:
         app_mod._router_api.read_file.return_value = json.dumps(backup)
         app_mod._router_api.get_router_fingerprint.return_value = "aa:bb:cc:11:22:33"
 
-        app_mod._check_and_auto_restore()
+        check_and_auto_restore(app_mod._router_api)
 
         loaded = ps.load()
         assert any(p["id"] == "restored-id" for p in loaded["profiles"])
@@ -1335,7 +1338,7 @@ class TestBackupAndRestore:
         # Different fingerprint
         app_mod._router_api.get_router_fingerprint.return_value = "ff:ee:dd:cc:bb:aa"
 
-        app_mod._check_and_auto_restore()
+        check_and_auto_restore(app_mod._router_api)
 
         # Local store should still be missing (no restore)
         assert not ps.STORE_FILE.exists()
@@ -1366,7 +1369,7 @@ class TestBackupAndRestore:
         app_mod._router_api.get_router_fingerprint.return_value = "aa:bb:cc:11:22:33"
         app_mod._router_api.write_file.reset_mock()
 
-        app_mod._check_and_auto_restore()
+        check_and_auto_restore(app_mod._router_api)
 
         # Local should still be the local-newer version
         loaded = ps.load()
@@ -1374,7 +1377,7 @@ class TestBackupAndRestore:
         # Self-heal should have called write_file with backup path
         write_calls = app_mod._router_api.write_file.call_args_list
         assert any(
-            call.args[0] == app_mod.ROUTER_BACKUP_PATH for call in write_calls
+            call.args[0] == ROUTER_BACKUP_PATH for call in write_calls
         )
 
     def test_auto_restore_no_op_when_no_backup(self, unlocked_client):
@@ -1383,7 +1386,7 @@ class TestBackupAndRestore:
             ps.STORE_FILE.unlink()
         app_mod._router_api.read_file.return_value = None
         # Should not raise, should not restore
-        app_mod._check_and_auto_restore()
+        check_and_auto_restore(app_mod._router_api)
         assert not ps.STORE_FILE.exists()
 
 

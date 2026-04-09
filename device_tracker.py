@@ -19,6 +19,12 @@ import time
 from typing import Optional
 
 import profile_store
+from consts import (
+    LAN_ALLOWED,
+    PROFILE_TYPE_NO_INTERNET,
+    PROFILE_TYPE_NO_VPN,
+    PROFILE_TYPE_VPN,
+)
 from router_api import RouterAPI
 
 # Global tracker instance
@@ -114,7 +120,7 @@ class DeviceTracker:
             guest_type = guest.get("type")
             guest_rule_name = (guest.get("router_info") or {}).get("rule_name", "")
             for mac in new_macs_to_assign:
-                if guest_type == "vpn" and guest_rule_name:
+                if guest_type == PROFILE_TYPE_VPN and guest_rule_name:
                     try:
                         self.router.set_device_vpn(mac, guest_rule_name)
                     except Exception:
@@ -123,7 +129,7 @@ class DeviceTracker:
                     # NoVPN / NoInternet — write to local store
                     data["device_assignments"][mac] = guest["id"]
             # Persist non-VPN auto-assignments
-            if guest_type in ("no_vpn", "no_internet"):
+            if guest_type in (PROFILE_TYPE_NO_VPN, PROFILE_TYPE_NO_INTERNET):
                 profile_store.save(data)
 
         # Detect IP changes that affect LAN rules. Set the stale flag for any
@@ -134,7 +140,7 @@ class DeviceTracker:
         for mac, ip in new_ips.items():
             if self._prev_device_ips.get(mac) != ip:
                 effective = profile_store.get_effective_lan_access(mac, data)
-                if effective["inbound"] != "allowed" or effective["outbound"] != "allowed":
+                if effective["inbound"] != LAN_ALLOWED or effective["outbound"] != LAN_ALLOWED:
                     self.lan_rules_stale = True
                     break
         self._prev_device_ips = new_ips

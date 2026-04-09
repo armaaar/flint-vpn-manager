@@ -1,7 +1,8 @@
 <script>
   import { api } from '../api.js';
   import { profiles, showToast } from '../stores/app.js';
-  import { loadBarColor, countryFlagUrl, countryName } from '../utils.js';
+  import { loadBarColor } from '../format.js';
+  import { countryFlagUrl, countryName } from '../country.js';
   import { createEventDispatcher } from 'svelte';
 
   export let profileId = null;

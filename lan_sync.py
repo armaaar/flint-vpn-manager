@@ -30,6 +30,15 @@ with no VPN tunnel disruption.
 from typing import Optional
 
 import profile_store
+from consts import (
+    LAN_ALLOWED,
+    LAN_BLOCKED,
+    LAN_GROUP_ONLY,
+    PROFILE_TYPE_NO_INTERNET,
+    PROFILE_TYPE_VPN,
+    PROTO_OPENVPN,
+    PROTO_WIREGUARD,
+)
 
 
 # UCI section name constants — kept short to fit within UCI's 14-char-ish
@@ -168,12 +177,12 @@ def serialize_lan_state(
     # Phase 1a: groups whose own state is non-allowed
     referenced_groups = set()
     for pid, p in profiles.items():
-        if p.get("type") == "no_internet":
+        if p.get("type") == PROFILE_TYPE_NO_INTERNET:
             continue
         lan = p.get("lan_access") or {}
-        out_state = lan.get("outbound", "allowed")
-        in_state = lan.get("inbound", "allowed")
-        if out_state != "allowed" or in_state != "allowed":
+        out_state = lan.get("outbound", LAN_ALLOWED)
+        in_state = lan.get("inbound", LAN_ALLOWED)
+        if out_state != LAN_ALLOWED or in_state != LAN_ALLOWED:
             referenced_groups.add(pid)
         # Also: if any other profile or override references this group as an
         # exception target, we need its ipset. Phase 1b below.
@@ -182,12 +191,12 @@ def serialize_lan_state(
         lan = p.get("lan_access") or {}
         for key in ("outbound_allow", "inbound_allow"):
             for entry in lan.get(key, []) or []:
-                if entry in profiles and profiles[entry].get("type") != "no_internet":
+                if entry in profiles and profiles[entry].get("type") != PROFILE_TYPE_NO_INTERNET:
                     referenced_groups.add(entry)
     for mac, ovr in overrides.items():
         for key in ("outbound_allow", "inbound_allow"):
             for entry in ovr.get(key, []) or []:
-                if entry in profiles and profiles[entry].get("type") != "no_internet":
+                if entry in profiles and profiles[entry].get("type") != PROFILE_TYPE_NO_INTERNET:
                     referenced_groups.add(entry)
 
     # Phase 2: build ipsets for referenced groups
@@ -220,7 +229,7 @@ def serialize_lan_state(
         # ── OUTBOUND override (uses src_mac, no IP needed)
         out_state = eff["outbound"]
         out_allow_raw = [e["value"] for e in eff.get("outbound_allow", []) or []]
-        if out_state in ("blocked", "group_only"):
+        if out_state in (LAN_BLOCKED, LAN_GROUP_ONLY):
             # Emit ACCEPT exceptions BEFORE the DROP
             extras_ips_set = []
             for entry in out_allow_raw:
@@ -230,7 +239,7 @@ def serialize_lan_state(
                     peer_ip = device_ips.get(peer, "")
                     if peer_ip and peer != mac:
                         extras_ips_set.append(peer_ip)
-                elif entry in profiles and profiles[entry].get("type") != "no_internet":
+                elif entry in profiles and profiles[entry].get("type") != PROFILE_TYPE_NO_INTERNET:
                     # Profile-UUID entry — emit ACCEPT rule referencing target group
                     target_set = _group_ipset(_short_id(entry))
                     sec = f"fvpn_devovr_{mac_id}_outacc_{_short_id(entry)}"
@@ -254,7 +263,7 @@ def serialize_lan_state(
                 rule_order.append(sec)
             # The DROP rule
             sec = f"fvpn_devovr_{mac_id}_outdrop"
-            if out_state == "blocked":
+            if out_state == LAN_BLOCKED:
                 rules[sec] = _make_rule(
                     name=f"fvpn devovr {mac} out blocked",
                     src_mac=mac,
@@ -282,7 +291,7 @@ def serialize_lan_state(
         # ── INBOUND override (uses dest_ip, needs live IP)
         in_state = eff["inbound"]
         in_allow_raw = [e["value"] for e in eff.get("inbound_allow", []) or []]
-        if ip and in_state in ("blocked", "group_only"):
+        if ip and in_state in (LAN_BLOCKED, LAN_GROUP_ONLY):
             # Emit ACCEPT exceptions BEFORE the DROP
             extras_ips_set = []
             for entry in in_allow_raw:
@@ -291,7 +300,7 @@ def serialize_lan_state(
                     peer_ip = device_ips.get(peer, "")
                     if peer_ip and peer != mac:
                         extras_ips_set.append(peer_ip)
-                elif entry in profiles and profiles[entry].get("type") != "no_internet":
+                elif entry in profiles and profiles[entry].get("type") != PROFILE_TYPE_NO_INTERNET:
                     target_set = _group_ipset(_short_id(entry))
                     sec = f"fvpn_devovr_{mac_id}_inacc_{_short_id(entry)}"
                     rules[sec] = _make_rule(
@@ -314,7 +323,7 @@ def serialize_lan_state(
                 rule_order.append(sec)
             # The DROP rule
             sec = f"fvpn_devovr_{mac_id}_indrop"
-            if in_state == "blocked":
+            if in_state == LAN_BLOCKED:
                 rules[sec] = _make_rule(
                     name=f"fvpn devovr {mac} in blocked",
                     dest_ip=ip,
@@ -340,14 +349,14 @@ def serialize_lan_state(
     # ── Third pass: emit per-group rules (after device overrides so they
     #    take lower precedence)
     for pid, p in profiles.items():
-        if p.get("type") == "no_internet":
+        if p.get("type") == PROFILE_TYPE_NO_INTERNET:
             continue  # Handled separately below
         lan = p.get("lan_access") or {}
-        out_state = lan.get("outbound", "allowed")
-        in_state = lan.get("inbound", "allowed")
+        out_state = lan.get("outbound", LAN_ALLOWED)
+        in_state = lan.get("inbound", LAN_ALLOWED)
         out_allow = lan.get("outbound_allow", []) or []
         in_allow = lan.get("inbound_allow", []) or []
-        if out_state == "allowed" and in_state == "allowed":
+        if out_state == LAN_ALLOWED and in_state == LAN_ALLOWED:
             continue  # No rules needed for fully-allowed groups
 
         short = _short_id(pid)
@@ -359,7 +368,7 @@ def serialize_lan_state(
             _register_ipset(grp_set, ips)
 
         # ── OUTBOUND group rules
-        if out_state in ("blocked", "group_only"):
+        if out_state in (LAN_BLOCKED, LAN_GROUP_ONLY):
             # ACCEPT exceptions first
             extras_ips_set = []
             for entry in out_allow:
@@ -368,7 +377,7 @@ def serialize_lan_state(
                     peer_ip = device_ips.get(peer, "")
                     if peer_ip:
                         extras_ips_set.append(peer_ip)
-                elif entry in profiles and profiles[entry].get("type") != "no_internet":
+                elif entry in profiles and profiles[entry].get("type") != PROFILE_TYPE_NO_INTERNET:
                     target_set = _group_ipset(_short_id(entry))
                     sec = f"fvpn_lan_{short}_outacc_{_short_id(entry)}"
                     rules[sec] = _make_rule(
@@ -391,7 +400,7 @@ def serialize_lan_state(
                 rule_order.append(sec)
             # DROP rule
             sec = f"fvpn_lan_{short}_outdrop"
-            if out_state == "blocked":
+            if out_state == LAN_BLOCKED:
                 rules[sec] = _make_rule(
                     name=f"fvpn grp {short} out blocked",
                     ipset=f"{grp_set} src",
@@ -407,7 +416,7 @@ def serialize_lan_state(
             rule_order.append(sec)
 
         # ── INBOUND group rules
-        if in_state in ("blocked", "group_only"):
+        if in_state in (LAN_BLOCKED, LAN_GROUP_ONLY):
             extras_ips_set = []
             for entry in in_allow:
                 if ":" in entry and len(entry) == 17:
@@ -415,7 +424,7 @@ def serialize_lan_state(
                     peer_ip = device_ips.get(peer, "")
                     if peer_ip:
                         extras_ips_set.append(peer_ip)
-                elif entry in profiles and profiles[entry].get("type") != "no_internet":
+                elif entry in profiles and profiles[entry].get("type") != PROFILE_TYPE_NO_INTERNET:
                     target_set = _group_ipset(_short_id(entry))
                     sec = f"fvpn_lan_{short}_inacc_{_short_id(entry)}"
                     rules[sec] = _make_rule(
@@ -437,7 +446,7 @@ def serialize_lan_state(
                 )
                 rule_order.append(sec)
             sec = f"fvpn_lan_{short}_indrop"
-            if in_state == "blocked":
+            if in_state == LAN_BLOCKED:
                 rules[sec] = _make_rule(
                     name=f"fvpn grp {short} in blocked",
                     ipset=f"{grp_set} dst",
@@ -454,7 +463,7 @@ def serialize_lan_state(
 
     # ── Fourth pass: NoInternet (single global ipset + rule)
     no_int_pids = {
-        pid for pid, p in profiles.items() if p.get("type") == "no_internet"
+        pid for pid, p in profiles.items() if p.get("type") == PROFILE_TYPE_NO_INTERNET
     }
     no_int_ips = set()
     for mac, pid in assignment_map.items():
@@ -720,16 +729,16 @@ def _resolve_assignment_map(router, store: dict) -> dict:
     # Build (vpn_protocol, peer/client_id) -> local profile id index
     key_to_pid = {}
     for p in profiles:
-        if p.get("type") != "vpn":
+        if p.get("type") != PROFILE_TYPE_VPN:
             continue
         ri = p.get("router_info") or {}
-        vpn_protocol = "openvpn" if ri.get("vpn_protocol") == "openvpn" else "wireguard"
-        if vpn_protocol == "openvpn":
+        vpn_protocol = PROTO_OPENVPN if ri.get("vpn_protocol") == PROTO_OPENVPN else PROTO_WIREGUARD
+        if vpn_protocol == PROTO_OPENVPN:
             cid = str(ri.get("client_id", "")).lstrip("peer_").lstrip("client_")
-            key = ("openvpn", cid)
+            key = (PROTO_OPENVPN, cid)
         else:
             pid = str(ri.get("peer_id", "")).lstrip("peer_").lstrip("client_")
-            key = ("wireguard", pid)
+            key = (PROTO_WIREGUARD, pid)
         if key[1]:
             key_to_pid[key] = p["id"]
 
@@ -743,11 +752,11 @@ def _resolve_assignment_map(router, store: dict) -> dict:
         section = rule.get("rule_name", "")
         if not section:
             continue
-        via = rule.get("via_type", "wireguard")
-        if via == "openvpn":
-            key = ("openvpn", str(rule.get("client_id", "")))
+        via = rule.get("via_type", PROTO_WIREGUARD)
+        if via == PROTO_OPENVPN:
+            key = (PROTO_OPENVPN, str(rule.get("client_id", "")))
         else:
-            key = ("wireguard", str(rule.get("peer_id", "")))
+            key = (PROTO_WIREGUARD, str(rule.get("peer_id", "")))
         pid = key_to_pid.get(key)
         if pid:
             section_to_pid[section] = pid
@@ -769,7 +778,7 @@ def _resolve_assignment_map(router, store: dict) -> dict:
         if not pid:
             continue
         for p in profiles:
-            if p.get("id") == pid and p.get("type") != "vpn":
+            if p.get("id") == pid and p.get("type") != PROFILE_TYPE_VPN:
                 out[mac.lower()] = pid
                 break
 

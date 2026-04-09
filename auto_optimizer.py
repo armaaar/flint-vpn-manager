@@ -17,6 +17,7 @@ from typing import Callable, Dict, Optional
 
 import profile_store as ps
 import secrets_manager as sm
+from consts import HEALTH_AMBER, HEALTH_GREEN, PROFILE_TYPE_VPN
 from server_optimizer import find_better_server
 
 log = logging.getLogger("flintvpn")
@@ -128,10 +129,10 @@ class AutoOptimizer:
             switched = 0
 
             for p in profiles:
-                if p.get("type") != "vpn":
+                if p.get("type") != PROFILE_TYPE_VPN:
                     continue
                 # Live router health, not cached status
-                if p.get("health") not in ("green", "amber"):
+                if p.get("health") not in (HEALTH_GREEN, HEALTH_AMBER):
                     continue
                 # Skip profiles where the user pinned a specific server.
                 # find_better_server enforces this too, but checking here
@@ -206,7 +207,7 @@ class AutoOptimizer:
             refreshed = 0
 
             for p in data.get("profiles", []):
-                if p.get("type") != "vpn":
+                if p.get("type") != PROFILE_TYPE_VPN:
                     continue
                 wg_key = p.get("wg_key")
                 cert_exp = p.get("cert_expiry", 0)

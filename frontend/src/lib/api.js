@@ -8,7 +8,9 @@ async function request(path, opts = {}) {
     ...opts,
     body: opts.body ? JSON.stringify(opts.body) : undefined,
   });
-  return res.json();
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error || `Request failed: ${res.status}`);
+  return data;
 }
 
 export const api = {

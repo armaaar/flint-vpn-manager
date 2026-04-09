@@ -1,7 +1,8 @@
 <script>
   import { api } from '../api.js';
   import { profiles, showToast } from '../stores/app.js';
-  import { timeAgo, isOnline, isRandomMac, formatBytes, formatSpeed, DEVICE_TYPES, deviceTypeLabel } from '../utils.js';
+  import { timeAgo, formatBytes, formatSpeed } from '../format.js';
+  import { isOnline, isRandomMac, DEVICE_TYPES, deviceTypeLabel } from '../device-utils.js';
   import { createEventDispatcher } from 'svelte';
   import LanPeerPicker from './LanPeerPicker.svelte';
 

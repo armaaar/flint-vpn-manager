@@ -1,5 +1,5 @@
 <script>
-  import { EMOJI_CATEGORIES } from '../utils.js';
+  import { EMOJI_CATEGORIES } from '../emojiData.js';
   import { createEventDispatcher, tick } from 'svelte';
 
   export let value = '🔒';

@@ -48,14 +48,13 @@ Commands added in later sessions:
     refresh                                 Poll DHCP leases, tunnel handshakes, server list
 """
 
-import json
-import sys
-
 import click
 
 import secrets_manager as sm
+from consts import PROFILE_TYPE_VPN
 from proton_api import ProtonAPI
 from router_api import RouterAPI
+from vpn_service import VPNService
 
 # Module-level session state (populated by unlock)
 _session = {"secrets": None, "unlocked": False}
@@ -63,6 +62,7 @@ _session = {"secrets": None, "unlocked": False}
 # Lazy-initialized singletons
 _proton_api = None
 _router_api = None
+_service = None
 
 SSH_KEY_PATH = "/home/armaaar/.ssh/id_ed25519"
 
@@ -85,6 +85,13 @@ def get_router_api() -> RouterAPI:
             key_filename=SSH_KEY_PATH,
         )
     return _router_api
+
+
+def get_service() -> VPNService:
+    """Get the VPNService singleton. Only available after unlock."""
+    if _service is None:
+        raise RuntimeError("Service not initialized. Run 'unlock' first.")
+    return _service
 
 
 def require_setup(ctx):
@@ -158,10 +165,12 @@ def unlock(master_password):
     \b
     Non-interactive: ./cli.py unlock --master-password mymaster
     """
+    global _service
     require_setup(click.get_current_context())
     try:
         _session["secrets"] = sm.unlock(master_password)
         _session["unlocked"] = True
+        _service = VPNService(get_router_api(), get_proton_api())
         click.echo("Session unlocked.")
     except ValueError as e:
         click.echo(f"Error: {e}")
@@ -690,16 +699,20 @@ def profiles_create(name, profile_type, color, icon, guest):
       ./cli.py profiles create -n "Printers" -t no_internet --icon "🖨️"
       ./cli.py profiles create -n "Guest WiFi" -t no_vpn --guest
     """
-    import profile_store as pstore
+    if profile_type == PROFILE_TYPE_VPN:
+        click.echo("Error: VPN profiles require a server selection. Use the web dashboard.")
+        return
 
-    if profile_type == "vpn":
-        click.echo("Note: VPN profiles need a server assigned via the web dashboard.")
-        click.echo("Creating profile without server for now...")
+    try:
+        service = get_service()
+        profile = service.create_profile(
+            name=name, profile_type=profile_type,
+            color=color, icon=icon, is_guest=guest,
+        )
+    except Exception as e:
+        click.echo(f"Error: {e}")
+        return
 
-    profile = pstore.create_profile(
-        name=name, profile_type=profile_type,
-        color=color, icon=icon, is_guest=guest,
-    )
     click.echo(f"Created profile: {profile['icon']} {profile['name']} ({profile['type']})")
     click.echo(f"ID: {profile['id']}")
     if guest:
@@ -719,6 +732,7 @@ def profiles_delete(profile_id, yes):
     Example: ./cli.py profiles delete <profile-id>
     """
     import profile_store as pstore
+    from vpn_service import NotFoundError
 
     profile = pstore.get_profile(profile_id)
     if not profile:
@@ -729,18 +743,15 @@ def profiles_delete(profile_id, yes):
         if not click.confirm(f"Delete '{profile['name']}'?"):
             return
 
-    # Tear down router resources if VPN
-    if profile["type"] == "vpn" and profile.get("router_info"):
-        try:
-            router = get_router_api()
-            ri = profile["router_info"]
-            router.delete_wireguard_config(
-                ri.get("peer_id", ""), ri.get("interface_name", ""), ri.get("rule_name", "")
-            )
-        except Exception as e:
-            click.echo(f"Warning: Failed to clean up router: {e}")
+    try:
+        service = get_service()
+        service.delete_profile(profile_id)
+    except NotFoundError:
+        click.echo(f"Error: Profile {profile_id} not found.")
+        return
+    except Exception as e:
+        click.echo(f"Warning: Deletion had issues: {e}")
 
-    pstore.delete_profile(profile_id)
     click.echo(f"Deleted profile: {profile['name']}")
 
 
@@ -760,7 +771,7 @@ def devices():
 def devices_list():
     """List all known devices with their profile assignment.
 
-    Stage 8: device data is fetched live from the router (DHCP leases +
+    Device data is fetched live from the router (DHCP leases +
     gl-clients tracking). Requires the session to be unlocked so the router
     SSH connection is available.
 
@@ -768,15 +779,13 @@ def devices_list():
     Example: ./cli.py devices list
     """
     import profile_store as pstore
-    from app import _get_router, _build_devices_live, _session_unlocked
-    import app as flask_app
 
-    if not flask_app._session_unlocked:
+    if not _session["unlocked"]:
         click.echo("Session locked. Run `unlock` first or use the dashboard.")
         return
 
-    router = _get_router()
-    devs = _build_devices_live(router)
+    service = get_service()
+    devs = service.build_devices_live()
 
     if not devs:
         click.echo("No devices known yet.")
@@ -809,29 +818,21 @@ def devices_assign(mac, profile_id):
       ./cli.py devices assign aa:bb:cc:dd:ee:ff <profile-id>
     """
     import profile_store as pstore
+    from vpn_service import NotFoundError
 
     profile = pstore.get_profile(profile_id)
     if not profile:
         click.echo(f"Error: Profile {profile_id} not found.")
         return
 
-    # Apply router-level changes
-    import lan_sync
     try:
-        router = get_router_api()
-        if profile["type"] == "vpn" and profile.get("router_info"):
-            router.set_device_vpn(mac, profile["router_info"]["rule_name"])
-        # NoInternet: handled by lan_sync below (single global ipset)
+        service = get_service()
+        service.assign_device(mac, profile_id)
+    except NotFoundError as e:
+        click.echo(f"Error: {e}")
+        return
     except Exception as e:
-        click.echo(f"Warning: Router update failed: {e}")
-
-    pstore.assign_device(mac, profile_id)
-
-    # Reconcile router LAN execution layer (UCI ipsets + rules)
-    try:
-        lan_sync.sync_lan_to_router(get_router_api())
-    except Exception as e:
-        click.echo(f"Warning: LAN sync failed: {e}")
+        click.echo(f"Warning: Assignment had issues: {e}")
 
     click.echo(f"Assigned {mac} → {profile['icon']} {profile['name']}")
 
@@ -844,21 +845,11 @@ def devices_unassign(mac):
     \b
     Example: ./cli.py devices unassign aa:bb:cc:dd:ee:ff
     """
-    import profile_store as pstore
-    import lan_sync
-
     try:
-        router = get_router_api()
-        router.remove_device_from_all_vpn(mac)
+        service = get_service()
+        service.assign_device(mac, None)
     except Exception as e:
-        click.echo(f"Warning: Router update failed: {e}")
-
-    pstore.assign_device(mac, None)
-
-    try:
-        lan_sync.sync_lan_to_router(get_router_api())
-    except Exception as e:
-        click.echo(f"Warning: LAN sync failed: {e}")
+        click.echo(f"Warning: Unassignment had issues: {e}")
 
     click.echo(f"Unassigned {mac}")
 

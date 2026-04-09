@@ -1,5 +1,6 @@
 <script>
-  import { deviceIcon, isOnline, isStale, isRandomMac, timeAgo, formatSpeed } from '../utils.js';
+  import { deviceIcon, isOnline, isStale, isRandomMac } from '../device-utils.js';
+  import { timeAgo, formatSpeed } from '../format.js';
   import { movingDevices } from '../stores/app.js';
   import { createEventDispatcher } from 'svelte';
 

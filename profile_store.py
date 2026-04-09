@@ -20,11 +20,13 @@ import uuid
 from pathlib import Path
 from typing import Callable, Optional
 
+from consts import (
+    VALID_PROFILE_TYPES as VALID_TYPES,
+    VALID_LAN_STATES as VALID_LAN_ACCESS,
+)
+
 DATA_DIR = Path(__file__).parent
 STORE_FILE = DATA_DIR / "profile_store.json"
-
-VALID_TYPES = {"vpn", "no_vpn", "no_internet"}
-VALID_LAN_ACCESS = {"allowed", "group_only", "blocked"}
 _MAC_RE = re.compile(r'^([0-9a-f]{2}:){5}[0-9a-f]{2}$', re.IGNORECASE)
 
 
@@ -142,7 +144,7 @@ def register_save_callback(fn: Optional[Callable[[Path], None]]):
     _save_callback = fn
 
 
-def _validate_mac(mac: str) -> str:
+def validate_mac(mac: str) -> str:
     """Validate and normalize a MAC address. Raises ValueError if invalid."""
     mac = mac.strip().lower()
     if not _MAC_RE.match(mac):
@@ -456,7 +458,7 @@ def assign_device(mac: str, profile_id: Optional[str]) -> bool:
     Returns True if the profile exists (or profile_id is None).
     Raises ValueError if mac is not a valid single MAC address.
     """
-    mac = _validate_mac(mac)
+    mac = validate_mac(mac)
     data = load()
 
     if profile_id is not None:

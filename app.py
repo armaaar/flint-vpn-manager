@@ -1,18 +1,17 @@
 """FlintVPN Manager — Flask REST API + SSE.
 
-Main application server. Wires together proton_api, router_api,
-profile_store, and device_tracker into a REST API with Server-Sent
-Events for live tunnel health updates.
+Main application server. Thin routing layer that delegates business logic
+to VPNService (vpn_service.py). Each route: parse request, call service,
+format response.
 
 Run: python app.py (or flask run)
 Access: http://localhost:5000 or http://<surface-ip>:5000 from LAN
 """
 
+import functools
 import json
 import logging
 import time
-import threading
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -20,15 +19,19 @@ from flask import Flask, request, jsonify, Response, send_from_directory
 
 import secrets_manager as sm
 import profile_store as ps
-import lan_sync
+from consts import (
+    LAN_ALLOWED,
+    PROFILE_TYPE_VPN,
+)
 from proton_api import ProtonAPI
 from router_api import RouterAPI
 from device_tracker import start_tracker, stop_tracker, get_tracker
 from auto_optimizer import start_optimizer, stop_optimizer
-
-# Backup file path on the router (single static JSON, no scripts).
-ROUTER_BACKUP_PATH = "/etc/fvpn/profile_store.bak.json"
-BACKUP_FORMAT_VERSION = 1
+from vpn_service import (
+    VPNService, NotFoundError, ConflictError, LimitExceededError,
+    NotLoggedInError, backup_local_state_to_router, check_and_auto_restore,
+    ROUTER_BACKUP_PATH, BACKUP_FORMAT_VERSION,
+)
 
 app = Flask(__name__, static_folder="static", static_url_path="")
 
@@ -72,6 +75,7 @@ access_logger.addHandler(access_handler)
 
 _proton_api: Optional[ProtonAPI] = None
 _router_api: Optional[RouterAPI] = None
+_service: Optional[VPNService] = None
 _session_unlocked = False
 
 SSH_KEY_PATH = "/home/armaaar/.ssh/id_ed25519"
@@ -95,209 +99,31 @@ def _get_router():
     return _router_api
 
 
-def _require_unlocked():
-    """Return error response if session is not unlocked."""
-    if not _session_unlocked:
-        return jsonify({"error": "Session locked. POST /api/unlock first."}), 401
-    return None
+def _get_service() -> VPNService:
+    """Return the VPNService instance. Raises if session is not unlocked."""
+    if _service is None:
+        raise RuntimeError("Service not initialized. Unlock first.")
+    return _service
 
 
-def _normalize_lan_access(lan):
-    """Always return a dict with all four LAN access fields present.
+def require_unlocked(f):
+    """Decorator that returns 401 if the session is locked."""
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        if not _session_unlocked:
+            return jsonify({"error": "Session locked. POST /api/unlock first."}), 401
+        return f(*args, **kwargs)
+    return wrapper
 
-    Used when surfacing profile data to the API so the frontend can rely on a
-    stable shape (state + allow lists) regardless of when the profile was
-    created.
+
+def _invalidate_device_cache():
+    """Invalidate the in-memory device cache.
+
+    Thin wrapper that delegates to the service. Kept as a module-level
+    function for backward compatibility with tests that import it directly.
     """
-    lan = lan or {}
-    return {
-        "outbound": lan.get("outbound", "allowed"),
-        "inbound": lan.get("inbound", "allowed"),
-        "outbound_allow": list(lan.get("outbound_allow", [])),
-        "inbound_allow": list(lan.get("inbound_allow", [])),
-    }
-
-
-def _sync_lan_to_router():
-    """Reconcile router LAN execution state with local intent.
-
-    Replaces the legacy `_rebuild_lan_rules` + `_reconcile_no_internet_rules`
-    pair. Delegates to `lan_sync.sync_lan_to_router` which:
-      - Reads live DHCP leases for device IPs
-      - Reads router VPN device assignments from from_mac
-      - Computes desired UCI ipset/rule sections from local intent
-      - Diffs against current router state
-      - Applies via uci batch (+ firewall reload if structural changes)
-
-    Best-effort: any exception is logged but doesn't propagate.
-    """
-    try:
-        router = _get_router()
-        result = lan_sync.sync_lan_to_router(router, store=ps.load())
-        if result.get("applied"):
-            log.info(
-                f"LAN sync applied: uci_lines={result.get('uci_lines', 0)}, "
-                f"membership_ops={result.get('membership_ops', 0)}, "
-                f"reload={result.get('reload', False)}"
-            )
-    except Exception as e:
-        log.warning(f"LAN sync failed: {e}")
-
-
-# ── Backup / Restore (router-side disaster recovery) ─────────────────────
-
-
-def _backup_local_state_to_router(store_path: Path):
-    """Push profile_store.json to the router as a static backup file.
-
-    Wraps the JSON in a small `_meta` envelope (timestamp, router fingerprint,
-    format version) so the auto-restore path on unlock can verify it before
-    overwriting local state.
-
-    Best-effort: SSH failures log a warning and never propagate.
-    """
-    try:
-        if not store_path.exists():
-            return
-        try:
-            content = store_path.read_text()
-            data = json.loads(content)
-        except Exception as e:
-            log.warning(f"Backup skipped (local store unreadable): {e}")
-            return
-
-        router = _get_router()
-        try:
-            fingerprint = router.get_router_fingerprint()
-        except Exception:
-            fingerprint = ""
-
-        wrapped = {
-            "_meta": {
-                "version": BACKUP_FORMAT_VERSION,
-                "saved_at": datetime.now(timezone.utc).isoformat(),
-                "router_fingerprint": fingerprint,
-            },
-            "data": data,
-        }
-
-        # Make sure /etc/fvpn/ exists (idempotent)
-        try:
-            router.exec("mkdir -p /etc/fvpn 2>/dev/null || true")
-        except Exception:
-            pass
-
-        router.write_file(ROUTER_BACKUP_PATH, json.dumps(wrapped, indent=2))
-    except Exception as e:
-        log.warning(f"Backup to router failed: {e}")
-
-
-def _check_and_auto_restore():
-    """On unlock, restore profile_store.json from the router backup if newer.
-
-    Comparison rules:
-      - If no backup file on the router → no-op.
-      - If backup `_meta.version` doesn't match current → log warning, no-op.
-      - If router fingerprint mismatches the live router → log warning, no-op
-        (the backup belongs to a different router).
-      - If local profile_store.json is missing/unparseable → restore.
-      - Else compare backup `_meta.saved_at` with local file mtime:
-          backup newer  → restore
-          local newer   → push local back to router (self-heal stale backup)
-          equal         → no-op
-
-    Both timestamps are sourced from the same machine's clock (this Surface
-    Go), so there's no clock-skew issue.
-
-    Silent operation per user instruction — no UX, no toasts, no banners.
-    """
-    try:
-        router = _get_router()
-        try:
-            raw = router.read_file(ROUTER_BACKUP_PATH)
-        except Exception as e:
-            log.warning(f"Auto-restore: read failed: {e}")
-            return
-        if not raw:
-            return  # No backup to restore from
-        try:
-            wrapped = json.loads(raw)
-        except json.JSONDecodeError as e:
-            log.warning(f"Auto-restore: backup file is unparseable: {e}")
-            return
-
-        meta = wrapped.get("_meta") or {}
-        if meta.get("version") != BACKUP_FORMAT_VERSION:
-            log.warning(
-                f"Auto-restore: backup version {meta.get('version')} != "
-                f"{BACKUP_FORMAT_VERSION}, skipping"
-            )
-            return
-
-        # Fingerprint check — if it doesn't match, the backup is from a
-        # different router and we should NOT silently overwrite.
-        try:
-            current_fingerprint = router.get_router_fingerprint()
-        except Exception:
-            current_fingerprint = ""
-        backup_fp = meta.get("router_fingerprint", "")
-        if current_fingerprint and backup_fp and current_fingerprint != backup_fp:
-            log.warning(
-                f"Auto-restore: router fingerprint mismatch "
-                f"(backup={backup_fp}, current={current_fingerprint}), skipping"
-            )
-            return
-
-        backup_data = wrapped.get("data") or {}
-        backup_saved_at = meta.get("saved_at", "")
-        try:
-            backup_dt = datetime.fromisoformat(backup_saved_at)
-        except (ValueError, TypeError):
-            log.warning(f"Auto-restore: invalid saved_at {backup_saved_at!r}")
-            return
-
-        # Compare to local file mtime
-        if not ps.STORE_FILE.exists():
-            local_dt = datetime.fromtimestamp(0, tz=timezone.utc)
-            local_state = "missing"
-        else:
-            try:
-                # Verify local is parseable; if not, treat as missing
-                _ = json.loads(ps.STORE_FILE.read_text())
-                local_dt = datetime.fromtimestamp(
-                    ps.STORE_FILE.stat().st_mtime, tz=timezone.utc
-                )
-                local_state = "valid"
-            except Exception:
-                local_dt = datetime.fromtimestamp(0, tz=timezone.utc)
-                local_state = "unparseable"
-
-        if backup_dt > local_dt:
-            log.info(
-                f"Auto-restore: backup ({backup_saved_at}) is newer than "
-                f"local ({local_state}), restoring"
-            )
-            ps.save(backup_data)
-            # The save() call would normally fire the backup callback; but
-            # because the data is identical to the backup, the next backup
-            # push is essentially a no-op (idempotent).
-        elif backup_dt < local_dt:
-            log.info(
-                "Auto-restore: local is newer than backup, self-healing by "
-                "pushing local state to router"
-            )
-            try:
-                _backup_local_state_to_router(ps.STORE_FILE)
-            except Exception as e:
-                log.warning(f"Auto-restore self-heal failed: {e}")
-        # else: equal — no-op
-    except Exception as e:
-        log.warning(f"Auto-restore check failed: {e}")
-
-
-# Register the backup callback so every successful save() pushes to the
-# router. Idempotent — safe to call from module init.
-ps.register_save_callback(_backup_local_state_to_router)
+    if _service is not None:
+        _service.invalidate_device_cache()
 
 
 # ── Status / Setup / Unlock ───────────────────────────────────────────────────
@@ -337,7 +163,7 @@ def api_setup():
 @app.route("/api/unlock", methods=["POST"])
 def api_unlock():
     """Unlock session with master password."""
-    global _session_unlocked
+    global _session_unlocked, _service
     data = request.json
     if "master_password" not in data:
         return jsonify({"error": "master_password required"}), 400
@@ -346,40 +172,45 @@ def api_unlock():
         sm.unlock(data["master_password"])
         _session_unlocked = True
 
+        # Create the VPN service
+        router = _get_router()
+        proton = _get_proton()
+        _service = VPNService(router, proton)
+
+        # Register backup callback so every save() pushes to router
+        ps.register_save_callback(
+            lambda path: backup_local_state_to_router(_service.router, path)
+        )
+
         # Auto-restore local state from router backup if newer (silent disaster
         # recovery — must run BEFORE the device tracker / LAN sync since they
         # depend on the local store).
         try:
-            _check_and_auto_restore()
+            check_and_auto_restore(router)
         except Exception as e:
             log.warning(f"Auto-restore check failed: {e}")
 
         # Start device tracker and poll immediately so devices are ready
-        router = _get_router()
         tracker = start_tracker(router)
         tracker.poll_once()
 
         # Reconcile router LAN execution layer (UCI ipsets + rules) with the
-        # restored / local intent. Replaces lan_init_chain + _rebuild_lan_rules
-        # + _reconcile_no_internet_rules.
+        # restored / local intent.
         try:
-            _sync_lan_to_router()
+            _service.sync_lan_to_router()
         except Exception as e:
             log.warning(f"LAN sync on unlock failed: {e}")
 
-        # Start auto-optimizer (Stage 11: uses live router health via build_profile_list)
+        # Start auto-optimizer
         try:
             start_optimizer(
-                get_proton=_get_proton,
-                get_router=_get_router,
-                switch_fn=_switch_server,
-                build_profile_list_fn=build_profile_list,
+                get_proton=lambda: _service.proton,
+                get_router=lambda: _service.router,
+                switch_fn=_service.switch_server,
+                build_profile_list_fn=lambda r, d, proton=None: _service.build_profile_list(d),
             )
         except Exception as e:
             log.warning(f"Auto-optimizer start failed: {e}")
-
-        # Persistent WG cert renewal is handled by the auto-optimizer's
-        # daily check_and_refresh_certs() — no need to check here.
 
         return jsonify({"success": True})
     except (ValueError, FileNotFoundError) as e:
@@ -394,8 +225,9 @@ def api_lock():
     the auto-optimizer. The next request that needs an unlocked session will
     return 401 until /api/unlock is called again.
     """
-    global _session_unlocked
+    global _session_unlocked, _service
     _session_unlocked = False
+    _service = None
     try:
         stop_tracker()
     except Exception as e:
@@ -410,611 +242,101 @@ def api_lock():
 
 # ── Profiles ──────────────────────────────────────────────────────────────────
 
-def _resolve_server_live(proton, local_profile: dict) -> dict:
-    """Stage 7: resolve server info from Proton API by id.
-
-    Reads server_id from local profile (top-level or nested under server.id
-    for legacy data), then calls proton.get_server_by_id() to get the live
-    server dict (name, country, city, load, etc.). Falls back to the locally
-    cached server dict if Proton is unavailable or the server is gone.
-
-    Preserves the cached `endpoint` and `physical_server_domain` fields if
-    they exist (these come from the WG/OVPN config generation and aren't
-    re-derivable from the Proton server list alone).
-    """
-    cached = local_profile.get("server") or {}
-    server_id = local_profile.get("server_id") or cached.get("id")
-    if not server_id:
-        return cached
-    if not proton or not proton.is_logged_in:
-        return cached
-    try:
-        server_obj = proton.get_server_by_id(server_id)
-        if server_obj is None:
-            return cached
-        live = proton.server_to_dict(server_obj)
-        # Preserve fields that come from the physical-server selection at
-        # config-generation time (not in the logical server list)
-        if cached.get("endpoint"):
-            live["endpoint"] = cached["endpoint"]
-        if cached.get("physical_server_domain"):
-            live["physical_server_domain"] = cached["physical_server_domain"]
-        if cached.get("protocol"):
-            live["protocol"] = cached["protocol"]
-        return live
-    except Exception:
-        return cached
-
-
-def _local_router_key(local_profile: dict) -> tuple:
-    """Stable key for matching a local profile to a router rule.
-
-    Uses (vpn_protocol, peer_id) for WG and (vpn_protocol, client_id) for OVPN.
-    For proton-wg (wireguard-tcp/tls), uses (protocol, tunnel_name) since they
-    don't have peer_id (managed outside vpn-client).
-    """
-    ri = local_profile.get("router_info") or {}
-    vpn_protocol = ri.get("vpn_protocol", "wireguard")
-    if vpn_protocol.startswith("wireguard-"):
-        # proton-wg: keyed by tunnel_name (protonwg0, protonwg1, etc.)
-        return (vpn_protocol, ri.get("tunnel_name", ""))
-    if vpn_protocol == "openvpn":
-        cid = str(ri.get("client_id", "")).lstrip("peer_").lstrip("client_")
-        return ("openvpn", cid)
-    pid = str(ri.get("peer_id", "")).lstrip("peer_").lstrip("client_")
-    return ("wireguard", pid)
-
-
-def _router_rule_key(rule: dict) -> tuple:
-    """Stable key for a router rule (matches _local_router_key)."""
-    via = rule.get("via_type", "wireguard")
-    if via == "openvpn":
-        return ("openvpn", str(rule.get("client_id", "")))
-    return ("wireguard", str(rule.get("peer_id", "")))
-
-
-def build_profile_list(router, store_data: dict, proton=None) -> list:
-    """Build the canonical profile list, merging router state with local metadata.
-
-    Stage 5: This is THE source of truth for `/api/profiles`. It iterates the
-    router's route_policy rules first (so manual SSH or GL.iNet UI changes are
-    visible) and merges in local UI metadata (color, icon, options, lan_access)
-    by matching on the stable (vpn_protocol, peer_id|client_id) key.
-
-    Stage 7: server info (name, country, city, load) is resolved live from
-    Proton via server_id rather than read from a local cache. Falls back to
-    cached values if Proton is unavailable or the server is gone.
-
-    Self-heals anonymous '@rule[N]' sections back to their fvpn_rule_NNNN names
-    when matched to a local profile, so subsequent calls use the canonical name.
-    """
-    # Index local profiles for quick lookup by (protocol, id)
-    local_vpn_by_key = {}
-    local_non_vpn = []
-    for p in store_data.get("profiles", []):
-        if p.get("type") == "vpn":
-            key = _local_router_key(p)
-            if key[1]:  # only if we have a peer/client id
-                local_vpn_by_key[key] = p
-        else:
-            local_non_vpn.append(p)
-
-    # Live router data — batched into a few SSH calls
-    try:
-        router_rules = router.get_flint_vpn_rules()  # one SSH call
-    except Exception as e:
-        log.error(f"build_profile_list: failed to read router rules: {e}")
-        router_rules = []
-
-    try:
-        vpn_assignments_raw = router.get_device_assignments()  # {mac: rule_name (router section)}
-    except Exception:
-        vpn_assignments_raw = {}
-
-    vpn_profiles = []
-    matched_local_keys = set()
-    healed_count = 0
-    rule_name_remap = {}  # router section name → canonical fvpn_rule name (for assignment count)
-
-    for rule in router_rules:
-        router_section = rule.get("rule_name", "")
-        key = _router_rule_key(rule)
-        local = local_vpn_by_key.get(key, {})
-
-        # Self-heal: if router has anonymized our section, rename it back
-        canonical_rule_name = router_section
-        if local and router_section.startswith("@rule"):
-            local_section = (local.get("router_info") or {}).get("rule_name", "")
-            if local_section and local_section.startswith("fvpn_rule"):
-                try:
-                    router.heal_anonymous_rule_section(router_section, local_section)
-                    canonical_rule_name = local_section
-                    healed_count += 1
-                    log.info(f"Healed anonymous section {router_section} → {local_section}")
-                except Exception as e:
-                    log.warning(f"Failed to heal {router_section}: {e}")
-        rule_name_remap[router_section] = canonical_rule_name
-
-        if local:
-            matched_local_keys.add(key)
-
-        # Tunnel health is per-profile and can't be batched (queries wg show / ifstatus)
-        try:
-            health = router.get_tunnel_health(canonical_rule_name)
-        except Exception:
-            health = "loading"
-
-        # router_info bridges local UI and router operations
-        ri = local.get("router_info") or {}
-        ri = dict(ri)  # don't mutate the local profile
-        ri["rule_name"] = canonical_rule_name
-        ri["vpn_protocol"] = "openvpn" if rule.get("via_type") == "openvpn" else "wireguard"
-        if rule.get("peer_id"):
-            ri.setdefault("peer_id", rule["peer_id"])
-        if rule.get("client_id"):
-            ri.setdefault("client_id", rule["client_id"])
-
-        merged = {
-            "id": local.get("id") or canonical_rule_name,
-            "type": "vpn",
-            "name": rule.get("name") or local.get("name") or canonical_rule_name,
-            "color": local.get("color", "#3498db"),
-            "icon": local.get("icon", "🔒"),
-            "is_guest": local.get("is_guest", False),
-            "kill_switch": rule.get("killswitch") == "1",
-            "health": health,
-            "server": _resolve_server_live(proton, local),
-            "server_scope": ps.normalize_server_scope(local.get("server_scope")),
-            "options": local.get("options", {}),
-            "lan_access": _normalize_lan_access(local.get("lan_access")),
-            "router_info": ri,
-            "device_count": 0,  # filled below
-        }
-        if not local:
-            merged["_orphan"] = True
-        vpn_profiles.append(merged)
-
-    # Compute device counts using the (possibly remapped) canonical rule names
-    device_counts = {}
-    for mac, router_section in vpn_assignments_raw.items():
-        canonical = rule_name_remap.get(router_section, router_section)
-        device_counts[canonical] = device_counts.get(canonical, 0) + 1
-    for p in vpn_profiles:
-        p["device_count"] = device_counts.get(p["router_info"]["rule_name"], 0)
-
-    # proton-wg profiles (wireguard-tcp / wireguard-tls): managed outside
-    # vpn-client, so they don't appear in router route_policy rules.
-    # Handle them separately from the ghost detection.
-    for key, local in local_vpn_by_key.items():
-        ri = local.get("router_info", {})
-        proto = ri.get("vpn_protocol", "")
-        if not proto.startswith("wireguard-"):
-            continue  # Not a proton-wg profile
-        matched_local_keys.add(key)  # Don't treat as ghost
-
-        p = dict(local)
-        iface = ri.get("tunnel_name", "")
-        try:
-            p["health"] = router.get_proton_wg_health(iface) if iface else "red"
-        except Exception:
-            p["health"] = "red"
-        p["kill_switch"] = True  # Always on for proton-wg (blackhole route)
-        if proton:
-            try:
-                p["server"] = _resolve_server_live(proton, local)
-            except Exception:
-                pass
-        p["lan_access"] = _normalize_lan_access(p.get("lan_access"))
-        p["device_count"] = 0
-        vpn_profiles.append(p)
-
-    # Ghost: local VPN profile whose router rule no longer exists
-    for key, local in local_vpn_by_key.items():
-        if key in matched_local_keys:
-            continue
-        ghost = dict(local)
-        ghost["health"] = "red"
-        ghost["kill_switch"] = False
-        ghost["_ghost"] = True
-        ghost.pop("status", None)
-        ghost["lan_access"] = _normalize_lan_access(ghost.get("lan_access"))
-        ghost["device_count"] = 0
-        vpn_profiles.append(ghost)
-
-    # Non-VPN profiles (local-only), sorted by display_order, always rendered after VPN
-    non_vpn = sorted(local_non_vpn, key=lambda p: p.get("display_order", 999))
-    for p in non_vpn:
-        p = dict(p)  # don't mutate the original
-        p.pop("status", None)
-        p["device_count"] = sum(
-            1 for mac, pid in store_data.get("device_assignments", {}).items()
-            if pid == p["id"]
-        )
-        p["lan_access"] = _normalize_lan_access(p.get("lan_access"))
-        vpn_profiles.append(p)
-
-    return vpn_profiles
-
-
 @app.route("/api/profiles")
+@require_unlocked
 def api_get_profiles():
-    """Get all profiles. Built from router rules + local UI metadata (Stage 5)."""
-    err = _require_unlocked()
-    if err:
-        return err
-
-    router = _get_router()
-    proton = _get_proton()
-    data = ps.load()
-    profiles = build_profile_list(router, data, proton=proton)
+    """Get all profiles. Built from router rules + local UI metadata."""
+    profiles = _get_service().build_profile_list()
     return jsonify(profiles)
 
 
 @app.route("/api/profiles", methods=["POST"])
+@require_unlocked
 def api_create_profile():
     """Create a new profile.
 
     Body: {name, type, color?, icon?, is_guest?, kill_switch?,
            server_id? (VPN), options? (VPN)}
     """
-    err = _require_unlocked()
-    if err:
-        return err
-
-    MAX_WG_GROUPS = 5
-    MAX_OVPN_GROUPS = 5
-    MAX_PWG_GROUPS = 4  # proton-wg TCP/TLS: limited by fwmark address space
-
     data = request.json
     if "name" not in data or "type" not in data:
         return jsonify({"error": "name and type required"}), 400
 
-    profile_type = data["type"]
-    vpn_protocol = data.get("vpn_protocol", "wireguard")  # "wireguard", "wireguard-tcp", "wireguard-tls", or "openvpn"
-
-    # Normalize: wireguard-tcp and wireguard-tls are both proton-wg tunnels
-    is_proton_wg = vpn_protocol in ("wireguard-tcp", "wireguard-tls")
-    wg_transport = {"wireguard-tcp": "tcp", "wireguard-tls": "tls"}.get(vpn_protocol, "udp")
-
-    # Enforce VPN group limits per protocol
-    if profile_type == "vpn":
-        existing_profiles = ps.get_profiles()
-        if is_proton_wg:
-            count = len([p for p in existing_profiles if p["type"] == "vpn"
-                         and p.get("router_info", {}).get("vpn_protocol", "").startswith("wireguard-")])
-            if count >= MAX_PWG_GROUPS:
-                return jsonify({
-                    "error": f"Cannot create more than {MAX_PWG_GROUPS} WireGuard TCP/TLS groups "
-                    "(limited by router fwmark address space)."
-                }), 400
-        elif vpn_protocol == "wireguard":
-            count = len([p for p in existing_profiles if p["type"] == "vpn"
-                         and p.get("router_info", {}).get("vpn_protocol") == "wireguard"])
-            if count >= MAX_WG_GROUPS:
-                return jsonify({
-                    "error": f"Cannot create more than {MAX_WG_GROUPS} WireGuard UDP groups. "
-                    "Try WireGuard TCP/TLS or OpenVPN instead."
-                }), 400
-        elif vpn_protocol == "openvpn":
-            count = len([p for p in existing_profiles if p.get("router_info", {}).get("vpn_protocol") == "openvpn"])
-            if count >= MAX_OVPN_GROUPS:
-                return jsonify({
-                    "error": f"Cannot create more than {MAX_OVPN_GROUPS} OpenVPN groups. "
-                    "Try WireGuard instead, or delete an existing OpenVPN group."
-                }), 400
-
-    router_info = None
-    server_info = None
-    wg_key = None
-    cert_expiry = None
-
-    # For VPN profiles: generate config and upload to router
-    if profile_type == "vpn":
-        if "server_id" not in data:
-            return jsonify({"error": "server_id required for VPN profiles"}), 400
-
-        proton = _get_proton()
-        if not proton.is_logged_in:
-            return jsonify({"error": "Not logged into ProtonVPN"}), 400
-
-        server = proton.get_server_by_id(data["server_id"])
-        options = data.get("options", {})
-        router = _get_router()
-
-        try:
-          if vpn_protocol == "openvpn":
-            # Generate OpenVPN config
-            ovpn_proto = data.get("ovpn_protocol", "udp")
-            config_str, server_info, ovpn_user, ovpn_pass = proton.generate_openvpn_config(
-                server,
-                protocol=ovpn_proto,
-                netshield=options.get("netshield", 0),
-            )
-
-            router_info = router.upload_openvpn_config(
-                profile_name=data["name"],
-                ovpn_config=config_str,
-                username=ovpn_user,
-                password=ovpn_pass,
-            )
-          else:
-            # Generate WireGuard config with persistent (365-day) certificate
-            config_str, server_info, wg_key, cert_expiry = proton.generate_wireguard_config(
-                server,
-                profile_name=data["name"],
-                netshield=options.get("netshield", 0),
-                moderate_nat=options.get("moderate_nat", False),
-                nat_pmp=options.get("nat_pmp", False),
-                vpn_accelerator=options.get("vpn_accelerator", True),
-                transport=wg_transport,
-            )
-
-            # Parse config to extract keys
-            lines = config_str.strip().splitlines()
-            private_key = public_key = endpoint = ""
-            dns = "10.2.0.1"
-            for line in lines:
-                line = line.strip()
-                if line.startswith("PrivateKey"):
-                    private_key = line.split("=", 1)[1].strip()
-                elif line.startswith("PublicKey"):
-                    public_key = line.split("=", 1)[1].strip()
-                elif line.startswith("Endpoint"):
-                    endpoint = line.split("=", 1)[1].strip()
-                elif line.startswith("DNS"):
-                    dns = line.split("=", 1)[1].strip()
-
-            if is_proton_wg:
-                # proton-wg (TCP/TLS): managed entirely by FlintVPN
-                router_info = router.upload_proton_wg_config(
-                    profile_name=data["name"],
-                    private_key=private_key,
-                    public_key=public_key,
-                    endpoint=endpoint,
-                    socket_type=wg_transport,
-                    dns=dns,
-                )
-            else:
-                # Kernel WireGuard (UDP): managed by vpn-client
-                router_info = router.upload_wireguard_config(
-                    profile_name=data["name"],
-                    private_key=private_key,
-                    public_key=public_key,
-                    endpoint=endpoint,
-                    dns=dns,
-                )
-        except Exception as e:
-            log.error(f"Failed to create VPN profile: {e}", exc_info=True)
-            return jsonify({"error": f"Failed to configure router: {e}"}), 500
-
-    # wg_key + cert_expiry are set for WG profiles (persistent cert path)
-    extra_fields = {}
-    if profile_type == "vpn" and vpn_protocol.startswith("wireguard") and wg_key:
-        extra_fields["wg_key"] = wg_key
-        extra_fields["cert_expiry"] = cert_expiry
-
-    profile = ps.create_profile(
-        name=data["name"],
-        profile_type=profile_type,
-        color=data.get("color", "#3498db"),
-        icon=data.get("icon", "🔒"),
-        is_guest=data.get("is_guest", False),
-        server=server_info,
-        options=data.get("options"),
-        router_info=router_info,
-        server_scope=ps.normalize_server_scope(data.get("server_scope")),
-        **extra_fields,
-    )
-
-    # Apply requested kill_switch state to the router (Stage 3: router is the source of truth).
-    # upload_*_config writes killswitch='1' by default; only override if the caller asked for off.
-    # proton-wg profiles always have kill switch on (blackhole route) — skip UCI operations.
-    if profile_type == "vpn" and router_info and router_info.get("rule_name") and not is_proton_wg:
-        requested_ks = data.get("kill_switch", True)
-        if not requested_ks:
-            try:
-                router.set_kill_switch(router_info["rule_name"], False)
-            except Exception as e:
-                log.warning(f"Failed to apply initial kill_switch=False for {profile['name']}: {e}")
-        # Reflect live router state in the response
-        try:
-            profile["kill_switch"] = router.get_kill_switch(router_info["rule_name"])
-        except Exception:
-            pass
-
-    log.info(f"Created profile '{profile['name']}' (type={profile['type']}, id={profile['id']})")
-    return jsonify(profile), 201
+    try:
+        profile = _get_service().create_profile(
+            name=data["name"],
+            profile_type=data["type"],
+            vpn_protocol=data.get("vpn_protocol", "wireguard"),
+            server_id=data.get("server_id"),
+            options=data.get("options"),
+            color=data.get("color", "#3498db"),
+            icon=data.get("icon", "\U0001f512"),
+            is_guest=data.get("is_guest", False),
+            kill_switch=data.get("kill_switch", True),
+            server_scope=data.get("server_scope"),
+            ovpn_protocol=data.get("ovpn_protocol", "udp"),
+        )
+        return jsonify(profile), 201
+    except LimitExceededError as e:
+        return jsonify({"error": str(e)}), 400
+    except NotLoggedInError as e:
+        return jsonify({"error": str(e)}), 400
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log.error(f"Failed to create profile: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/profiles/reorder", methods=["PUT"])
+@require_unlocked
 def api_reorder_profiles():
     """Reorder profiles.
 
-    Stage 10: VPN profile order is router-canonical — `uci reorder` is applied
-    to route_policy sections so the router evaluates rules in the same priority
-    as displayed in the dashboard. Non-VPN profiles (NoVPN/NoInternet) have no
-    router section; their order is stored locally as `display_order`.
-
-    Body: {profile_ids: ["id1", "id2", ...]} — full ordered list including
-    both VPN and non-VPN profiles.
+    Body: {profile_ids: ["id1", "id2", ...]}
     """
-    err = _require_unlocked()
-    if err:
-        return err
-
     body = request.json or {}
     ids = body.get("profile_ids", [])
     if not ids:
         return jsonify({"error": "profile_ids required"}), 400
 
-    store_data = ps.load()
-    # Index local profiles by id
-    by_id = {p["id"]: p for p in store_data.get("profiles", [])}
-
-    # Split VPN vs non-VPN, preserving the requested order within each group
-    vpn_rule_names = []
-    non_vpn_ids = []
-    for pid in ids:
-        p = by_id.get(pid)
-        if not p:
-            continue
-        if p.get("type") == "vpn":
-            rn = (p.get("router_info") or {}).get("rule_name")
-            if rn:
-                vpn_rule_names.append(rn)
-        else:
-            non_vpn_ids.append(pid)
-
-    # 1. Apply VPN order to router (source of truth for VPN profile order)
-    if vpn_rule_names:
-        try:
-            router = _get_router()
-            router.reorder_vpn_rules(vpn_rule_names)
-        except Exception as e:
-            log.warning(f"reorder_vpn_rules failed: {e}")
-
-    # 2. Apply non-VPN order to local store via display_order ints
-    for i, pid in enumerate(non_vpn_ids):
-        p = by_id.get(pid)
-        if p:
-            p["display_order"] = i
-    ps.save(store_data)
-
-    return jsonify({"success": True})
+    try:
+        _get_service().reorder_profiles(ids)
+        return jsonify({"success": True})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
 
 @app.route("/api/profiles/<profile_id>", methods=["PUT"])
+@require_unlocked
 def api_update_profile(profile_id):
-    """Update profile metadata (name, color, icon, options, kill_switch).
-
-    Kill switch is router-canonical (Stage 3): writes go directly to UCI,
-    not to local store.
-    """
-    err = _require_unlocked()
-    if err:
-        return err
-
+    """Update profile metadata (name, color, icon, options, kill_switch)."""
     data = dict(request.json or {})
-
-    # Pull kill_switch out before writing to local store — it lives on the router only
-    new_kill_switch = data.pop("kill_switch", None)
-
-    profile = ps.update_profile(profile_id, **data)
-    if profile is None:
+    try:
+        profile = _get_service().update_profile(profile_id, **data)
+        return jsonify(profile)
+    except NotFoundError:
         return jsonify({"error": "Profile not found"}), 404
-
-    router = _get_router()
-    ri = profile.get("router_info", {})
-    rule_name = ri.get("rule_name")
-    proto = ri.get("vpn_protocol", "wireguard")
-    is_pwg = proto.startswith("wireguard-")
-
-    # Apply kill_switch change to the router (source of truth).
-    # proton-wg always has kill switch on (blackhole route) — skip UCI ops.
-    if new_kill_switch is not None and rule_name and not is_pwg:
-        try:
-            router.set_kill_switch(rule_name, bool(new_kill_switch))
-            profile["kill_switch"] = router.get_kill_switch(rule_name)
-        except Exception as e:
-            log.error(f"Failed to set kill switch on {rule_name}: {e}")
-
-    # Sync name to router if this is a VPN profile (Stage 4: router is the source of truth).
-    # proton-wg profiles have no route_policy rule — name is local-only.
-    if "name" in data and rule_name and not is_pwg:
-        try:
-            router.rename_profile(
-                rule_name=rule_name,
-                new_name=data["name"],
-                peer_id=ri.get("peer_id", "") if proto != "openvpn" else "",
-                client_uci_id=ri.get("client_uci_id", "") if proto == "openvpn" else "",
-            )
-            profile["name"] = router.get_profile_name(rule_name) or data["name"]
-        except Exception as e:
-            log.warning(f"Failed to rename profile on router: {e}")
-
-    # Always include live kill_switch in the response so the UI is in sync
-    if rule_name and not is_pwg:
-        try:
-            profile["kill_switch"] = router.get_kill_switch(rule_name)
-        except Exception:
-            pass
-    elif is_pwg:
-        profile["kill_switch"] = True  # Always on
-
-    return jsonify(profile)
 
 
 @app.route("/api/profiles/<profile_id>", methods=["DELETE"])
+@require_unlocked
 def api_delete_profile(profile_id):
     """Delete a profile and tear down its tunnel if VPN."""
-    err = _require_unlocked()
-    if err:
-        return err
-
-    profile = ps.get_profile(profile_id)
-    if not profile:
-        return jsonify({"error": "Profile not found"}), 404
-
-    # Tear down router resources
-    router = _get_router()
-    if profile["type"] == "vpn" and profile.get("router_info"):
-        ri = profile["router_info"]
-        proto = ri.get("vpn_protocol", "wireguard")
-        try:
-            if proto == "openvpn":
-                router.delete_openvpn_config(
-                    ri.get("client_uci_id", ""),
-                    ri.get("rule_name", ""),
-                )
-            elif proto.startswith("wireguard-"):
-                # proton-wg: stop tunnel + delete all config/state
-                try:
-                    router.stop_proton_wg_tunnel(
-                        iface=ri.get("tunnel_name", ""),
-                        mark=ri.get("mark", ""),
-                        table_num=ri.get("table_num", 0),
-                        tunnel_id=ri.get("tunnel_id", 0),
-                    )
-                except Exception:
-                    pass
-                router.delete_proton_wg_config(
-                    iface=ri.get("tunnel_name", ""),
-                    tunnel_id=ri.get("tunnel_id", 0),
-                )
-            else:
-                # Kernel WireGuard (UDP)
-                router.delete_wireguard_config(
-                    ri.get("peer_id", ""),
-                    ri.get("rule_name", ""),
-                )
-        except Exception:
-            pass  # Best effort cleanup
-
-    log.info(f"Deleted profile '{profile['name']}' (id={profile_id})")
-
-    ps.delete_profile(profile_id)
-
-    # Sync router LAN state — handles ipset removal, rule deletion, and
-    # NoInternet reconciliation in a single pass via the new UCI execution
-    # layer (membership + structural diff against live router state).
     try:
-        _sync_lan_to_router()
-    except Exception as e:
-        log.warning(f"LAN sync after delete failed: {e}")
-
-    return jsonify({"success": True})
+        _get_service().delete_profile(profile_id)
+        return jsonify({"success": True})
+    except NotFoundError:
+        return jsonify({"error": "Profile not found"}), 404
 
 
 # ── Server Selection ──────────────────────────────────────────────────────────
 
 @app.route("/api/profiles/<profile_id>/servers")
+@require_unlocked
 def api_get_servers(profile_id):
     """Get ProtonVPN server list for a profile's server picker."""
-    err = _require_unlocked()
-    if err:
-        return err
-
-    proton = _get_proton()
+    proton = _get_service().proton
     if not proton.is_logged_in:
         return jsonify({"error": "Not logged into ProtonVPN"}), 400
 
@@ -1026,278 +348,19 @@ def api_get_servers(profile_id):
     return jsonify(servers)
 
 
-_switch_locks = {}  # Per-profile locks to prevent concurrent switches
-
-
-def _switch_server(profile_id: str, server_id: str, options: dict = None,
-                   server_scope: dict = None) -> dict:
-    """Core server-switch logic. Used by API endpoint and auto-optimizer.
-
-    Two paths depending on protocol:
-
-    WireGuard (fast path, no flicker):
-      - Update the peer's UCI config in place
-      - Atomic peer swap on the running wgclient interface via `wg set`
-        (WireGuard's native hot-reload — adds the new peer first, then
-        removes the old one)
-      - The route_policy rule, peer_id, device assignments, and section
-        position all stay the same
-      - The interface never goes down — no flicker
-
-    OpenVPN (delete + recreate path, brief flicker):
-      - openvpn doesn't support hot config reload, so we have to actually
-        recreate the instance: delete the old client config + route_policy
-        rule, upload a new one, restore the section position, reapply
-        device assignments, and bring the tunnel up if it was running.
-
-    Returns the updated profile dict. Raises on error.
-    """
-    # Per-profile lock to prevent concurrent switches
-    if profile_id not in _switch_locks:
-        _switch_locks[profile_id] = threading.Lock()
-    lock = _switch_locks[profile_id]
-
-    if not lock.acquire(blocking=False):
-        raise RuntimeError("Server switch already in progress for this profile")
-
-    try:
-        profile = ps.get_profile(profile_id)
-        if not profile:
-            raise ValueError("Profile not found")
-        if profile["type"] != "vpn":
-            raise ValueError("Not a VPN profile")
-
-        proton = _get_proton()
-        router = _get_router()
-
-        old_ri = profile.get("router_info", {}) or {}
-        rule_name = old_ri.get("rule_name", "")
-        vpn_protocol = old_ri.get("vpn_protocol", "wireguard")
-        if not rule_name:
-            raise ValueError("Profile has no router_info.rule_name")
-
-        server = proton.get_server_by_id(server_id)
-        opts = options or profile.get("options", {})
-
-        wg_key = None
-        cert_expiry = None
-
-        if vpn_protocol.startswith("wireguard"):
-            # ── WG path (kernel UDP and proton-wg TCP/TLS) ────────────────
-            new_ri, server_info, wg_key, cert_expiry = _switch_server_wireguard(
-                router, proton, profile, server, opts, old_ri,
-            )
-        else:
-            # ── OVPN delete + recreate path ───────────────────────────────
-            new_ri, server_info = _switch_server_openvpn(
-                router, proton, profile, server, opts, old_ri,
-            )
-
-        # Normalize the new scope (handles legacy shape + enforces cascade).
-        if server_scope is not None:
-            scope = ps.normalize_server_scope(server_scope)
-        else:
-            scope = ps.normalize_server_scope(profile.get("server_scope"))
-
-        # Persist updated server reference + new scope.
-        server_cache = {}
-        for k in ("id", "endpoint", "physical_server_domain", "protocol"):
-            if server_info.get(k):
-                server_cache[k] = server_info[k]
-
-        update_kwargs = {
-            "server_id": server_info.get("id", ""),
-            "server": server_cache,
-            "options": opts,
-            "server_scope": scope,
-        }
-        # router_info only changes for OVPN (delete+recreate gets a new
-        # rule_name/client_uci_id). WG keeps the same router_info.
-        if new_ri is not None:
-            update_kwargs["router_info"] = new_ri
-        # Persist the WG key + cert expiry for persistent-cert profiles.
-        if wg_key:
-            update_kwargs["wg_key"] = wg_key
-        if cert_expiry:
-            update_kwargs["cert_expiry"] = cert_expiry
-        ps.update_profile(profile_id, **update_kwargs)
-        return ps.get_profile(profile_id)
-
-    finally:
-        lock.release()
-
-
-def _switch_server_wireguard(router, proton, profile, server, opts, old_ri):
-    """WG server switch for both kernel WG (UDP) and proton-wg (TCP/TLS).
-
-    Kernel WG: in-place UCI update + live `wg set` hot peer swap (zero-flicker).
-    proton-wg: update config file + `wg setconf` on the running interface.
-
-    Reuses the profile's existing persistent WG key (Ed25519) so no new
-    certificate registration is needed — the cert is per-key, not per-server.
-
-    Returns (new_router_info_or_None, server_info, wg_key, cert_expiry).
-    router_info doesn't change for either path.
-    """
-    vpn_protocol = old_ri.get("vpn_protocol", "wireguard")
-    is_proton_wg = vpn_protocol.startswith("wireguard-")
-    transport = {"wireguard-tcp": "tcp", "wireguard-tls": "tls"}.get(vpn_protocol, "udp")
-
-    existing_wg_key = profile.get("wg_key")
-    config_str, server_info, wg_key, cert_expiry = proton.generate_wireguard_config(
-        server,
-        profile_name=profile.get("name", "Unnamed"),
-        netshield=opts.get("netshield", 0),
-        moderate_nat=opts.get("moderate_nat", False),
-        nat_pmp=opts.get("nat_pmp", False),
-        vpn_accelerator=opts.get("vpn_accelerator", True),
-        existing_wg_key=existing_wg_key,
-        transport=transport,
-    )
-    private_key = public_key = endpoint = dns = ""
-    for line in config_str.strip().splitlines():
-        line = line.strip()
-        if line.startswith("PrivateKey"):
-            private_key = line.split("=", 1)[1].strip()
-        elif line.startswith("PublicKey"):
-            public_key = line.split("=", 1)[1].strip()
-        elif line.startswith("Endpoint"):
-            endpoint = line.split("=", 1)[1].strip()
-        elif line.startswith("DNS"):
-            dns = line.split("=", 1)[1].strip()
-
-    if is_proton_wg:
-        # proton-wg: rewrite config file, then wg setconf on the live interface
-        iface = old_ri.get("tunnel_name", "protonwg0")
-        conf_path = f"{router.PROTON_WG_DIR}/{iface}.conf"
-        wg_conf = (
-            f"[Interface]\n"
-            f"PrivateKey = {private_key}\n"
-            f"\n"
-            f"[Peer]\n"
-            f"PublicKey = {public_key}\n"
-            f"AllowedIPs = 0.0.0.0/0\n"
-            f"Endpoint = {endpoint}\n"
-            f"PersistentKeepalive = 25\n"
-        )
-        router.write_file(conf_path, wg_conf)
-        router.exec(f"wg setconf {iface} {conf_path}")
-    else:
-        # Kernel WG: in-place UCI update + live wg set hot peer swap
-        peer_id = old_ri.get("peer_id", "")
-        rule_name = old_ri["rule_name"]
-        if not peer_id:
-            raise ValueError("WireGuard profile missing peer_id")
-        router.update_wireguard_peer_live(
-            peer_id=peer_id,
-            rule_name=rule_name,
-            private_key=private_key,
-            public_key=public_key,
-            endpoint=endpoint,
-            dns=dns or "10.2.0.1",
-        )
-    return None, server_info, wg_key, cert_expiry  # router_info unchanged
-
-
-def _switch_server_openvpn(router, proton, profile, server, opts, old_ri):
-    """OVPN path: delete + recreate (brief flicker, but openvpn doesn't
-    support hot config reload).
-
-    Captures section position, device assignments, and enabled state
-    before delete; restores them after upload so the user keeps their
-    group ordering and connection state.
-    """
-    rule_name = old_ri["rule_name"]
-    client_uci_id = old_ri.get("client_uci_id", "")
-    if not client_uci_id:
-        raise ValueError("OpenVPN profile missing client_uci_id")
-
-    # Capture devices currently assigned so we can reattach them.
-    old_assigned_macs = []
-    try:
-        old_assigned_macs = [
-            t.lower() for t in router._from_mac_tokens(rule_name)
-        ]
-    except Exception as e:
-        log.warning(f"_switch_server_openvpn: failed to read from_mac: {e}")
-
-    # Capture section order + enabled state for the post-upload restoration.
-    old_rule_index = None
-    old_rule_order = []
-    old_was_enabled = False
-    try:
-        existing_rules = router.get_flint_vpn_rules()
-        old_rule_order = [
-            r.get("rule_name", "")
-            for r in existing_rules
-            if r.get("rule_name", "")
-        ]
-        if rule_name in old_rule_order:
-            old_rule_index = old_rule_order.index(rule_name)
-        for r in existing_rules:
-            if r.get("rule_name") == rule_name:
-                old_was_enabled = r.get("enabled", "0") == "1"
-                break
-    except Exception as e:
-        log.warning(f"_switch_server_openvpn: failed to read rule order: {e}")
-
-    # Tear down the old client + rule (this is the flicker window).
-    try:
-        router.delete_openvpn_config(client_uci_id, rule_name)
-    except Exception as e:
-        log.warning(f"_switch_server_openvpn: delete failed: {e}")
-
-    # Generate the new .ovpn + upload as a new client section.
-    ovpn_proto = "tcp" if profile.get("server", {}).get("protocol", "").endswith("tcp") else "udp"
-    config_str, server_info, ovpn_user, ovpn_pass = proton.generate_openvpn_config(
-        server, protocol=ovpn_proto, netshield=opts.get("netshield", 0),
-    )
-    new_ri = router.upload_openvpn_config(
-        profile_name=profile["name"],
-        ovpn_config=config_str,
-        username=ovpn_user,
-        password=ovpn_pass,
-    )
-
-    # Restore section position so the dashboard order doesn't shuffle.
-    if old_rule_index is not None and new_ri.get("rule_name"):
-        try:
-            new_order = [r for r in old_rule_order if r != rule_name]
-            new_order.insert(old_rule_index, new_ri["rule_name"])
-            router.reorder_vpn_rules(new_order)
-        except Exception as e:
-            log.warning(f"_switch_server_openvpn: failed to reorder rules: {e}")
-
-    # Re-attach devices to the new rule.
-    for mac in old_assigned_macs:
-        try:
-            router.set_device_vpn(mac, new_ri["rule_name"])
-        except Exception as e:
-            log.warning(f"_switch_server_openvpn: failed to reassign {mac}: {e}")
-
-    # Only bring the new tunnel up if the old one was running.
-    if old_was_enabled:
-        router.bring_tunnel_up(new_ri["rule_name"])
-
-    return new_ri, server_info
-
-
 @app.route("/api/profiles/<profile_id>/server", methods=["PUT"])
+@require_unlocked
 def api_change_server(profile_id):
     """Change the server for a VPN profile.
 
     Body: {server_id, options?, server_scope?}
     """
-    err = _require_unlocked()
-    if err:
-        return err
-
     data = request.json
     if "server_id" not in data:
         return jsonify({"error": "server_id required"}), 400
 
     try:
-        profile = _switch_server(
+        profile = _get_service().switch_server(
             profile_id, data["server_id"],
             options=data.get("options"),
             server_scope=data.get("server_scope"),
@@ -1305,7 +368,7 @@ def api_change_server(profile_id):
         return jsonify(profile)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
-    except RuntimeError as e:
+    except (RuntimeError, ConflictError) as e:
         return jsonify({"error": str(e)}), 409
     except Exception as e:
         log.error(f"Failed to switch server: {e}", exc_info=True)
@@ -1315,474 +378,131 @@ def api_change_server(profile_id):
 # ── Tunnel Control ────────────────────────────────────────────────────────────
 
 @app.route("/api/profiles/<profile_id>/connect", methods=["POST"])
+@require_unlocked
 def api_connect(profile_id):
     """Bring a VPN profile's tunnel up."""
-    err = _require_unlocked()
-    if err:
-        return err
-
-    profile = ps.get_profile(profile_id)
-    if not profile or profile["type"] != "vpn":
-        return jsonify({"error": "VPN profile not found"}), 404
-
-    ri = profile.get("router_info", {})
-    if not ri.get("rule_name"):
-        return jsonify({"error": "No tunnel configured. Try changing the server to recreate it."}), 400
-
-    router = _get_router()
-    proto = ri.get("vpn_protocol", "wireguard")
-    is_pwg = proto.startswith("wireguard-")
-
     try:
-        log.info(f"Connecting profile '{profile['name']}' (rule={ri['rule_name']}, protocol={proto})")
-        if is_pwg:
-            # proton-wg (TCP/TLS): start the userspace tunnel
-            router.start_proton_wg_tunnel(
-                iface=ri["tunnel_name"],
-                mark=ri["mark"],
-                table_num=ri["table_num"],
-                tunnel_id=ri["tunnel_id"],
-            )
-            health = router.get_proton_wg_health(ri["tunnel_name"])
-        else:
-            # Kernel WG / OpenVPN: vpn-client manages the tunnel
-            router.bring_tunnel_up(ri["rule_name"])
-            try:
-                health = router.get_tunnel_health(ri["rule_name"])
-            except Exception:
-                health = "loading"
-        log.info(f"Profile '{profile['name']}' connect issued (health={health})")
-        return jsonify({"success": True, "health": health})
+        result = _get_service().connect_profile(profile_id)
+        return jsonify(result)
+    except NotFoundError:
+        return jsonify({"error": "VPN profile not found"}), 404
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
-        log.error(f"Failed to connect profile '{profile['name']}': {e}", exc_info=True)
+        log.error(f"Failed to connect: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/profiles/<profile_id>/disconnect", methods=["POST"])
+@require_unlocked
 def api_disconnect(profile_id):
     """Bring a VPN profile's tunnel down."""
-    err = _require_unlocked()
-    if err:
-        return err
-
-    profile = ps.get_profile(profile_id)
-    if not profile or profile["type"] != "vpn":
-        return jsonify({"error": "VPN profile not found"}), 404
-
-    ri = profile.get("router_info", {})
-    if not ri.get("rule_name"):
-        return jsonify({"error": "No tunnel configured"}), 400
-
-    router = _get_router()
-    proto = ri.get("vpn_protocol", "wireguard")
-    is_pwg = proto.startswith("wireguard-")
-
     try:
-        log.info(f"Disconnecting profile '{profile['name']}' (rule={ri['rule_name']})")
-        if is_pwg:
-            router.stop_proton_wg_tunnel(
-                iface=ri["tunnel_name"],
-                mark=ri["mark"],
-                table_num=ri["table_num"],
-                tunnel_id=ri["tunnel_id"],
-            )
-        else:
-            router.bring_tunnel_down(ri["rule_name"])
-        log.info(f"Profile '{profile['name']}' disconnected")
-        return jsonify({"success": True, "health": "red"})
+        result = _get_service().disconnect_profile(profile_id)
+        return jsonify(result)
+    except NotFoundError:
+        return jsonify({"error": "VPN profile not found"}), 404
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
-        log.error(f"Failed to disconnect profile '{profile['name']}': {e}", exc_info=True)
+        log.error(f"Failed to disconnect: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/profiles/<profile_id>/guest", methods=["PUT"])
+@require_unlocked
 def api_set_guest(profile_id):
     """Set this profile as the guest profile."""
-    err = _require_unlocked()
-    if err:
-        return err
-
-    if not ps.set_guest_profile(profile_id):
+    try:
+        _get_service().set_guest_profile(profile_id)
+        return jsonify({"success": True})
+    except NotFoundError:
         return jsonify({"error": "Profile not found"}), 404
-    return jsonify({"success": True})
 
 
 # ── Devices ───────────────────────────────────────────────────────────────────
 
 @app.route("/api/devices/<mac>/label", methods=["PUT"])
+@require_unlocked
 def api_set_device_label(mac):
     """Set a custom label and/or device class for a device.
 
-    Stage 8: gl-client.alias and gl-client.class are router-canonical.
-    No local cache write — _build_devices_live reads them from the router live.
-
     Body: {label: "Living Room TV", device_class?: "computer"}
     """
-    err = _require_unlocked()
-    if err:
-        return err
-
     data = request.json or {}
     label = data.get("label", "").strip()
     device_class = data.get("device_class", "")
 
     try:
-        router = _get_router()
-        mac_upper = mac.upper()
-        existing = router.exec(
-            f"uci show gl-client 2>/dev/null | grep -B1 \"mac='{mac_upper}'\" | "
-            "grep '=client' | head -1 | cut -d. -f2 | cut -d= -f1"
-        ).strip()
-        if existing:
-            section = existing
-        else:
-            router.exec(f"uci add gl-client client")
-            section = router.exec(
-                "uci show gl-client 2>/dev/null | grep '=client' | tail -1 | "
-                "cut -d. -f2 | cut -d= -f1"
-            ).strip()
-            router.exec(f"uci set gl-client.{section}.mac='{mac_upper}'")
-
-        cmds = [f"uci set gl-client.{section}.alias='{label}'"]
-        if device_class:
-            cmds.append(f"uci set gl-client.{section}.class='{device_class}'")
-        cmds.append("uci commit gl-client")
-        router.exec(" && ".join(cmds))
+        _get_service().set_device_label(mac, label, device_class)
+        return jsonify({"success": True, "label": label, "device_class": device_class})
     except Exception as e:
         log.error(f"Failed to set device label on router: {e}")
         return jsonify({"error": str(e)}), 500
 
-    # Invalidate cache so next /api/devices call picks up the change
-    _invalidate_device_cache()
-    return jsonify({"success": True, "label": label, "device_class": device_class})
-
-
-def _resolve_device_assignments(router, store_data: dict) -> dict:
-    """Return {mac: profile_id} merging router VPN assignments + local non-VPN.
-
-    Stage 5: VPN assignments come from router.from_mac (canonical). Matching
-    is by stable (vpn_protocol, peer_id|client_id) key — survives section
-    renames by the GL.iNet UI.
-    Non-VPN/NoInternet assignments come from local profile_store.
-    """
-    # (protocol, id) → local profile_id  AND  router_section_name → local profile_id
-    key_to_pid = {}
-    rule_section_to_pid = {}
-    for p in store_data.get("profiles", []):
-        if p.get("type") == "vpn":
-            k = _local_router_key(p)
-            if k[1]:
-                key_to_pid[k] = p["id"]
-            rn = (p.get("router_info") or {}).get("rule_name")
-            if rn:
-                rule_section_to_pid[rn] = p["id"]
-
-    try:
-        rules = router.get_flint_vpn_rules()
-    except Exception:
-        rules = []
-    # router section name → local profile_id, resolved via stable key
-    section_to_pid = {}
-    for rule in rules:
-        section = rule.get("rule_name", "")
-        if not section:
-            continue
-        key = _router_rule_key(rule)
-        pid = key_to_pid.get(key) or rule_section_to_pid.get(section)
-        if pid:
-            section_to_pid[section] = pid
-
-    try:
-        vpn_assignments_raw = router.get_device_assignments()
-    except Exception:
-        vpn_assignments_raw = {}
-
-    out = {}
-    for mac, section in vpn_assignments_raw.items():
-        pid = section_to_pid.get(section)
-        if pid:
-            out[mac] = pid
-        # Else: orphan rule on router — device shows as unassigned
-
-    # proton-wg profiles: read ipset membership directly
-    for p in store_data.get("profiles", []):
-        ri = p.get("router_info") or {}
-        if not ri.get("vpn_protocol", "").startswith("wireguard-"):
-            continue
-        ipset_name = ri.get("ipset_name", f"src_mac_{ri.get('tunnel_id', 0)}")
-        try:
-            members = router.exec(
-                f"ipset list {ipset_name} 2>/dev/null | awk 'p{{print}} /^Members:/{{p=1}}'"
-            ).strip()
-            for mac_line in members.splitlines():
-                mac_val = mac_line.strip().lower()
-                if mac_val:
-                    out[mac_val] = p["id"]
-        except Exception:
-            pass
-
-    # Non-VPN: local store
-    for mac, pid in store_data.get("device_assignments", {}).items():
-        if pid is None:
-            continue
-        for p in store_data.get("profiles", []):
-            if p.get("id") == pid and p.get("type") != "vpn":
-                out[mac] = pid
-                break
-    return out
-
-
-# Stage 8: in-memory device cache with short TTL.
-# Avoids hammering the router on rapid SSE ticks while keeping the data live.
-_device_cache = {"data": None, "ts": 0.0}
-_DEVICE_CACHE_TTL = 5  # seconds
-
-
-def _invalidate_device_cache():
-    _device_cache["data"] = None
-    _device_cache["ts"] = 0.0
-
-
-def _build_devices_live(router) -> list:
-    """Build the device list from live router data (Stage 8).
-
-    Sources:
-      - DHCP leases (router /tmp/dhcp.leases): mac, ip, hostname
-      - GL.iNet client tracking (ubus call gl-clients list): online, speeds,
-        signal, alias (= user-set label), device_class
-      - Router from_mac lists: VPN profile assignment (via _resolve_device_assignments)
-      - Local store: non-VPN profile assignment + LAN access overrides
-
-    Hostname / IP / online / class / label / speeds are NEVER cached on disk.
-    Display name precedence: gl-client.alias > DHCP hostname > MAC.
-    """
-    try:
-        leases = router.get_dhcp_leases()
-    except Exception:
-        leases = []
-    try:
-        client_details = router.get_client_details()
-    except Exception:
-        client_details = {}
-
-    store_data = ps.load()
-    assignment_map = _resolve_device_assignments(router, store_data)
-
-    devices = {}
-    for lease in leases:
-        mac = lease["mac"].lower()
-        devices[mac] = {
-            "mac": mac,
-            "ip": lease.get("ip", ""),
-            "hostname": lease.get("hostname", ""),
-            "label": "",
-            "device_class": "",
-            "profile_id": assignment_map.get(mac),
-            "router_online": False,
-            "iface": "",
-            "rx_speed": 0,
-            "tx_speed": 0,
-            "total_rx": 0,
-            "total_tx": 0,
-            "signal_dbm": None,
-            "link_speed_mbps": None,
-        }
-
-    for mac, details in client_details.items():
-        mac = mac.lower()
-        d = devices.setdefault(mac, {
-            "mac": mac,
-            "ip": "",
-            "hostname": "",
-            "profile_id": assignment_map.get(mac),
-        })
-        d["router_online"] = bool(details.get("online", False))
-        d["device_class"] = details.get("device_class", "")
-        d["label"] = details.get("alias", "")  # router-canonical custom label
-        d["rx_speed"] = details.get("rx_speed", 0)
-        d["tx_speed"] = details.get("tx_speed", 0)
-        d["total_rx"] = details.get("total_rx", 0)
-        d["total_tx"] = details.get("total_tx", 0)
-        d["signal_dbm"] = details.get("signal_dbm")
-        d["link_speed_mbps"] = details.get("link_speed_mbps")
-        d["iface"] = details.get("iface", "")
-        if details.get("ip") and not d.get("ip"):
-            d["ip"] = details["ip"]
-        # gl-clients exposes a 'name' field (mDNS/Bonjour discovered hostname)
-        # for devices not currently in DHCP leases. Use it as a hostname fallback
-        # so offline / recently-departed devices still display their name.
-        if not d.get("hostname") and details.get("name"):
-            d["hostname"] = details["name"]
-
-    # Router-only MACs (e.g. assigned via SSH but never seen via DHCP)
-    for mac, pid in assignment_map.items():
-        if mac not in devices:
-            devices[mac] = {
-                "mac": mac, "ip": "", "hostname": "", "label": "",
-                "device_class": "", "profile_id": pid, "router_online": False,
-                "iface": "", "rx_speed": 0, "tx_speed": 0, "total_rx": 0,
-                "total_tx": 0, "signal_dbm": None, "link_speed_mbps": None,
-            }
-
-    # Display name precedence and effective LAN access
-    out = []
-    for mac, d in sorted(devices.items()):
-        d["display_name"] = d.get("label") or d.get("hostname") or mac
-        eff = ps.get_effective_lan_access(mac, store_data)
-        d["lan_outbound"] = eff["outbound"]
-        d["lan_inbound"] = eff["inbound"]
-        d["lan_inherited"] = eff["inherited"]
-        d["lan_outbound_allow"] = eff.get("outbound_allow", [])
-        d["lan_inbound_allow"] = eff.get("inbound_allow", [])
-        d["last_seen"] = None  # legacy field, no longer tracked
-        out.append(d)
-    return out
-
-
-def _get_devices_cached(router) -> list:
-    """5-second TTL wrapper around _build_devices_live to throttle SSH calls."""
-    now = time.time()
-    if _device_cache["data"] is not None and (now - _device_cache["ts"]) < _DEVICE_CACHE_TTL:
-        return _device_cache["data"]
-    _device_cache["data"] = _build_devices_live(router)
-    _device_cache["ts"] = now
-    return _device_cache["data"]
-
 
 @app.route("/api/devices")
+@require_unlocked
 def api_get_devices():
-    """Get all devices, fetched live from router (Stage 8)."""
-    err = _require_unlocked()
-    if err:
-        return err
-
-    router = _get_router()
-    return jsonify(_get_devices_cached(router))
+    """Get all devices, fetched live from router."""
+    return jsonify(_get_service().get_devices_cached())
 
 
 @app.route("/api/devices/<mac>/profile", methods=["PUT"])
+@require_unlocked
 def api_assign_device(mac):
     """Assign a device to a profile.
 
     Body: {profile_id: "uuid" or null}
-
-    Stage 5: VPN assignments are written ONLY to the router (source of truth).
-    Non-VPN/NoInternet assignments are written to local profile_store.
     """
-    err = _require_unlocked()
-    if err:
-        return err
-
     try:
-        mac = ps._validate_mac(mac)
+        mac = ps.validate_mac(mac)
     except ValueError:
         return jsonify({"error": f"Invalid MAC address: {mac}"}), 400
 
     data = request.json
     profile_id = data.get("profile_id")
 
-    router = _get_router()
-    store_data = ps.load()
-
-    # Always clear any router VPN rule containing this MAC (idempotent).
-    # NoInternet membership is handled by the LAN sync at the end (single
-    # ipset, derived from local assignments).
     try:
-        router.remove_device_from_all_vpn(mac)
-    except Exception as e:
-        log.warning(f"remove_device_from_all_vpn({mac}) failed: {e}")
-
-    # Apply new assignment
-    if profile_id:
-        new_profile = ps.get_profile(profile_id)
-        if not new_profile:
-            return jsonify({"error": "Profile not found"}), 404
-
-        if new_profile["type"] == "vpn" and new_profile.get("router_info"):
-            ri = new_profile["router_info"]
-            proto = ri.get("vpn_protocol", "wireguard")
-            # Router is the source for VPN assignments. Drop any local
-            # entry so we don't double-track (and so a future unassign
-            # can write a fresh sticky-None marker).
-            if mac in store_data.get("device_assignments", {}):
-                del store_data["device_assignments"][mac]
-                ps.save(store_data)
-            if proto.startswith("wireguard-"):
-                # proton-wg: add MAC to ipset directly (no route_policy rule)
-                ipset_name = ri.get("ipset_name", f"src_mac_{ri.get('tunnel_id', 0)}")
-                router.exec(f"ipset create {ipset_name} hash:mac -exist")
-                router.exec(f"ipset add {ipset_name} {mac} -exist")
-            else:
-                # Kernel WG / OpenVPN: use route_policy rule
-                router.set_device_vpn(mac, ri["rule_name"])
-        else:
-            # no_vpn / no_internet — local store; LAN sync below applies the
-            # router-side execution (NoInternet ipset membership).
-            ps.assign_device(mac, profile_id)
-    else:
-        # Explicit unassign. Write a sticky-None marker so the device tracker
-        # won't auto-reassign this MAC to the guest group on the next unlock
-        # or restart (the in-memory _known_macs set is wiped on every fresh
-        # tracker instance, so the local store is the only durable signal).
-        ps.assign_device(mac, None)
-
-    target = ps.get_profile(profile_id)["name"] if profile_id and ps.get_profile(profile_id) else "Unassigned"
-    log.info(f"Device {mac} assigned to '{target}'")
-
-    # Single sync handles both LAN access (per-group ipsets) and NoInternet
-    # (the global fvpn_noint_ips ipset). Replaces _rebuild_lan_rules +
-    # _reconcile_no_internet_rules.
-    try:
-        _sync_lan_to_router()
-    except Exception as e:
-        log.warning(f"LAN sync after assignment failed: {e}")
-
-    # Invalidate the device cache so the next /api/devices call sees the new assignment
-    _invalidate_device_cache()
-
-    return jsonify({"success": True})
+        _get_service().assign_device(mac, profile_id)
+        return jsonify({"success": True})
+    except NotFoundError:
+        return jsonify({"error": "Profile not found"}), 404
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
 
 # ── LAN Access Control ────────────────────────────────────────────────────────
 
 @app.route("/api/profiles/<profile_id>/lan-access", methods=["PUT"])
+@require_unlocked
 def api_set_profile_lan_access(profile_id):
     """Set LAN access rules for a profile.
 
     Body: {"outbound": "allowed"|"group_only"|"blocked",
            "inbound": "allowed"|"group_only"|"blocked"}
     """
-    err = _require_unlocked()
-    if err:
-        return err
-
     data = request.json
-    outbound = data.get("outbound", "allowed")
-    inbound = data.get("inbound", "allowed")
+    outbound = data.get("outbound", LAN_ALLOWED)
+    inbound = data.get("inbound", LAN_ALLOWED)
     outbound_allow = data.get("outbound_allow", [])
     inbound_allow = data.get("inbound_allow", [])
 
     try:
-        result = ps.set_profile_lan_access(
+        result = _get_service().set_profile_lan_access(
             profile_id, outbound, inbound,
-            outbound_allow=outbound_allow, inbound_allow=inbound_allow,
+            outbound_allow=outbound_allow,
+            inbound_allow=inbound_allow,
         )
+        return jsonify({"success": True, "lan_access": result.get("lan_access")})
+    except NotFoundError:
+        return jsonify({"error": "Profile not found"}), 404
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
-    if not result:
-        return jsonify({"error": "Profile not found"}), 404
-
-    try:
-        _sync_lan_to_router()
-    except Exception as e:
-        log.warning(f"LAN sync failed: {e}")
-
-    log.info(f"LAN access for profile '{result['name']}': out={outbound}, in={inbound}")
-    return jsonify({"success": True, "lan_access": result.get("lan_access")})
-
 
 @app.route("/api/devices/<mac>/lan-access", methods=["PUT"])
+@require_unlocked
 def api_set_device_lan_access(mac):
     """Set per-device LAN access override.
 
@@ -1790,10 +510,6 @@ def api_set_device_lan_access(mac):
            "inbound": "allowed"|"group_only"|"blocked"|null}
     null values mean inherit from group.
     """
-    err = _require_unlocked()
-    if err:
-        return err
-
     data = request.json
     outbound = data.get("outbound")
     inbound = data.get("inbound")
@@ -1801,31 +517,22 @@ def api_set_device_lan_access(mac):
     inbound_allow = data.get("inbound_allow", [])
 
     try:
-        ps.set_device_lan_override(
+        _get_service().set_device_lan_override(
             mac, outbound, inbound,
-            outbound_allow=outbound_allow, inbound_allow=inbound_allow,
+            outbound_allow=outbound_allow,
+            inbound_allow=inbound_allow,
         )
+        return jsonify({"success": True})
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
-
-    try:
-        _sync_lan_to_router()
-    except Exception as e:
-        log.warning(f"LAN sync failed: {e}")
-
-    log.info(f"LAN override for {mac}: out={outbound}, in={inbound}")
-    return jsonify({"success": True})
 
 
 # ── Refresh ───────────────────────────────────────────────────────────────────
 
 @app.route("/api/refresh", methods=["POST"])
+@require_unlocked
 def api_refresh():
     """Refresh DHCP leases, tunnel handshakes, and server list."""
-    err = _require_unlocked()
-    if err:
-        return err
-
     tracker = get_tracker()
     if tracker:
         tracker.poll_once()
@@ -1851,19 +558,16 @@ def api_stream():
                 if tracker:
                     tracker.poll_once()
 
-                data = ps.load()
-                router = _get_router()
-                proton = _get_proton()
+                service = _get_service()
 
-                # Build the canonical profile list once per tick — this batches
-                # router queries and gives us live health, kill_switch, name,
-                # device assignments, and (Stage 7) live Proton server info.
-                merged_profiles = build_profile_list(router, data, proton=proton)
+                # Build the canonical profile list once per tick
+                data = ps.load()
+                merged_profiles = service.build_profile_list(data)
                 tunnel_health = {}
                 kill_switch_state = {}
                 profile_names = {}
                 for p in merged_profiles:
-                    if p.get("type") != "vpn":
+                    if p.get("type") != PROFILE_TYPE_VPN:
                         continue
                     pid = p["id"]
                     if "health" in p:
@@ -1876,16 +580,14 @@ def api_stream():
                 # Sync LAN rules if device IPs changed
                 if tracker and tracker.lan_rules_stale:
                     try:
-                        _sync_lan_to_router()
+                        service.sync_lan_to_router()
                         tracker.lan_rules_stale = False
                     except Exception:
                         pass
 
-                # Stage 8: device list is fully live from router (DHCP + gl-clients).
-                # Cache invalidation: refresh on every SSE tick (10s) so the SSE
-                # always reflects the latest device state.
-                _invalidate_device_cache()
-                all_devices = _get_devices_cached(router)
+                # Device list: refresh on every SSE tick (10s)
+                service.invalidate_device_cache()
+                all_devices = service.get_devices_cached()
 
                 event_data = {
                     "tunnel_health": tunnel_health,
@@ -1907,12 +609,9 @@ def api_stream():
 # ── Logs ──────────────────────────────────────────────────────────────────────
 
 @app.route("/api/logs")
+@require_unlocked
 def api_get_logs():
     """Get available log files."""
-    err = _require_unlocked()
-    if err:
-        return err
-
     logs = []
     for f in sorted(LOG_DIR.glob("*.log")):
         logs.append({
@@ -1924,15 +623,12 @@ def api_get_logs():
 
 
 @app.route("/api/logs/<name>")
+@require_unlocked
 def api_get_log_content(name):
     """Get the last N lines of a log file.
 
     Query params: lines (default 100)
     """
-    err = _require_unlocked()
-    if err:
-        return err
-
     # Sanitize filename
     if "/" in name or ".." in name or not name.endswith(".log"):
         return jsonify({"error": "Invalid log name"}), 400
@@ -1955,12 +651,9 @@ def api_get_log_content(name):
 
 
 @app.route("/api/logs/<name>", methods=["DELETE"])
+@require_unlocked
 def api_clear_log(name):
     """Clear a log file."""
-    err = _require_unlocked()
-    if err:
-        return err
-
     if "/" in name or ".." in name or not name.endswith(".log"):
         return jsonify({"error": "Invalid log name"}), 400
 
@@ -1992,12 +685,9 @@ def api_update_settings():
 
 
 @app.route("/api/settings/credentials", methods=["PUT"])
+@require_unlocked
 def api_update_credentials():
     """Update encrypted credentials."""
-    err = _require_unlocked()
-    if err:
-        return err
-
     data = request.json
     master_password = data.pop("master_password", None)
     if not master_password:
@@ -2011,15 +701,12 @@ def api_update_credentials():
 
 
 @app.route("/api/settings/master-password", methods=["PUT"])
+@require_unlocked
 def api_change_master_password():
     """Change the master password.
 
     Body: {old_password, new_password}
     """
-    err = _require_unlocked()
-    if err:
-        return err
-
     data = request.json
     old_password = data.get("old_password")
     new_password = data.get("new_password")

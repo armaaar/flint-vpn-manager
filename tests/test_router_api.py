@@ -189,7 +189,7 @@ class TestDevicePolicy:
     def test_remove_device_from_all_vpn_uses_ipset_not_rtp2(self, mock_router):
         """Stage 1: remove_from_all uses ipset del per rule, never rtp2.sh.
 
-        Reads rules via get_flint_vpn_rules and from_mac via _from_mac_tokens
+        Reads rules via get_flint_vpn_rules and from_mac via from_mac_tokens
         (to preserve case for UCI del_list).
         """
         mock_router._exec_responses["uci show route_policy"] = (

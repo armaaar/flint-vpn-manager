@@ -1,7 +1,8 @@
 <script>
   import { devices, profiles, showToast, movingDevices } from '../stores/app.js';
   import { api } from '../api.js';
-  import { isOnline, deviceIcon, countryFlagUrl } from '../utils.js';
+  import { isOnline, deviceIcon } from '../device-utils.js';
+  import { countryFlagUrl } from '../country.js';
 
   import { dndzone } from 'svelte-dnd-action';
   import DeviceRow from './DeviceRow.svelte';
