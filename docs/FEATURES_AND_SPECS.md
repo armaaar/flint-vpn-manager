@@ -11,7 +11,7 @@ Three kinds of groups (also called "profiles") exist. Each has its own routing s
 ### VPN groups
 Route assigned devices through a ProtonVPN tunnel.
 
-- **Protocols**: WireGuard, OpenVPN/UDP, OpenVPN/TCP
+- **Protocols**: WireGuard UDP (kernel, fastest), WireGuard TCP (bypasses firewalls), WireGuard TLS/Stealth (looks like HTTPS), OpenVPN/UDP, OpenVPN/TCP
 - **Server selection**: 3-level browser (Country → City → Server) with feature filters (streaming, P2P, Secure Core, Tor) and load indicators
 - **Server scope** — how the group picks its server:
   - **Country** — auto-pick the best server in the chosen country
@@ -25,8 +25,7 @@ Route assigned devices through a ProtonVPN tunnel.
   - **NAT-PMP** — WireGuard-only; UPnP-style port forwarding
   - **Secure Core** — multi-hop entry through CH/SE/IS
 - **Connect/Disconnect** — explicit buttons; live state via SSE
-- **Auto-switch hint** — when the current server's load is significantly higher than another in scope, a "⚡ Faster" hint appears with a one-click switch
-- **Auto-optimizer** — background thread that, at a configured time of day, switches eligible groups (scope ≠ "server") to lower-load servers
+- **Auto-optimizer** — background thread that, at a configured time of day, switches eligible groups (scope ≠ "server") to servers with better Proton scores. Uses a 20% relative improvement threshold and 6-hour per-profile cooldown to prevent flapping.
 
 ### No VPN groups
 Devices use the LAN's normal default route (no VPN). Useful for putting trusted devices on direct internet while keeping LAN isolation rules.
@@ -70,7 +69,7 @@ Granular firewall rules controlling device-to-device LAN traffic. Independent of
 - **Direction is one-way** — `inbound_allow` opens inbound only; the reverse direction is unaffected. (If you want symmetric access, also add the corresponding `outbound_allow` on the other side, or rely on the other group already being open in that direction.)
 - **No subtraction (v1)** — there's no way to express *"all of Group X except this one member"*. Forward-compatible with adding deny lists later if a real case appears.
 - **Profile-deletion cleanup** — deleting a group automatically strips its profile ID from every other group's and device override's allow lists.
-- **Implementation** — iptables rules in the `fvpn_lan` chain; ipsets `fvpn_lmac_<short>` (MAC set) and `fvpn_lip_<short>` (IP set) per group that needs them. Allow-list ACCEPT rules are emitted **before** the corresponding DROP rule for each device, with device-override rules taking priority over group rules.
+- **Implementation** — UCI-native `config ipset` and `config rule` sections in `/etc/config/firewall`, managed by `fw3`. Per-group ipsets: `fvpn_lan_{short_id}_ips` (IP membership), `fvpn_extra_{short_id}_{dir}_ips` (exception IPs). Per-device overrides: `fvpn_devovr_{mac}_{dir}_ips`. Global NoInternet: `fvpn_noint_ips`. Device-override rules are emitted before group rules in UCI section order so they take precedence in the iptables chain.
 - **Live IP source** — device IPs come from `router.get_dhcp_leases()` at rule-build time, not from any local cache. Allow-list peers with no resolvable DHCP IP are silently skipped.
 - **Triggers** — rules are rebuilt on session unlock, profile create/delete, device assignment change, LAN setting change, and when the device tracker detects an IP change for a restricted device
 
@@ -82,7 +81,6 @@ Server-Sent Events (`/api/stream`) push every 10 seconds:
 - **`tunnel_health`** per VPN profile — `green`/`amber`/`red`/`connecting`/`loading`/`unknown`. Computed live from `wg show` handshake age (or OVPN interface state).
 - **`kill_switch`** per VPN profile — live from `route_policy.killswitch`
 - **`profile_names`** per VPN profile — live from `route_policy.name`, so renames done via SSH propagate without a manual refresh
-- **`better_servers`** per profile (every 3rd tick, ~30s) — passive optimizer hint
 - **`devices[]`** — full live device list
 
 The frontend never persists transient state. Loading spinners come from `health: "loading"` (set when an SSH call fails) or `connecting` (live from the router). Connect/disconnect buttons get an immediate optimistic update from the API response, then SSE confirms.
@@ -145,9 +143,10 @@ GET    /                                → serve Svelte frontend
 
 | Resource | Limit | Source |
 |----------|-------|--------|
-| WireGuard tunnels | 5 | GL.iNet firmware (`wgclient1`–`wgclient5`, marks `0x1000`–`0x5000`) |
-| OpenVPN tunnels | 5 | GL.iNet firmware (`ovpnclient1`–`ovpnclient5`, marks `0xa000`–`0xe000`) |
-| Total simultaneous VPN tunnels | 10 | sum of above |
+| WireGuard UDP tunnels | 5 | GL.iNet vpn-client (`wgclient1`–`wgclient5`, marks `0x1000`–`0x5000`) |
+| WireGuard TCP/TLS tunnels | 4 | FlintVPN proton-wg (`protonwg0`–`protonwg3`, marks `0x6000`/`0x7000`/`0x9000`/`0xf000`) |
+| OpenVPN tunnels | 5 | GL.iNet vpn-client (`ovpnclient1`–`ovpnclient5`, marks `0xa000`–`0xe000`) |
+| Total simultaneous VPN tunnels | 14 | 5 + 4 + 5 (limited by fwmark address space) |
 | DHCP devices | 150 | pool `192.168.8.100`–`.249` |
 | MACs per group ipset | 65,536 | ipset `hash:mac` default |
 
