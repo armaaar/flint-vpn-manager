@@ -224,6 +224,8 @@
             {:else if profile.type === 'no_internet'}LAN Only
             {:else if profile.router_info?.vpn_protocol === 'openvpn'}
               {profile.server?.protocol === 'openvpn-tcp' ? 'OVPN TCP' : 'OVPN UDP'}
+            {:else if profile.router_info?.vpn_protocol === 'wireguard-tls'}Stealth
+            {:else if profile.router_info?.vpn_protocol === 'wireguard-tcp'}WG TCP
             {:else}WG
             {/if}
           </span>
