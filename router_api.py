@@ -242,7 +242,12 @@ class RouterAPI:
     # ── WireGuard Config Management ───────────────────────────────────────
 
     def _next_tunnel_id(self) -> int:
-        """Find the next available tunnel_id for route policy."""
+        """Find the next available tunnel_id.
+
+        Checks BOTH route_policy UCI rules (kernel WG + OVPN) AND
+        existing src_mac_* ipsets (proton-wg tunnels) to avoid collisions.
+        """
+        # IDs used by route_policy (kernel WG + OVPN)
         existing = self.exec(
             "uci show route_policy 2>/dev/null | grep 'tunnel_id=' | "
             "sed \"s/.*='\\([^']*\\)'/\\1/\""
@@ -253,6 +258,17 @@ class RouterAPI:
                 used.add(int(line.strip()))
             except ValueError:
                 pass
+        # IDs used by proton-wg (ipset names are src_mac_<tunnel_id>)
+        ipsets = self.exec(
+            "ipset list -n 2>/dev/null | grep '^src_mac_'"
+        )
+        for line in ipsets.strip().splitlines():
+            line = line.strip()
+            if line.startswith("src_mac_"):
+                try:
+                    used.add(int(line.split("_")[-1]))
+                except ValueError:
+                    pass
         # Start from 300 to avoid conflicts with built-in IDs
         for tid in range(300, 400):
             if tid not in used:
@@ -360,6 +376,7 @@ class RouterAPI:
             "group_id": group_id,
             "tunnel_id": tunnel_id,
             "rule_name": rule_name,
+            "vpn_protocol": "wireguard",
         }
 
     # ── OpenVPN Config Management ──────────────────────────────────────────
@@ -488,6 +505,110 @@ class RouterAPI:
         # Restart to apply
         self.exec("/etc/init.d/vpn-client restart &>/dev/null")
 
+    def update_wireguard_peer_live(
+        self,
+        peer_id: str,
+        rule_name: str,
+        private_key: str,
+        public_key: str,
+        endpoint: str,
+        dns: str = "10.2.0.1",
+    ):
+        """Update an existing WireGuard peer in place AND apply it live.
+
+        WireGuard's design supports hot peer add/remove via `wg set` without
+        tearing down the interface. The flow:
+          1. Read the old peer's public key from UCI (so we can remove it).
+          2. Update the peer's UCI fields (private_key, public_key, end_point,
+             dns) so the new config persists across reboots and survives a
+             vpn-client restart from elsewhere.
+          3. If the rule is mapped to a running wgclient<N> interface,
+             atomically swap peers via `wg set`: add the new peer first,
+             then remove the old one. The data plane keeps flowing through
+             the new peer immediately — no interface tear-down, no flicker.
+          4. If the rule isn't currently running, just commit UCI; the next
+             vpn-client restart will pick it up.
+
+        Used by `_switch_server` for the WireGuard fast path. Avoids the
+        delete-and-recreate flicker that the OpenVPN path still has.
+        """
+        # 1. Capture the old public key BEFORE we overwrite it.
+        old_public_key = self.exec(
+            f"uci -q get wireguard.{peer_id}.public_key 2>/dev/null || true"
+        ).strip()
+
+        # 2. Update UCI for persistence (idempotent).
+        self.exec(
+            f"uci set wireguard.{peer_id}.private_key='{private_key}' && "
+            f"uci set wireguard.{peer_id}.public_key='{public_key}' && "
+            f"uci set wireguard.{peer_id}.end_point='{endpoint}' && "
+            f"uci set wireguard.{peer_id}.dns='{dns}' && "
+            "uci commit wireguard"
+        )
+
+        # 3. Find the live wgclient interface (if any) bound to this rule.
+        iface = ""
+        try:
+            iface = self.exec(
+                f"uci -q get route_policy.{rule_name}.via 2>/dev/null || true"
+            ).strip()
+        except Exception:
+            iface = ""
+        if not iface or not iface.startswith("wgclient"):
+            return  # Not running — UCI commit alone is enough.
+
+        # Verify the interface is actually up before trying to wg set on it.
+        try:
+            wg_check = self.exec(
+                f"wg show {iface} 2>/dev/null | head -1 || true"
+            ).strip()
+        except Exception:
+            wg_check = ""
+        if not wg_check.startswith("interface:"):
+            return  # Interface not running — nothing to update live.
+
+        # 4. Atomic peer swap. wg set processes args left-to-right, so we
+        # add the new peer first (so traffic has somewhere to go), then
+        # remove the old one. This is the WireGuard-recommended hot-swap.
+        cmd_parts = [f"wg set {iface}"]
+        cmd_parts.append(
+            f"peer {public_key}"
+            f" allowed-ips 0.0.0.0/0"
+            f" endpoint {endpoint}"
+            f" persistent-keepalive 25"
+        )
+        if old_public_key and old_public_key != public_key:
+            cmd_parts.append(f"peer {old_public_key} remove")
+        try:
+            self.exec(" ".join(cmd_parts))
+        except Exception as e:
+            # Best-effort; if wg set fails the UCI is already updated and
+            # the next vpn-client restart will eventually apply it.
+            pass
+
+    def update_openvpn_client(
+        self,
+        client_uci_id: str,
+        ovpn_config: str,
+        username: str,
+        password: str,
+    ):
+        """Update an existing OpenVPN client's config file in place.
+
+        Same purpose as `update_wireguard_peer`: swap to a different server
+        without deleting the route_policy rule. Overwrites the .ovpn file
+        and the auth file under /etc/openvpn/profiles/<client_uci_id>/.
+        After the file write, vpn-client must be restarted.
+        """
+        profile_dir = f"/etc/openvpn/profiles/{client_uci_id}"
+        ovpn_config_fixed = ovpn_config.replace("{CLIENT_ID}", client_uci_id)
+        self.write_file(f"{profile_dir}/config.ovpn", ovpn_config_fixed)
+        self.write_file(
+            f"{profile_dir}/auth/username_password.txt",
+            f"{username}\n{password}\n",
+        )
+        self.exec(f"chmod 600 {profile_dir}/auth/username_password.txt")
+
     def delete_wireguard_config(self, peer_id: str, rule_name: str):
         """Remove a WireGuard config and route policy rule.
 
@@ -509,6 +630,486 @@ class RouterAPI:
 
         # Restart again to apply final state
         self.exec("/etc/init.d/vpn-client restart &>/dev/null")
+
+    # ── proton-wg (WireGuard TCP/TLS) Management ──────────────────────────
+    #
+    # proton-wg is a userspace WireGuard implementation (ProtonVPN's
+    # wireguard-go fork) that supports TCP and TLS transports. It runs
+    # as a standalone process on the router, completely outside vpn-client.
+    # FlintVPN manages its full lifecycle: process, interface, routing,
+    # firewall, and ipset.
+    #
+    # Fwmark range: 0x6000, 0x7000, 0x9000, 0xf000 (4 slots)
+    # Interface names: protonwg0–protonwg3
+    # Routing tables: 1006, 1007, 1009, 1015 (derived from mark >> 12)
+
+    PROTON_WG_MARKS = ["0x6000", "0x7000", "0x9000", "0xf000"]
+    PROTON_WG_DIR = "/etc/fvpn/protonwg"
+    PROTON_WG_BIN = "/usr/bin/proton-wg"
+
+    def _next_proton_wg_slot(self) -> tuple[str, str, int]:
+        """Find the next available proton-wg slot.
+
+        Returns (interface_name, mark_hex, table_num).
+        Checks both live interfaces AND config files to avoid slot collisions
+        (a disconnected tunnel still owns its slot if its config exists).
+        Cleans up truly orphaned interfaces (no config + no process).
+        Raises RuntimeError if all 4 slots are genuinely in use.
+        """
+        # Check live interfaces
+        existing_ifaces = self.exec(
+            "ip link show 2>/dev/null | grep protonwg | awk -F: '{print $2}' | tr -d ' '"
+        ).strip().splitlines()
+        live = set(x.strip() for x in existing_ifaces if x.strip())
+
+        # Check config files (a conf or env file means the slot is reserved)
+        existing_configs = self.exec(
+            f"ls {self.PROTON_WG_DIR}/protonwg*.conf {self.PROTON_WG_DIR}/protonwg*.env 2>/dev/null"
+        ).strip()
+        reserved = set()
+        for path in existing_configs.splitlines():
+            path = path.strip()
+            # Extract interface name: /etc/fvpn/protonwg/protonwg0.conf → protonwg0
+            fname = path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+            if fname.startswith("protonwg"):
+                reserved.add(fname)
+
+        used = live | reserved
+
+        for i, mark in enumerate(self.PROTON_WG_MARKS):
+            iface = f"protonwg{i}"
+            table_num = 1000 + (int(mark, 16) >> 12)
+
+            if iface not in used:
+                return iface, mark, table_num
+
+            # Slot is in use — but is it truly occupied?
+            # If the interface exists without a config file AND no process,
+            # it's an orphan from a crash. Clean it up.
+            if iface in live and iface not in reserved:
+                pid = self.exec(
+                    f"for p in $(pidof proton-wg 2>/dev/null); do "
+                    f"grep -qz 'PROTON_WG_INTERFACE_NAME={iface}' /proc/$p/environ 2>/dev/null && echo $p; "
+                    f"done"
+                ).strip()
+                if not pid:
+                    self.exec(f"ip link del {iface} 2>/dev/null; true")
+                    return iface, mark, table_num
+
+        raise RuntimeError("WireGuard TCP/TLS limit reached (4 max)")
+
+    def upload_proton_wg_config(
+        self,
+        profile_name: str,
+        private_key: str,
+        public_key: str,
+        endpoint: str,
+        socket_type: str = "tcp",
+        dns: str = "10.2.0.1",
+    ) -> dict:
+        """Write a proton-wg config and env file to the router.
+
+        Does NOT start the tunnel — call start_proton_wg_tunnel() after.
+
+        Returns router_info dict with interface, mark, tunnel_id, etc.
+        """
+        iface, mark, table_num = self._next_proton_wg_slot()
+        tunnel_id = self._next_tunnel_id()
+
+        # Ensure directory and init.d service exist
+        self.exec(f"mkdir -p {self.PROTON_WG_DIR}")
+        self.ensure_proton_wg_initd()
+
+        # Write WG config (no [Interface] Address/DNS — we set those via ip commands)
+        wg_conf = (
+            f"[Interface]\n"
+            f"PrivateKey = {private_key}\n"
+            f"\n"
+            f"[Peer]\n"
+            f"PublicKey = {public_key}\n"
+            f"AllowedIPs = 0.0.0.0/0\n"
+            f"Endpoint = {endpoint}\n"
+            f"PersistentKeepalive = 25\n"
+        )
+        self.write_file(f"{self.PROTON_WG_DIR}/{iface}.conf", wg_conf)
+
+        # Write env file (includes FlintVPN metadata for mangle rule rebuild)
+        env = (
+            f"PROTON_WG_INTERFACE_NAME={iface}\n"
+            f"PROTON_WG_SOCKET_TYPE={socket_type}\n"
+            f"PROTON_WG_SERVER_NAME_STRATEGY=1\n"
+            f"FVPN_TUNNEL_ID={tunnel_id}\n"
+            f"FVPN_MARK={mark}\n"
+            f"FVPN_IPSET=src_mac_{tunnel_id}\n"
+        )
+        self.write_file(f"{self.PROTON_WG_DIR}/{iface}.env", env)
+
+        # Create the ipset for device MAC assignment
+        ipset_name = f"src_mac_{tunnel_id}"
+        self.exec(f"ipset create {ipset_name} hash:mac -exist")
+
+        return {
+            "tunnel_name": iface,
+            "tunnel_id": tunnel_id,
+            "mark": mark,
+            "table_num": table_num,
+            "ipset_name": ipset_name,
+            "socket_type": socket_type,
+            "vpn_protocol": f"wireguard-{socket_type}",
+            "rule_name": f"fvpn_pwg_{iface}",  # pseudo rule_name for profile_store
+        }
+
+    def start_proton_wg_tunnel(self, iface: str, mark: str, table_num: int,
+                                tunnel_id: int, dns: str = "10.2.0.1") -> None:
+        """Start a proton-wg tunnel: process, interface, routing, firewall.
+
+        Idempotent: if the tunnel is already running, stops it first.
+        The config and env files must already exist (via upload_proton_wg_config).
+        """
+        conf_path = f"{self.PROTON_WG_DIR}/{iface}.conf"
+        env_path = f"{self.PROTON_WG_DIR}/{iface}.env"
+        ipset_name = f"src_mac_{tunnel_id}"
+
+        # Check binary exists
+        bin_check = self.exec(f"[ -x {self.PROTON_WG_BIN} ] && echo ok || echo missing").strip()
+        if bin_check != "ok":
+            raise RuntimeError(f"proton-wg binary not found at {self.PROTON_WG_BIN}")
+
+        # If already running, stop first (idempotent connect)
+        link = self.exec(f"ip link show {iface} 2>/dev/null | head -1")
+        if iface in link:
+            try:
+                self.stop_proton_wg_tunnel(iface, mark, table_num, tunnel_id)
+            except Exception:
+                # Force cleanup of orphaned interface
+                self.exec(f"ip link del {iface} 2>/dev/null; true")
+
+        # 0. Ensure ipset exists (may have been lost on reboot/reconnect)
+        self.exec(f"ipset create {ipset_name} hash:mac -exist")
+
+        # 0b. Ensure env file exists (stop_proton_wg_tunnel removes it;
+        #     reconnecting needs it recreated from the stored metadata)
+        env_exists = self.exec(f"[ -f {env_path} ] && echo yes || echo no").strip()
+        if env_exists != "yes":
+            socket_type = "tcp"  # Default; caller should pass this
+            # Try to infer socket_type from the conf endpoint port
+            conf_content = self.exec(f"cat {conf_path} 2>/dev/null").strip()
+            if ":443" in conf_content:
+                socket_type = "tcp"  # Could be tcp or tls — check mark
+            env = (
+                f"PROTON_WG_INTERFACE_NAME={iface}\n"
+                f"PROTON_WG_SOCKET_TYPE={socket_type}\n"
+                f"PROTON_WG_SERVER_NAME_STRATEGY=1\n"
+                f"FVPN_TUNNEL_ID={tunnel_id}\n"
+                f"FVPN_MARK={mark}\n"
+                f"FVPN_IPSET={ipset_name}\n"
+            )
+            self.write_file(env_path, env)
+
+        # 1. Start proton-wg process (sources env, runs in background)
+        self.exec(
+            f"(. {env_path} && export PROTON_WG_INTERFACE_NAME PROTON_WG_SOCKET_TYPE "
+            f"PROTON_WG_SERVER_NAME_STRATEGY && "
+            f"{self.PROTON_WG_BIN} > /tmp/{iface}.log 2>&1) &"
+        )
+
+        # 2. Wait for interface to appear (up to 5s)
+        for _ in range(10):
+            out = self.exec(f"ip link show {iface} 2>/dev/null | head -1")
+            if iface in out:
+                break
+            time.sleep(0.5)
+        else:
+            raise RuntimeError(f"proton-wg interface {iface} did not appear within 5s")
+
+        # 3. Apply WG config
+        self.exec(f"wg setconf {iface} {conf_path}")
+
+        # 4. Set up IP + bring interface up
+        self.exec(
+            f"ip addr add 10.2.0.2/32 dev {iface} 2>/dev/null; "
+            f"ip link set {iface} up"
+        )
+
+        # 5. Routing table + ip rules
+        self.exec(
+            f"ip route add default dev {iface} table {table_num} 2>/dev/null; "
+            f"ip route add blackhole default metric 254 table {table_num} 2>/dev/null; "
+            f"ip rule add fwmark {mark}/0xf000 lookup {table_num} priority 6000 2>/dev/null"
+        )
+
+        # 6. Firewall: create zone + forwarding via UCI, then reload.
+        #    MUST happen BEFORE the mangle MARK rules (step 7) because
+        #    firewall reload destroys all ephemeral iptables rules.
+        #    NOTE: `list device` binds the zone to the raw interface name
+        #    so fw3 populates the zone chains (ACCEPT, MASQUERADE, etc.).
+        #    Without it, fw3 creates empty chains and nothing gets forwarded.
+        self.exec(
+            f"uci set firewall.fvpn_zone_{iface}=zone && "
+            f"uci set firewall.fvpn_zone_{iface}.name='{iface}' && "
+            f"uci add_list firewall.fvpn_zone_{iface}.device='{iface}' && "
+            f"uci set firewall.fvpn_zone_{iface}.input='DROP' && "
+            f"uci set firewall.fvpn_zone_{iface}.output='ACCEPT' && "
+            f"uci set firewall.fvpn_zone_{iface}.forward='REJECT' && "
+            f"uci set firewall.fvpn_zone_{iface}.masq='1' && "
+            f"uci set firewall.fvpn_zone_{iface}.mtu_fix='1' && "
+            f"uci set firewall.fvpn_fwd_{iface}=forwarding && "
+            f"uci set firewall.fvpn_fwd_{iface}.src='lan' && "
+            f"uci set firewall.fvpn_fwd_{iface}.dest='{iface}' && "
+            f"uci commit firewall && "
+            f"/etc/init.d/firewall reload >/dev/null 2>&1"
+        )
+
+        # 7. Rebuild ALL proton-wg mangle MARK rules (not just this tunnel).
+        #    Firewall reload (step 6) destroys ALL ephemeral iptables rules,
+        #    so we must recreate rules for every active proton-wg tunnel.
+        self._rebuild_proton_wg_mangle_rules()
+
+        # 8. Wait for WG handshake (up to 15s)
+        for _ in range(15):
+            hs = self.exec(f"wg show {iface} latest-handshakes 2>/dev/null")
+            if hs.strip() and "\t0" not in hs:
+                return  # Handshake succeeded
+            time.sleep(1)
+        # Don't raise — the tunnel may still connect shortly after
+
+    def stop_proton_wg_tunnel(self, iface: str, mark: str, table_num: int,
+                               tunnel_id: int) -> None:
+        """Stop a proton-wg tunnel: kill process, clean up routing + firewall."""
+        chain = f"TUNNEL{tunnel_id}_ROUTE_POLICY"
+        ipset_name = f"src_mac_{tunnel_id}"
+
+        # 1. Remove mangle chain from ROUTE_POLICY and delete it
+        self.exec(
+            f"iptables -t mangle -D ROUTE_POLICY -j {chain} 2>/dev/null; "
+            f"iptables -t mangle -F {chain} 2>/dev/null; "
+            f"iptables -t mangle -X {chain} 2>/dev/null; true"
+        )
+
+        # 2. Remove ip rules + routes
+        self.exec(
+            f"ip rule del fwmark {mark}/0xf000 lookup {table_num} 2>/dev/null; "
+            f"ip route flush table {table_num} 2>/dev/null; true"
+        )
+
+        # 3. Kill ONLY this tunnel's proton-wg process (not all of them)
+        #    The process has the interface name in /proc/pid/environ
+        pid = self.exec(
+            f"for p in $(pidof proton-wg); do "
+            f"grep -qz 'PROTON_WG_INTERFACE_NAME={iface}' /proc/$p/environ 2>/dev/null && echo $p; "
+            f"done"
+        ).strip()
+        if pid:
+            self.exec(f"kill {pid} 2>/dev/null; true")
+        time.sleep(1)
+
+        # 4. Remove the interface (proton-wg may have already cleaned it up)
+        self.exec(f"ip link del {iface} 2>/dev/null; true")
+
+        # 5. NOTE: env file is NOT deleted here — it's config, not runtime state.
+        #    It's needed for reconnect and for _next_proton_wg_slot to know
+        #    the slot is reserved. Deleted only by delete_proton_wg_config.
+
+        # 6. Remove firewall zone + forwarding (UCI), reload, then rebuild
+        #    mangle rules for the remaining active tunnels
+        self.exec(
+            f"uci delete firewall.fvpn_zone_{iface} 2>/dev/null; "
+            f"uci delete firewall.fvpn_fwd_{iface} 2>/dev/null; "
+            f"uci commit firewall 2>/dev/null; "
+            f"/etc/init.d/firewall reload >/dev/null 2>&1; true"
+        )
+        self._rebuild_proton_wg_mangle_rules()
+
+        # 7. Clean up log file
+        self.exec(f"rm -f /tmp/{iface}.log")
+
+    def _rebuild_proton_wg_mangle_rules(self) -> None:
+        """Rebuild mangle MARK rules for ALL active proton-wg tunnels.
+
+        Reads FVPN_TUNNEL_ID, FVPN_MARK, FVPN_IPSET from each env file
+        in /etc/fvpn/protonwg/ to create the iptables chains. Also writes
+        a firewall include script so rules survive future firewall reloads.
+        """
+        envs = self.exec(f"ls {self.PROTON_WG_DIR}/*.env 2>/dev/null || true").strip()
+        if not envs:
+            # No more tunnels — clean up firewall include, stale script,
+            # and any orphaned TUNNEL*_ROUTE_POLICY mangle chains
+            self.exec(
+                f"rm -f {self.PROTON_WG_DIR}/mangle_rules.sh; "
+                f"uci delete firewall.fvpn_pwg_mangle 2>/dev/null; "
+                f"uci commit firewall 2>/dev/null; true"
+            )
+            # Remove any lingering TUNNEL*_ROUTE_POLICY chains from ROUTE_POLICY
+            stale = self.exec(
+                "iptables -t mangle -S ROUTE_POLICY 2>/dev/null | "
+                "grep -oP 'TUNNEL\\d+_ROUTE_POLICY' | sort -u"
+            ).strip()
+            for chain in stale.splitlines():
+                chain = chain.strip()
+                if not chain or chain == "TUNNEL100_ROUTE_POLICY":
+                    continue  # Don't touch the default policy
+                self.exec(
+                    f"iptables -t mangle -D ROUTE_POLICY -j {chain} 2>/dev/null; "
+                    f"iptables -t mangle -F {chain} 2>/dev/null; "
+                    f"iptables -t mangle -X {chain} 2>/dev/null; true"
+                )
+            return
+
+        tunnels = []
+        for env_path in envs.splitlines():
+            env_path = env_path.strip()
+            if not env_path:
+                continue
+            env_content = self.exec(f"cat {env_path} 2>/dev/null").strip()
+            vals = {}
+            for line in env_content.splitlines():
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    vals[k] = v
+            iface = vals.get("PROTON_WG_INTERFACE_NAME", "")
+            tid = vals.get("FVPN_TUNNEL_ID", "")
+            mark = vals.get("FVPN_MARK", "")
+            ipset_name = vals.get("FVPN_IPSET", "")
+            if not (iface and tid and mark and ipset_name):
+                continue
+            # Only create mangle rules for tunnels whose interface is UP
+            link = self.exec(f"ip link show {iface} 2>/dev/null | head -1")
+            if iface in link:
+                tunnels.append((iface, mark, ipset_name, tid))
+
+        # Build iptables commands
+        cmds = []
+        for iface, mark, ipset_name, tid in tunnels:
+            chain = f"TUNNEL{tid}_ROUTE_POLICY"
+            cmds.append(f"iptables -t mangle -N {chain} 2>/dev/null")
+            cmds.append(f"iptables -t mangle -F {chain}")
+            cmds.append(
+                f"iptables -t mangle -A {chain} -m comment --comment '{iface}' "
+                f"-m mark --mark 0x0/0xf000 -m set --match-set {ipset_name} src "
+                f"-j MARK --set-xmark {mark}/0xf000"
+            )
+            cmds.append(
+                f"iptables -t mangle -C ROUTE_POLICY -j {chain} 2>/dev/null || "
+                f"iptables -t mangle -I ROUTE_POLICY 1 -j {chain}"
+            )
+
+        if cmds:
+            self.exec("; ".join(cmds))
+
+        # Write as firewall include so rules survive future reloads
+        script = "#!/bin/sh\n# Auto-generated by FlintVPN — proton-wg mangle rules\n"
+        script += "# Re-applied on every firewall reload\n\n"
+        for cmd in cmds:
+            script += cmd + "\n"
+        self.write_file(f"{self.PROTON_WG_DIR}/mangle_rules.sh", script)
+        self.exec(f"chmod +x {self.PROTON_WG_DIR}/mangle_rules.sh")
+
+        # Register as firewall include (idempotent)
+        self.exec(
+            f"uci -q get firewall.fvpn_pwg_mangle >/dev/null 2>&1 || ("
+            f"uci set firewall.fvpn_pwg_mangle=include && "
+            f"uci set firewall.fvpn_pwg_mangle.type='script' && "
+            f"uci set firewall.fvpn_pwg_mangle.path='{self.PROTON_WG_DIR}/mangle_rules.sh' && "
+            f"uci set firewall.fvpn_pwg_mangle.reload='1' && "
+            f"uci commit firewall)"
+        )
+
+    def delete_proton_wg_config(self, iface: str, tunnel_id: int) -> None:
+        """Delete proton-wg config files, ipset, and rebuild mangle rules.
+
+        Call after stop_proton_wg_tunnel. Also cleans up the firewall
+        include if no more proton-wg tunnels remain.
+        """
+        ipset_name = f"src_mac_{tunnel_id}"
+        self.exec(
+            f"rm -f {self.PROTON_WG_DIR}/{iface}.conf {self.PROTON_WG_DIR}/{iface}.env; "
+            f"ipset destroy {ipset_name} 2>/dev/null; true"
+        )
+        # Rebuild mangle rules (updates the firewall include script, or
+        # cleans up the include entirely if no tunnels remain)
+        self._rebuild_proton_wg_mangle_rules()
+
+    def ensure_proton_wg_initd(self) -> None:
+        """Install the proton-wg init.d service for boot persistence.
+
+        Creates /etc/init.d/fvpn-protonwg that starts all proton-wg tunnels
+        on boot by reading .env files from /etc/fvpn/protonwg/. Idempotent.
+        """
+        script = r"""#!/bin/sh /etc/rc.common
+START=99
+STOP=10
+USE_PROCD=1
+
+PROTON_WG_DIR="/etc/fvpn/protonwg"
+PROTON_WG_BIN="/usr/bin/proton-wg"
+
+start_service() {
+    [ -x "$PROTON_WG_BIN" ] || return
+    for envfile in "$PROTON_WG_DIR"/*.env; do
+        [ -f "$envfile" ] || continue
+        . "$envfile"
+        iface="$PROTON_WG_INTERFACE_NAME"
+        [ -z "$iface" ] && continue
+        conffile="$PROTON_WG_DIR/$iface.conf"
+        [ -f "$conffile" ] || continue
+
+        procd_open_instance "$iface"
+        procd_set_param env $(cat "$envfile" | tr '\n' ' ')
+        procd_set_param command "$PROTON_WG_BIN"
+        procd_set_param stdout 1
+        procd_set_param stderr 1
+        procd_close_instance
+
+        # Wait for interface, then set up networking + routing
+        (sleep 3 && \
+         wg setconf "$iface" "$conffile" 2>/dev/null && \
+         ip addr add 10.2.0.2/32 dev "$iface" 2>/dev/null && \
+         ip link set "$iface" up 2>/dev/null && \
+         # Routing table + ip rule (from env metadata)
+         tid="$FVPN_TUNNEL_ID" && \
+         mark="$FVPN_MARK" && \
+         table_num=$((1000 + 0x$(echo "$mark" | sed 's/0x//;s/000//'))) && \
+         ip route add default dev "$iface" table "$table_num" 2>/dev/null && \
+         ip route add blackhole default metric 254 table "$table_num" 2>/dev/null && \
+         ip rule add fwmark "$mark"/0xf000 lookup "$table_num" priority 6000 2>/dev/null \
+        ) &
+    done
+
+    # Apply mangle rules (firewall include handles subsequent reloads)
+    if [ -x "$PROTON_WG_DIR/mangle_rules.sh" ]; then
+        (sleep 5 && "$PROTON_WG_DIR/mangle_rules.sh") &
+    fi
+}
+"""
+        self.write_file("/etc/init.d/fvpn-protonwg", script)
+        self.exec("chmod +x /etc/init.d/fvpn-protonwg && /etc/init.d/fvpn-protonwg enable 2>/dev/null; true")
+
+    def get_proton_wg_health(self, iface: str) -> str:
+        """Get health of a proton-wg tunnel. Same semantics as get_tunnel_health."""
+        # Check interface exists and is UP
+        link = self.exec(f"ip link show {iface} 2>/dev/null | head -1")
+        if iface not in link or "UP" not in link:
+            return "red"
+
+        # Check handshake age (same logic as get_tunnel_health)
+        hs_output = self.exec(f"wg show {iface} latest-handshakes 2>/dev/null").strip()
+        if not hs_output:
+            return "connecting"
+
+        try:
+            parts = hs_output.split("\t")
+            if len(parts) >= 2:
+                hs_time = int(parts[1])
+                if hs_time == 0:
+                    return "connecting"
+                age = int(time.time()) - hs_time
+                if age <= 180:
+                    return "green"
+                elif age <= 600:
+                    return "amber"
+        except (ValueError, IndexError):
+            pass
+        return "red"
 
     # ── Tunnel Control ────────────────────────────────────────────────────
     #
@@ -733,12 +1334,14 @@ class RouterAPI:
                 return  # Done — there's at most one entry per rule
 
     def remove_device_from_all_vpn(self, mac: str):
-        """Remove a device from ALL FlintVPN route policy rules.
+        """Remove a device from ALL FlintVPN route policy rules AND proton-wg ipsets.
 
         Iterates every fvpn rule, matches the MAC case-insensitively, and
         deletes using the EXACT stored case so UCI del_list succeeds.
+        Also removes from any proton-wg src_mac_* ipsets.
         """
         mac_lower = mac.lower()
+        mac_upper = mac.upper()
         rules = self.get_flint_vpn_rules()
         any_removed = False
         for rule in rules:
@@ -762,6 +1365,19 @@ class RouterAPI:
                     break  # next rule
         if any_removed:
             self.exec("uci commit route_policy")
+
+        # Also remove from proton-wg ipsets (managed outside route_policy)
+        pwg_ipsets = self.exec(
+            "ipset list -n 2>/dev/null | grep '^src_mac_'"
+        ).strip()
+        for ipset_name in pwg_ipsets.splitlines():
+            ipset_name = ipset_name.strip()
+            if not ipset_name:
+                continue
+            self.exec(
+                f"ipset del {ipset_name} {mac_upper} 2>/dev/null; "
+                f"ipset del {ipset_name} {mac_lower} 2>/dev/null; true"
+            )
 
     # ── Kill Switch ───────────────────────────────────────────────────────
 

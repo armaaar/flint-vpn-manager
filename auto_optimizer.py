@@ -1,28 +1,31 @@
-"""Auto-optimizer — periodically switches VPN groups to better servers.
+"""Auto-optimizer — periodically switches VPN groups to better servers
+and renews expiring WireGuard persistent certificates.
 
-Stage 11: uses live router health and `build_profile_list()` rather than
-cached `p["status"]`. The optimizer only switches profiles whose tunnel
-is actually up (green/amber) on the router right now.
-
-Runs as a background thread, checking once per minute. Within a 2-minute
-window after the configured time of day, it evaluates all connected VPN
-groups and switches any that have a significantly better server available
-(based on server_scope).
-
-Only groups with server_scope != "server" are candidates. Groups where
-the user chose a specific server are never changed.
+Runs as a background thread, checking once per minute:
+  - Server optimization: within a 2-minute window after the configured
+    time of day, evaluates all connected VPN groups and switches any
+    that have a significantly better server available (by Proton score).
+  - Certificate renewal: once per day, checks all VPN profiles' cert_expiry
+    and refreshes any within 30 days of expiry via the Proton API.
 """
 
 import logging
 import threading
-from datetime import datetime
-from typing import Callable, Optional
+import time
+from datetime import datetime, timedelta
+from typing import Callable, Dict, Optional
 
 import profile_store as ps
 import secrets_manager as sm
-from server_optimizer import find_better_server, LOAD_THRESHOLD_SWITCH
+from server_optimizer import find_better_server
 
 log = logging.getLogger("flintvpn")
+
+# Don't auto-switch the same profile more often than this. Cheap insurance
+# against oscillation between two servers whose scores keep crossing each
+# other. State is in-memory only — resets across app restarts, same as
+# `_last_run_date`.
+MIN_DWELL_HOURS = 6
 
 _optimizer: Optional["AutoOptimizer"] = None
 
@@ -46,6 +49,9 @@ class AutoOptimizer:
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._last_run_date: Optional[str] = None
+        self._last_cert_check_date: Optional[str] = None
+        # profile_id → datetime of last successful auto-switch.
+        self._last_switch_at: Dict[str, datetime] = {}
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -63,6 +69,10 @@ class AutoOptimizer:
         while not self._stop_event.is_set():
             try:
                 self.check_and_optimize()
+            except Exception:
+                pass
+            try:
+                self.check_and_refresh_certs()
             except Exception:
                 pass
             self._stop_event.wait(self.poll_interval)
@@ -123,21 +133,41 @@ class AutoOptimizer:
                 # Live router health, not cached status
                 if p.get("health") not in ("green", "amber"):
                     continue
+                # Skip profiles where the user pinned a specific server.
+                # find_better_server enforces this too, but checking here
+                # avoids unnecessary work and makes the intent explicit.
                 scope = p.get("server_scope") or {}
-                if scope.get("type") == "server":
+                if scope.get("server_id"):
                     continue
 
-                better = find_better_server(p, all_servers, threshold=LOAD_THRESHOLD_SWITCH)
+                better = find_better_server(p, all_servers)
                 if not better:
                     continue
+
+                # Dwell-time gate: don't flap a profile that we already
+                # switched recently. Even though the optimizer normally
+                # runs at most once per day, this guards against config
+                # changes that increase the cadence and against the
+                # general "ping-pong between two near-equal servers"
+                # failure mode.
+                last_switch = self._last_switch_at.get(p["id"])
+                if last_switch and (now - last_switch) < timedelta(hours=MIN_DWELL_HOURS):
+                    log.info(
+                        f"Auto-optimize: skipping '{p['name']}' — switched "
+                        f"{(now - last_switch).total_seconds() / 3600:.1f}h ago "
+                        f"(< {MIN_DWELL_HOURS}h dwell)"
+                    )
+                    continue
+
                 cur = p.get("server") or {}
                 log.info(
                     f"Auto-optimize: switching '{p['name']}' from "
-                    f"{cur.get('name', '?')} (load {cur.get('load', '?')}%) to "
-                    f"{better['name']} (load {better['load']}%)"
+                    f"{cur.get('name', '?')} (score {cur.get('score', '?')}) to "
+                    f"{better['name']} (score {better['score']})"
                 )
                 try:
                     self.switch_fn(p["id"], better["id"])
+                    self._last_switch_at[p["id"]] = now
                     switched += 1
                 except Exception as e:
                     log.error(f"Auto-optimize: switch failed for '{p['name']}': {e}")
@@ -146,6 +176,68 @@ class AutoOptimizer:
 
         except Exception as e:
             log.error(f"Auto-optimize: failed: {e}")
+
+    # ── Persistent WireGuard certificate renewal ──────────────────────────
+
+    CERT_REFRESH_THRESHOLD_DAYS = 30  # Refresh certs within 30 days of expiry
+
+    def check_and_refresh_certs(self):
+        """Once per day, refresh any WG persistent certs approaching expiry.
+
+        Runs independently of the server optimization schedule — doesn't
+        require auto_optimize to be enabled. Certificate renewal only
+        needs the Proton API (no router interaction).
+        """
+        now = datetime.now()
+        current_date = now.strftime("%Y-%m-%d")
+
+        if self._last_cert_check_date == current_date:
+            return  # Already checked today
+
+        self._last_cert_check_date = current_date
+
+        try:
+            proton = self.get_proton()
+            if not proton or not proton.is_logged_in:
+                return
+
+            data = ps.load()
+            threshold = time.time() + (self.CERT_REFRESH_THRESHOLD_DAYS * 86400)
+            refreshed = 0
+
+            for p in data.get("profiles", []):
+                if p.get("type") != "vpn":
+                    continue
+                wg_key = p.get("wg_key")
+                cert_exp = p.get("cert_expiry", 0)
+                if not wg_key or cert_exp > threshold:
+                    continue  # No key (legacy/OVPN) or cert still fresh
+
+                name = p.get("name", "Unnamed")
+                opts = p.get("options", {})
+                try:
+                    new_expiry = proton.refresh_wireguard_cert(
+                        wg_key_b64=wg_key,
+                        profile_name=name,
+                        netshield=opts.get("netshield", 0),
+                        moderate_nat=opts.get("moderate_nat", False),
+                        nat_pmp=opts.get("nat_pmp", False),
+                        vpn_accelerator=opts.get("vpn_accelerator", True),
+                    )
+                    ps.update_profile(p["id"], cert_expiry=new_expiry)
+                    refreshed += 1
+                    log.info(
+                        f"Cert renewal: refreshed '{name}' — new expiry in "
+                        f"{(new_expiry - time.time()) / 86400:.0f} days"
+                    )
+                except Exception as e:
+                    log.warning(f"Cert renewal: failed for '{name}': {e}")
+
+            if refreshed:
+                log.info(f"Cert renewal: refreshed {refreshed} cert(s)")
+
+        except Exception as e:
+            log.error(f"Cert renewal: failed: {e}")
 
 
 def get_optimizer() -> Optional[AutoOptimizer]:

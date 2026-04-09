@@ -6,407 +6,647 @@
 
   export let profileId = null;
   export let visible = false;
-  export let vpnProtocol = 'wireguard'; // 'wireguard' or 'openvpn'
+  export let vpnProtocol = 'wireguard';
 
-  $: isWireGuard = vpnProtocol === 'wireguard';
-  // Resolve the live profile from the store so options reflect router-canonical state
   $: currentProfile = profileId ? $profiles.find(p => p.id === profileId) : null;
 
   const dispatch = createEventDispatcher();
 
-  let servers = [];
-  let search = '';
-  let featureFilter = '';
-  let selectedId = null;
-  let selectionScope = { type: 'server' };
+  let allServers = [];
   let loading = true;
-  let viewLevel = 'country'; // 'country' | 'city' | 'server'
-  let expandedCountry = null;
-  let expandedCity = null;
-
-  // VPN options (NetShield, Accelerator, Moderate NAT, NAT-PMP, Kill Switch)
-  // are configured in EditGroupModal — not here. The server picker only
-  // chooses location + scope. When changing the server, the existing options
-  // are read from the current profile and passed through unchanged.
   let lastInitProfileId = null;
+
+  // Three independent selects + features filter. All start as "Fastest".
+  let features = { streaming: false, p2p: false, secure_core: false };
+  let selCountry = null;     // null = Fastest
+  let selCity = null;        // null = Fastest
+  let selEntryCountry = null; // null = Fastest (only meaningful with secure_core)
+  let selServerId = null;    // null = Fastest
+
+  // Open dropdown state
+  let openDropdown = null; // 'country' | 'city' | 'server' | null
+  let searchCountry = '';
+  let searchCity = '';
+  let searchServer = '';
 
   $: if (visible) {
     loadServers();
-    viewLevel = 'country';
-    expandedCountry = null;
-    expandedCity = null;
-    selectedId = null;
-    search = '';
-    featureFilter = '';
+    openDropdown = null;
   }
 
-  // Carry over the existing server scope so the user can change it
+  // Hydrate selections from the existing profile's scope when opening
   $: if (visible && currentProfile && currentProfile.id !== lastInitProfileId) {
     lastInitProfileId = currentProfile.id;
-    selectionScope = currentProfile.server_scope || { type: 'server' };
+    const sc = currentProfile.server_scope || {};
+    features = {
+      streaming: !!(sc.features && sc.features.streaming),
+      p2p: !!(sc.features && sc.features.p2p),
+      secure_core: !!(sc.features && sc.features.secure_core),
+    };
+    selCountry = sc.country_code || null;
+    selCity = sc.city || null;
+    selEntryCountry = sc.entry_country_code || null;
+    selServerId = sc.server_id || null;
   }
   $: if (!visible) lastInitProfileId = null;
 
   async function loadServers() {
     loading = true;
-    servers = await api.getServers(profileId);
+    allServers = await api.getServers(profileId);
     loading = false;
   }
 
-  // Apply filters
-  $: filtered = (() => {
-    let f = servers;
-    if (featureFilter === 'secure_core') f = f.filter(s => s.secure_core);
-    else if (featureFilter) f = f.filter(s => s.features.includes(featureFilter));
-    if (search) {
-      const q = search.toLowerCase();
-      f = f.filter(s => s.country.toLowerCase().includes(q) || s.city.toLowerCase().includes(q) || s.name.toLowerCase().includes(q));
-    }
-    return f;
+  // ── Filtering pipeline ────────────────────────────────────────────────
+  // 1. Apply features (streaming/p2p/secure_core) — AND combination.
+  // 2. The Country options come from this pre-filtered set.
+  // 3. The City options come from servers also matching selCountry.
+  // 4. The Server options come from servers also matching selCity (+ entry).
+
+  $: featureFiltered = (() => {
+    return allServers.filter(s => {
+      if (features.streaming && !s.streaming) return false;
+      if (features.p2p && !s.p2p) return false;
+      if (features.secure_core !== !!s.secure_core) return false;
+      return true;
+    });
   })();
 
-  // Group by country
-  $: countryGroups = (() => {
-    const groups = {};
-    for (const s of filtered) {
-      const key = s.country_code;
-      if (!groups[key]) {
-        groups[key] = { code: key, name: s.country, servers: [], total_load: 0 };
+  // Country options: distinct country_codes with server counts.
+  // Aggregates both avgLoad (congestion display) and avgScore (the sort
+  // metric used by the optimizer + Proton's client).
+  $: countryOptions = (() => {
+    const map = {};
+    for (const s of featureFiltered) {
+      const cc = s.country_code;
+      if (!map[cc]) {
+        map[cc] = {
+          code: cc,
+          name: s.country,
+          servers: 0,
+          loadSum: 0,
+          scoreSum: 0,
+        };
       }
-      groups[key].servers.push(s);
-      groups[key].total_load += s.load;
+      map[cc].servers += 1;
+      map[cc].loadSum += s.load;
+      map[cc].scoreSum += (s.score ?? 0);
     }
-    return Object.values(groups).map(g => {
-      g.avg_load = Math.round(g.total_load / g.servers.length);
-      g.best = g.servers.reduce((a, b) => a.load < b.load ? a : b);
-      // Build city sub-groups
-      // SC servers are grouped by city + entry country (e.g. "Sydney via CH" vs "Sydney via SE")
-      const cityMap = {};
-      for (const s of g.servers) {
-        const issc = s.secure_core;
-        const ck = issc
-          ? `sc:${s.city || 'Unknown'}:${s.entry_country_code}`
-          : (s.city || 'Unknown');
-        if (!cityMap[ck]) {
-          cityMap[ck] = {
-            key: `${g.code}:${ck}`,
-            city: s.city || 'Unknown',
-            is_secure_core: issc,
-            entry_country_code: issc ? s.entry_country_code : null,
-            servers: [], total_load: 0,
-          };
-        }
-        cityMap[ck].servers.push(s);
-        cityMap[ck].total_load += s.load;
+    return Object.values(map)
+      .map(c => ({
+        ...c,
+        avgLoad: Math.round(c.loadSum / c.servers),
+        avgScore: c.scoreSum / c.servers,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  })();
+
+  // City options: distinct cities in the selected country (or all when
+  // Country=Fastest, but the cascade rule disables the City select then,
+  // so this only matters for option count display).
+  $: cityOptions = (() => {
+    if (!selCountry) return [];
+    const inCountry = featureFiltered.filter(s => s.country_code === selCountry);
+    // For SC mode, group by (city, entry_country_code) so "Sydney via CH"
+    // and "Sydney via SE" appear as separate options.
+    const map = {};
+    for (const s of inCountry) {
+      const city = s.city || 'Unknown';
+      const key = features.secure_core
+        ? `${city}::${s.entry_country_code}`
+        : city;
+      if (!map[key]) {
+        map[key] = {
+          city,
+          entry_country_code: features.secure_core ? s.entry_country_code : null,
+          servers: 0,
+          loadSum: 0,
+          scoreSum: 0,
+        };
       }
-      g.cities = Object.values(cityMap).map(c => {
-        c.avg_load = Math.round(c.total_load / c.servers.length);
-        c.best = c.servers.reduce((a, b) => a.load < b.load ? a : b);
-        c.servers.sort((a, b) => a.load - b.load);
-        return c;
-      });
-      g.cities.sort((a, b) => {
-        if (a.is_secure_core !== b.is_secure_core) return a.is_secure_core ? 1 : -1;
+      map[key].servers += 1;
+      map[key].loadSum += s.load;
+      map[key].scoreSum += (s.score ?? 0);
+    }
+    return Object.values(map)
+      .map(c => ({
+        ...c,
+        avgLoad: Math.round(c.loadSum / c.servers),
+        avgScore: c.scoreSum / c.servers,
+      }))
+      .sort((a, b) => {
         if (a.city !== b.city) return a.city.localeCompare(b.city);
         return (a.entry_country_code || '').localeCompare(b.entry_country_code || '');
       });
-      return g;
-    }).sort((a, b) => a.name.localeCompare(b.name));
   })();
 
-  // Overall fastest server across all countries
-  $: fastestServer = filtered.length > 0
-    ? filtered.reduce((a, b) => a.score < b.score ? a : b)
-    : null;
-
-  // Flat server list for individual view
-  $: flatServers = (() => {
-    const f = [...filtered];
-    f.sort((a, b) => a.load - b.load);
-    return f.slice(0, 100);
+  // Server options: specific servers in the selected country+city.
+  // Sorted by Proton's `score` (lower = better) — same metric the
+  // backend's resolve_scope_to_server and the official Proton client use.
+  // Load bars stay in the UI as a separate, intuitive congestion signal.
+  $: serverOptions = (() => {
+    if (!selCountry || !selCity) return [];
+    return featureFiltered
+      .filter(s => {
+        if (s.country_code !== selCountry) return false;
+        if (s.city !== selCity) return false;
+        if (features.secure_core && selEntryCountry &&
+            s.entry_country_code !== selEntryCountry) return false;
+        return true;
+      })
+      .sort((a, b) => (a.score ?? Infinity) - (b.score ?? Infinity));
   })();
 
-  function setFilter(feat) {
-    featureFilter = feat;
-    expandedCountry = null;
-    expandedCity = null;
+  // ── Resolved server preview ───────────────────────────────────────────
+  // Mirrors backend resolve_scope_to_server logic: pick the lowest-score
+  // server within the scope's filters (or the pinned server if set).
+  $: resolvedServer = (() => {
+    if (selServerId) {
+      const exact = featureFiltered.find(s => s.id === selServerId);
+      if (exact) return exact;
+      // Pinned server vanished — fall back to fastest
+    }
+    let candidates = featureFiltered;
+    if (selCountry) candidates = candidates.filter(s => s.country_code === selCountry);
+    if (selCity) candidates = candidates.filter(s => s.city === selCity);
+    if (features.secure_core && selEntryCountry) {
+      candidates = candidates.filter(s => s.entry_country_code === selEntryCountry);
+    }
+    if (candidates.length === 0) return null;
+    return candidates.reduce((a, b) =>
+      (a.score ?? Infinity) < (b.score ?? Infinity) ? a : b
+    );
+  })();
+
+  // ── Cascade enforcement on changes ────────────────────────────────────
+
+  function setFeature(key) {
+    features = { ...features, [key]: !features[key] };
+    // Re-validate selections after the feature filter changes
+    revalidate();
   }
 
-  function selectCountry(group) {
-    selectedId = group.best.id;
-    selectionScope = { type: 'country', country_code: group.code };
-    expandedCountry = null;
-    expandedCity = null;
+  function setCountry(code) {
+    selCountry = code;
+    // Cascade reset
+    selCity = null;
+    selEntryCountry = null;
+    selServerId = null;
+    openDropdown = null;
   }
 
-  function selectCityGroup(city, countryCode) {
-    selectedId = city.best.id;
-    selectionScope = { type: 'city', country_code: countryCode, city: city.city };
-    expandedCity = null;
+  function setCity(option) {
+    if (option === null) {
+      selCity = null;
+      selEntryCountry = null;
+      selServerId = null;
+    } else {
+      selCity = option.city;
+      selEntryCountry = option.entry_country_code || null;
+      selServerId = null;
+    }
+    openDropdown = null;
   }
 
-  function toggleCountry(code) {
-    expandedCountry = expandedCountry === code ? null : code;
-    expandedCity = null;
+  function setServer(id) {
+    selServerId = id;
+    openDropdown = null;
   }
 
-  function toggleCity(key) {
-    expandedCity = expandedCity === key ? null : key;
+  function revalidate() {
+    // After a features change, drop selections that no longer have any
+    // matching servers. Cascade naturally.
+    if (selCountry && !countryOptions.find(c => c.code === selCountry)) {
+      selCountry = null;
+      selCity = null;
+      selEntryCountry = null;
+      selServerId = null;
+      return;
+    }
+    if (selCity && !cityOptions.find(c =>
+        c.city === selCity &&
+        (!features.secure_core || c.entry_country_code === selEntryCountry))) {
+      selCity = null;
+      selEntryCountry = null;
+      selServerId = null;
+      return;
+    }
+    if (selServerId && !serverOptions.find(s => s.id === selServerId)) {
+      selServerId = null;
+    }
+  }
+
+  // ── Filtered option lists for the open dropdown's search ──────────────
+  $: filteredCountryOptions = countryOptions.filter(c =>
+    !searchCountry || c.name.toLowerCase().includes(searchCountry.toLowerCase())
+  );
+  $: filteredCityOptions = cityOptions.filter(c =>
+    !searchCity || c.city.toLowerCase().includes(searchCity.toLowerCase())
+  );
+  $: filteredServerOptions = serverOptions.filter(s =>
+    !searchServer || s.name.toLowerCase().includes(searchServer.toLowerCase())
+  );
+
+  function openDrop(name) {
+    if (openDropdown === name) {
+      openDropdown = null;
+    } else {
+      openDropdown = name;
+      searchCountry = '';
+      searchCity = '';
+      searchServer = '';
+    }
+  }
+
+  function handleWindowClick(e) {
+    if (!openDropdown) return;
+    if (!e.target.closest('.dropdown-wrap')) openDropdown = null;
   }
 
   function scEntryName(code) {
-    return countryName(code, servers) || code;
+    return countryName(code, allServers) || code;
   }
 
-  function select() {
-    if (!selectedId) { showToast('Select a location first', true); return; }
-    // Pass through the existing options from the current profile so the
-    // backend regenerates the tunnel with the same options.
-    // For new profile creation (no currentProfile), the backend applies defaults.
+  // Proton's `score` is a small float (typically 0.5–3.0) where lower
+  // means better. Format to 2 decimals for display. Treat null/undefined
+  // as "?". The picker is sorted by this metric end-to-end.
+  function formatScore(s) {
+    if (s === null || s === undefined || Number.isNaN(s)) return '?';
+    return Number(s).toFixed(2);
+  }
+
+  // ── Display labels for the dropdown triggers ──────────────────────────
+  $: countryLabel = selCountry
+    ? (countryOptions.find(c => c.code === selCountry)?.name || selCountry)
+    : 'Fastest';
+  $: cityLabel = selCity ? selCity : 'Fastest';
+  $: serverLabel = (() => {
+    if (selServerId) {
+      const s = featureFiltered.find(x => x.id === selServerId);
+      return s ? s.name : 'Fastest';
+    }
+    return 'Fastest';
+  })();
+
+  $: cityDisabled = !selCountry;
+  $: serverDisabled = !selCountry || !selCity;
+
+  // ── Submit ────────────────────────────────────────────────────────────
+
+  function connect() {
+    if (!resolvedServer) {
+      showToast('No server matches your filters', true);
+      return;
+    }
     const existingOpts = currentProfile?.options || {};
     dispatch('select', {
-      serverId: selectedId,
+      serverId: resolvedServer.id,
       options: {
         netshield: existingOpts.netshield ?? 2,
         vpn_accelerator: existingOpts.vpn_accelerator !== false,
         moderate_nat: !!existingOpts.moderate_nat,
         nat_pmp: !!existingOpts.nat_pmp,
       },
-      scope: selectionScope,
+      scope: {
+        country_code: selCountry,
+        city: selCity,
+        entry_country_code: features.secure_core ? selEntryCountry : null,
+        server_id: selServerId,
+        features: { ...features },
+      },
     });
   }
 
   function close() { dispatch('close'); }
 </script>
 
+<svelte:window on:click={handleWindowClick} />
+
 {#if visible}
 <div class="modal-overlay active" on:click|self={close}>
-  <div class="modal" style="max-width:640px">
+  <div class="modal" style="max-width:560px">
     <div class="modal-header">
       <h2>{profileId ? 'Change Server' : 'Choose Server'}</h2>
       <button class="modal-close" on:click={close}>&times;</button>
     </div>
     <div class="modal-body">
-      <div class="server-filters">
-        <input placeholder="Search country, city, or server..." bind:value={search}>
+
+      {#if loading}
+        <div class="center-pad"><span class="spinner"></span></div>
+      {:else}
+
+      <!-- Feature filters -->
+      <div class="filter-section">
+        <div class="filter-label">Filters</div>
         <div class="filter-chips">
-          {#each [['', 'All'], ['streaming', 'Streaming'], ['p2p', 'P2P'], ['secure_core', 'Secure Core']] as [val, label]}
-            <button class="filter-chip" class:active={featureFilter === val}
-                    on:click={() => setFilter(val)}>{label}</button>
-          {/each}
+          <button class="filter-chip" class:active={features.streaming}
+                  on:click={() => setFeature('streaming')}>📺 Streaming</button>
+          <button class="filter-chip" class:active={features.p2p}
+                  on:click={() => setFeature('p2p')}>⇄ P2P</button>
+          <button class="filter-chip" class:active={features.secure_core}
+                  on:click={() => setFeature('secure_core')}>🛡 Secure Core</button>
         </div>
       </div>
 
-      <div class="view-toggle">
-        <button class="toggle-btn" class:active={viewLevel === 'country'} on:click={() => { viewLevel = 'country'; expandedCountry = null; expandedCity = null; }}>Country</button>
-        <button class="toggle-btn" class:active={viewLevel === 'city'} on:click={() => { viewLevel = 'city'; expandedCity = null; }}>City</button>
-        <button class="toggle-btn" class:active={viewLevel === 'server'} on:click={() => viewLevel = 'server'}>Server</button>
-      </div>
-
-      <div class="server-list">
-        {#if loading}
-          <div class="center-pad"><span class="spinner"></span></div>
-
-        <!-- ═══ COUNTRY VIEW ═══ -->
-        {:else if viewLevel === 'country'}
-          {#if countryGroups.length === 0}
-            <div class="empty-msg">No servers found</div>
-          {:else}
-            {#if fastestServer && !search}
-              <div class="row fastest-row" class:selected={selectedId === fastestServer.id}
-                   on:click={() => { selectedId = fastestServer.id; selectionScope = { type: 'global' }; expandedCountry = null; }} role="button" tabindex="0">
-                <span class="fastest-icon">⚡</span>
-                <div class="row-info">
-                  <span class="row-name">Fastest</span>
-                  <span class="row-meta">
-                    <img class="flag-img" src={countryFlagUrl(fastestServer.country_code)} alt="" />
-                    {fastestServer.name} · {fastestServer.city || fastestServer.country}
-                  </span>
-                </div>
-                <div class="load-bar"><div class="load-fill" style="width:{fastestServer.load}%;background:{loadBarColor(fastestServer.load)}"></div></div>
-                <span class="load-pct">{fastestServer.load}%</span>
-              </div>
-            {/if}
-            {#each countryGroups as g (g.code)}
-              <div class="row" class:selected={selectedId === g.best.id && expandedCountry !== g.code}
-                   on:click={() => selectCountry(g)} role="button" tabindex="0">
-                <span class="flag"><img class="flag-img" src={countryFlagUrl(g.code)} alt="" /></span>
-                <div class="row-info">
-                  <span class="row-name">{g.name}</span>
-                  <span class="row-meta">{g.servers.length} server{g.servers.length !== 1 ? 's' : ''} · {g.cities.length} {g.cities.length === 1 ? 'location' : 'locations'}</span>
-                </div>
-                <div class="load-bar"><div class="load-fill" style="width:{g.avg_load}%;background:{loadBarColor(g.avg_load)}"></div></div>
-                <span class="load-pct">{g.avg_load}%</span>
-                <button class="expand-btn" on:click|stopPropagation={() => toggleCountry(g.code)}
-                        title="Show cities">{expandedCountry === g.code ? '▾' : '▸'}</button>
-              </div>
-
-              {#if expandedCountry === g.code}
-                {#each g.cities as city (city.key)}
-                  <div class="row sub1" class:selected={selectedId === city.best.id && expandedCity !== city.key}
-                       on:click|stopPropagation={() => selectCityGroup(city, g.code)} role="button" tabindex="0">
-                    <div class="row-info">
-                      <span class="row-name">
-                        {city.city}
-                        {#if city.is_secure_core}
-                          <span class="sc-badge" title="Multi-hop: traffic enters via {scEntryName(city.entry_country_code)} before exiting in {g.name}">
-                            via <img class="flag-img" src={countryFlagUrl(city.entry_country_code)} alt="" /> {scEntryName(city.entry_country_code)}
-                          </span>
-                        {/if}
-                      </span>
-                      <span class="row-meta">{city.servers.length} server{city.servers.length !== 1 ? 's' : ''}</span>
-                    </div>
-                    <div class="load-bar"><div class="load-fill" style="width:{city.avg_load}%;background:{loadBarColor(city.avg_load)}"></div></div>
-                    <span class="load-pct">{city.avg_load}%</span>
-                    <button class="expand-btn" on:click|stopPropagation={() => toggleCity(city.key)}
-                            title="Show servers">{expandedCity === city.key ? '▾' : '▸'}</button>
-                  </div>
-
-                  {#if expandedCity === city.key}
-                    {#each city.servers as s (s.id)}
-                      <div class="row sub2" class:selected={selectedId === s.id}
-                           on:click|stopPropagation={() => { selectedId = s.id; selectionScope = { type: 'server' }; }} role="button" tabindex="0">
-                        <span class="row-name srv-name">{s.name}</span>
-                        {#if s.secure_core}
-                          <span class="sc-pill" title="Secure Core: enters via {scEntryName(s.entry_country_code)}">SC</span>
-                        {/if}
-                        <div class="load-bar"><div class="load-fill" style="width:{s.load}%;background:{loadBarColor(s.load)}"></div></div>
-                        <span class="load-pct">{s.load}%</span>
-                      </div>
-                    {/each}
-                  {/if}
-                {/each}
+      <!-- Country select -->
+      <div class="form-group">
+        <label>Country</label>
+        <div class="dropdown-wrap">
+          <button class="dropdown-trigger" on:click={() => openDrop('country')}>
+            <span class="trig-content">
+              {#if selCountry}
+                <img class="flag-img" src={countryFlagUrl(selCountry)} alt="" />
+                {countryLabel}
+              {:else}
+                <span class="fastest-icon">⚡</span> Fastest country
               {/if}
-            {/each}
-          {/if}
-
-        <!-- ═══ CITY VIEW ═══ -->
-        {:else if viewLevel === 'city'}
-          {#if countryGroups.length === 0}
-            <div class="empty-msg">No servers found</div>
-          {:else}
-            {#each countryGroups as g (g.code)}
-              {#each g.cities as city (city.key)}
-                <div class="row" class:selected={selectedId === city.best.id && expandedCity !== city.key}
-                     on:click={() => selectCityGroup(city, g.code)} role="button" tabindex="0">
-                  <span class="flag"><img class="flag-img" src={countryFlagUrl(g.code)} alt="" /></span>
-                  <div class="row-info">
-                    <span class="row-name">
-                      {g.name} — {city.city}
-                      {#if city.is_secure_core}
-                        <span class="sc-badge" title="Multi-hop: traffic enters via {scEntryName(city.entry_country_code)} before exiting in {g.name}">
-                          via <img class="flag-img" src={countryFlagUrl(city.entry_country_code)} alt="" /> {scEntryName(city.entry_country_code)}
-                        </span>
-                      {/if}
-                    </span>
-                    <span class="row-meta">{city.servers.length} server{city.servers.length !== 1 ? 's' : ''}</span>
-                  </div>
-                  <div class="load-bar"><div class="load-fill" style="width:{city.avg_load}%;background:{loadBarColor(city.avg_load)}"></div></div>
-                  <span class="load-pct">{city.avg_load}%</span>
-                  <button class="expand-btn" on:click|stopPropagation={() => toggleCity(city.key)}
-                          title="Show servers">{expandedCity === city.key ? '▾' : '▸'}</button>
-                </div>
-
-                {#if expandedCity === city.key}
-                  {#each city.servers as s (s.id)}
-                    <div class="row sub1" class:selected={selectedId === s.id}
-                         on:click|stopPropagation={() => { selectedId = s.id; selectionScope = { type: 'server' }; }} role="button" tabindex="0">
-                      <span class="row-name srv-name">{s.name}</span>
-                      {#if s.secure_core}
-                        <span class="sc-pill" title="Secure Core: enters via {scEntryName(s.entry_country_code)}">SC</span>
-                      {/if}
-                      <div class="load-bar"><div class="load-fill" style="width:{s.load}%;background:{loadBarColor(s.load)}"></div></div>
-                      <span class="load-pct">{s.load}%</span>
-                    </div>
+            </span>
+            <span class="caret">▾</span>
+          </button>
+          {#if openDropdown === 'country'}
+            <div class="dropdown-pop" on:click|stopPropagation>
+              <input class="dropdown-search" placeholder="Search country..."
+                     bind:value={searchCountry} autofocus>
+              <div class="dropdown-list">
+                <button class="dropdown-item" class:selected={selCountry === null}
+                        on:click={() => setCountry(null)}>
+                  <span class="fastest-icon">⚡</span>
+                  <span class="item-main">Fastest</span>
+                  <span class="item-meta">{countryOptions.length} {countryOptions.length === 1 ? 'country' : 'countries'}</span>
+                </button>
+                {#if filteredCountryOptions.length === 0}
+                  <div class="empty">No countries match your filters</div>
+                {:else}
+                  {#each filteredCountryOptions as c (c.code)}
+                    <button class="dropdown-item" class:selected={selCountry === c.code}
+                            on:click={() => setCountry(c.code)}>
+                      <img class="flag-img" src={countryFlagUrl(c.code)} alt="" />
+                      <span class="item-main">{c.name}</span>
+                      <span class="item-meta">{c.servers} server{c.servers !== 1 ? 's' : ''}</span>
+                      <div class="load-bar"><div class="load-fill" style="width:{c.avgLoad}%;background:{loadBarColor(c.avgLoad)}"></div></div>
+                      <span class="load-pct">{c.avgLoad}%</span>
+                      <span class="score-pct" title="Average Proton score (lower = better)">{formatScore(c.avgScore)}</span>
+                    </button>
                   {/each}
                 {/if}
-              {/each}
-            {/each}
-          {/if}
-
-        <!-- ═══ SERVER VIEW ═══ -->
-        {:else}
-          {#if flatServers.length === 0}
-            <div class="empty-msg">No servers found</div>
-          {:else}
-            {#each flatServers as s (s.id)}
-              <div class="row" class:selected={selectedId === s.id}
-                   on:click={() => { selectedId = s.id; selectionScope = { type: 'server' }; }} role="button" tabindex="0">
-                <span class="flag"><img class="flag-img" src={countryFlagUrl(s.country_code)} alt="" /></span>
-                <span class="row-name srv-name">{s.name}</span>
-                {#if s.secure_core}
-                  <span class="sc-pill" title="Secure Core: {scEntryName(s.entry_country_code)} → {s.city}, {s.country}">SC</span>
-                  <span class="row-meta">{s.city} via <img class="flag-img" src={countryFlagUrl(s.entry_country_code)} alt="" /> {scEntryName(s.entry_country_code)}</span>
-                {:else}
-                  <span class="row-meta">{s.city}</span>
-                {/if}
-                <div class="load-bar"><div class="load-fill" style="width:{s.load}%;background:{loadBarColor(s.load)}"></div></div>
-                <span class="load-pct">{s.load}%</span>
               </div>
-            {/each}
+            </div>
           {/if}
+        </div>
+      </div>
+
+      <!-- City select -->
+      <div class="form-group">
+        <label>City</label>
+        <div class="dropdown-wrap">
+          <button class="dropdown-trigger" class:disabled={cityDisabled}
+                  disabled={cityDisabled}
+                  on:click={() => openDrop('city')}>
+            <span class="trig-content">
+              {#if cityDisabled}
+                <span class="fastest-icon">⚡</span> Fastest city
+              {:else if selCity}
+                {cityLabel}
+                {#if features.secure_core && selEntryCountry}
+                  <span class="sc-via">via <img class="flag-img" src={countryFlagUrl(selEntryCountry)} alt="" /> {scEntryName(selEntryCountry)}</span>
+                {/if}
+              {:else}
+                <span class="fastest-icon">⚡</span> Fastest city
+              {/if}
+            </span>
+            {#if !cityDisabled}<span class="caret">▾</span>{/if}
+          </button>
+          {#if openDropdown === 'city' && !cityDisabled}
+            <div class="dropdown-pop" on:click|stopPropagation>
+              <input class="dropdown-search" placeholder="Search city..."
+                     bind:value={searchCity} autofocus>
+              <div class="dropdown-list">
+                <button class="dropdown-item" class:selected={selCity === null}
+                        on:click={() => setCity(null)}>
+                  <span class="fastest-icon">⚡</span>
+                  <span class="item-main">Fastest</span>
+                  <span class="item-meta">{cityOptions.length} {cityOptions.length === 1 ? 'option' : 'options'}</span>
+                </button>
+                {#if filteredCityOptions.length === 0}
+                  <div class="empty">No cities match your filters</div>
+                {:else}
+                  {#each filteredCityOptions as c (`${c.city}::${c.entry_country_code || ''}`)}
+                    <button class="dropdown-item"
+                            class:selected={selCity === c.city && selEntryCountry === c.entry_country_code}
+                            on:click={() => setCity(c)}>
+                      <span class="item-main">
+                        {c.city}
+                        {#if c.entry_country_code}
+                          <span class="sc-via-inline">via <img class="flag-img" src={countryFlagUrl(c.entry_country_code)} alt="" /> {scEntryName(c.entry_country_code)}</span>
+                        {/if}
+                      </span>
+                      <span class="item-meta">{c.servers} server{c.servers !== 1 ? 's' : ''}</span>
+                      <div class="load-bar"><div class="load-fill" style="width:{c.avgLoad}%;background:{loadBarColor(c.avgLoad)}"></div></div>
+                      <span class="load-pct">{c.avgLoad}%</span>
+                      <span class="score-pct" title="Average Proton score (lower = better)">{formatScore(c.avgScore)}</span>
+                    </button>
+                  {/each}
+                {/if}
+              </div>
+            </div>
+          {/if}
+        </div>
+      </div>
+
+      <!-- Server select -->
+      <div class="form-group">
+        <label>Server</label>
+        <div class="dropdown-wrap">
+          <button class="dropdown-trigger" class:disabled={serverDisabled}
+                  disabled={serverDisabled}
+                  on:click={() => openDrop('server')}>
+            <span class="trig-content">
+              {#if serverDisabled}
+                <span class="fastest-icon">⚡</span> Fastest server
+              {:else if selServerId}
+                {serverLabel}
+              {:else}
+                <span class="fastest-icon">⚡</span> Fastest server
+              {/if}
+            </span>
+            {#if !serverDisabled}<span class="caret">▾</span>{/if}
+          </button>
+          {#if openDropdown === 'server' && !serverDisabled}
+            <div class="dropdown-pop" on:click|stopPropagation>
+              <input class="dropdown-search" placeholder="Search server..."
+                     bind:value={searchServer} autofocus>
+              <div class="dropdown-list">
+                <button class="dropdown-item" class:selected={selServerId === null}
+                        on:click={() => setServer(null)}>
+                  <span class="fastest-icon">⚡</span>
+                  <span class="item-main">Fastest</span>
+                  <span class="item-meta">{serverOptions.length} server{serverOptions.length !== 1 ? 's' : ''}</span>
+                </button>
+                {#if filteredServerOptions.length === 0}
+                  <div class="empty">No servers match</div>
+                {:else}
+                  {#each filteredServerOptions as s (s.id)}
+                    <button class="dropdown-item" class:selected={selServerId === s.id}
+                            on:click={() => setServer(s.id)}>
+                      <span class="item-main">{s.name}</span>
+                      <span class="srv-badges">
+                        {#if s.streaming}<span class="srv-badge str">STR</span>{/if}
+                        {#if s.p2p}<span class="srv-badge p2p">P2P</span>{/if}
+                        {#if s.secure_core}<span class="srv-badge sc">SC</span>{/if}
+                      </span>
+                      <div class="load-bar"><div class="load-fill" style="width:{s.load}%;background:{loadBarColor(s.load)}"></div></div>
+                      <span class="load-pct">{s.load}%</span>
+                      <span class="score-pct" title="Proton score (lower = better) — what determines this list's order">{formatScore(s.score)}</span>
+                    </button>
+                  {/each}
+                {/if}
+              </div>
+            </div>
+          {/if}
+        </div>
+      </div>
+
+      <!-- Resolved preview -->
+      <div class="preview">
+        <div class="preview-label">Currently resolves to</div>
+        {#if resolvedServer}
+          <div class="preview-server">
+            <img class="flag-img" src={countryFlagUrl(resolvedServer.country_code)} alt="" />
+            <strong>{resolvedServer.name}</strong>
+            <span class="preview-meta">· {resolvedServer.city || resolvedServer.country}</span>
+            {#if resolvedServer.secure_core}
+              <span class="srv-badge sc">SC</span>
+              <span class="sc-via-inline">via <img class="flag-img" src={countryFlagUrl(resolvedServer.entry_country_code)} alt="" /> {scEntryName(resolvedServer.entry_country_code)}</span>
+            {/if}
+            <div class="load-bar"><div class="load-fill" style="width:{resolvedServer.load}%;background:{loadBarColor(resolvedServer.load)}"></div></div>
+            <span class="load-pct">{resolvedServer.load}%</span>
+            <span class="score-pct" title="Proton score (lower = better)">{formatScore(resolvedServer.score)}</span>
+          </div>
+        {:else}
+          <div class="preview-empty">No server matches your filters. Try removing a feature or picking a different country.</div>
         {/if}
       </div>
+
+      <details class="metric-help">
+        <summary>What do load % and ⚡ score mean?</summary>
+        <div class="help-content">
+          <h4>Load %</h4>
+          <p>How busy the server is right now. Lower means less congestion. Above ~80% the server is crowded.</p>
+          <h4>⚡ Score</h4>
+          <p>Proton's own "fastest server" metric — lower is better. It blends load, latency from Proton's measurement infrastructure, and tier weighting.</p>
+          <p>This list and the auto-optimizer are sorted by score, exactly like Proton's official client.</p>
+          <h4>When they disagree</h4>
+          <p>The two usually agree. When they don't, trust the score: a lightly-loaded server with bad latency from Proton's probes will have a worse score and won't be picked.</p>
+        </div>
+      </details>
+
+      {/if}
 
     </div>
     <div class="modal-footer">
       <button class="btn-outline" on:click={close}>Cancel</button>
-      <button class="btn-primary" on:click={select}>Connect</button>
+      <button class="btn-primary" on:click={connect} disabled={!resolvedServer}>Connect</button>
     </div>
   </div>
 </div>
 {/if}
 
 <style>
-  .server-filters { display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
-  .server-filters input { max-width: 240px; }
-  .filter-chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
-  .filter-chip { padding: 5px 12px; border-radius: 16px; font-size: .8rem; background: var(--bg); color: var(--fg2); border: 1px solid var(--border); cursor: pointer; transition: var(--transition); }
+  .center-pad { padding: 40px; text-align: center; }
+  .spinner { display: inline-block; width: 18px; height: 18px; border: 2.5px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .6s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .filter-section { margin-bottom: 14px; }
+  .filter-label { font-size: .72rem; color: var(--fg3); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 6px; }
+  .filter-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .filter-chip { padding: 6px 12px; border-radius: 16px; font-size: .8rem; background: var(--bg); color: var(--fg2); border: 1px solid var(--border); cursor: pointer; transition: var(--transition); }
   .filter-chip:hover { border-color: var(--accent); color: var(--accent); }
   .filter-chip.active { background: var(--accent); color: #fff; border-color: var(--accent); }
 
-  .view-toggle { display: flex; gap: 3px; margin-bottom: 10px; background: var(--bg); border-radius: var(--radius-xs); padding: 3px; }
-  .toggle-btn { flex: 1; padding: 6px 12px; font-size: .8rem; background: transparent; color: var(--fg3); border: none; border-radius: 4px; cursor: pointer; transition: var(--transition); }
-  .toggle-btn.active { background: var(--surface); color: var(--fg); font-weight: 500; }
+  .form-group { margin-bottom: 12px; }
+  .form-group label { display: flex; align-items: center; font-size: .72rem; color: var(--fg3); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 4px; }
+  .server-label { display: flex; align-items: center; }
 
-  .server-list { max-height: 320px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius-xs); }
-  .center-pad { padding: 20px; text-align: center; }
-  .empty-msg { padding: 24px; text-align: center; color: var(--fg3); }
+  .dropdown-wrap { position: relative; }
+  .dropdown-trigger {
+    width: 100%; display: flex; align-items: center; justify-content: space-between;
+    padding: 9px 12px; background: var(--bg); border: 1px solid var(--border2);
+    border-radius: var(--radius-xs); color: var(--fg); font-size: .9rem;
+    cursor: pointer; text-align: left; transition: var(--transition);
+  }
+  .dropdown-trigger:hover:not(.disabled) { border-color: var(--accent); }
+  .dropdown-trigger.disabled { opacity: .5; cursor: not-allowed; background: var(--bg2); }
+  .trig-content { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; }
+  .fastest-icon { color: #f39c12; }
+  .caret { color: var(--fg3); font-size: .8rem; }
+  .sc-via { font-size: .72rem; color: var(--fg3); margin-left: 4px; display: inline-flex; align-items: center; gap: 3px; }
+  .sc-via-inline { font-size: .68rem; color: var(--fg3); margin-left: 4px; display: inline-flex; align-items: center; gap: 3px; }
 
-  .row { display: flex; align-items: center; padding: 10px 14px; cursor: pointer; transition: var(--transition); border-bottom: 1px solid var(--border); gap: 8px; }
-  .row:last-child { border-bottom: none; }
-  .row:hover { background: var(--bg3); }
-  .row.selected { background: rgba(0,180,216,.12); }
-  .fastest-row { border-bottom: 2px solid var(--border2); }
-  .fastest-icon { font-size: 1.15rem; flex-shrink: 0; width: 26px; text-align: center; }
-  .row.sub1 { padding-left: 42px; background: rgba(0,0,0,.08); }
-  .row.sub2 { padding-left: 62px; background: rgba(0,0,0,.14); font-size: .82rem; }
-  .row.sub1:hover, .row.sub2:hover { background: var(--bg3); }
+  .dropdown-pop {
+    position: absolute; top: calc(100% + 4px); left: 0; right: 0;
+    z-index: 100; background: var(--surface); border: 1px solid var(--border2);
+    border-radius: var(--radius-xs); box-shadow: var(--shadow-lg);
+    max-height: 280px; display: flex; flex-direction: column;
+  }
+  .dropdown-search {
+    margin: 6px; padding: 6px 8px; background: var(--bg); border: 1px solid var(--border);
+    border-radius: var(--radius-xs); color: var(--fg); font-size: .82rem;
+  }
+  .dropdown-list { overflow-y: auto; flex: 1; }
+  .dropdown-item {
+    width: 100%; display: flex; align-items: center; gap: 8px;
+    padding: 8px 10px; background: transparent; border: none;
+    color: var(--fg); font-size: .82rem; cursor: pointer; text-align: left;
+    border-bottom: 1px solid var(--border); transition: background .15s;
+  }
+  .dropdown-item:last-child { border-bottom: none; }
+  .dropdown-item:hover { background: var(--bg3); }
+  .dropdown-item.selected { background: rgba(0,180,216,.12); }
 
-  .flag { font-size: 1.15rem; flex-shrink: 0; width: 26px; text-align: center; display: flex; align-items: center; justify-content: center; }
-  .flag-img, :global(.flag-img) { width: 20px; height: 15px; vertical-align: middle; border-radius: 2px; object-fit: cover; }
-  .row-info { flex: 1; min-width: 0; }
-  .row-name { font-size: .85rem; font-weight: 500; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .row-meta { font-size: .72rem; color: var(--fg3); }
-  .srv-name { flex: 1; }
-  .sc-badge { font-size: .72rem; color: var(--amber); font-weight: 400; }
-  .sc-pill { font-size: .65rem; background: var(--amber-bg); color: var(--amber); padding: 1px 5px; border-radius: 3px; font-weight: 600; flex-shrink: 0; cursor: help; }
-  .expand-btn { background: none; border: none; color: var(--fg3); font-size: .85rem; padding: 4px 6px; cursor: pointer; flex-shrink: 0; }
-  .expand-btn:hover { color: var(--fg); }
+  .item-main { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .item-meta { font-size: .7rem; color: var(--fg3); flex-shrink: 0; }
+
+  .srv-badges { display: flex; gap: 3px; flex-shrink: 0; }
+  .srv-badge { font-size: .6rem; padding: 1px 4px; border-radius: 3px; font-weight: 600; }
+  .srv-badge.str { background: rgba(155, 89, 182, .2); color: #b07cd6; }
+  .srv-badge.p2p { background: rgba(46, 204, 113, .2); color: #2ecc71; }
+  .srv-badge.sc { background: rgba(243, 156, 18, .2); color: #f39c12; }
 
   .load-bar { width: 50px; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; flex-shrink: 0; }
-  .load-fill { height: 100%; border-radius: 3px; display: block; }
-  .load-pct { font-size: .78rem; color: var(--fg2); min-width: 32px; text-align: right; }
+  .load-fill { height: 100%; }
+  .load-pct { font-size: .76rem; color: var(--fg2); min-width: 32px; text-align: right; flex-shrink: 0; }
+  /* Proton score: the actual sort key. Visually distinct from load%
+     so users don't confuse the two metrics — smaller, monospaced,
+     dimmer, with a leading bolt to echo the "Fastest" iconography. */
+  .score-pct {
+    font-size: .68rem; color: var(--fg3);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    min-width: 38px; text-align: right; flex-shrink: 0;
+  }
+  .score-pct::before { content: "⚡ "; opacity: .55; }
 
-  .options-section { margin-top: 18px; }
-  .options-section h3 { font-size: .9rem; font-weight: 600; margin-bottom: 10px; color: var(--fg2); }
-  .proto-note { font-size: .75rem; font-weight: 400; color: var(--fg3); }
-  .options-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-  .option-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: var(--radius-xs); }
-  .option-item:hover { background: var(--bg3); }
-  .option-item input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer; }
-  .option-item label { font-size: .85rem; cursor: pointer; flex: 1; }
-  .tooltip-trigger { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; background: var(--border); color: var(--fg3); font-size: .65rem; font-weight: 700; cursor: help; }
-  .spinner { display: inline-block; width: 18px; height: 18px; border: 2.5px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .6s linear infinite; }
-  @keyframes spin { to { transform: rotate(360deg); } }
+  .empty { padding: 16px; text-align: center; color: var(--fg3); font-size: .82rem; }
+
+  .preview {
+    margin-top: 16px; padding: 12px;
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
+  }
+  .preview-label { font-size: .68rem; color: var(--fg3); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 6px; }
+  .preview-server { display: flex; align-items: center; gap: 6px; font-size: .85rem; color: var(--fg); }
+  .preview-meta { color: var(--fg3); font-size: .78rem; }
+  .preview-empty { font-size: .78rem; color: var(--fg3); line-height: 1.4; }
+
+  /* Collapsible "What do load % and score mean?" — mirrors the
+     `.protocol-help` pattern in CreateGroupModal so the two collapsibles
+     feel consistent. */
+  .metric-help { margin-top: 12px; }
+  .metric-help summary { font-size: .82rem; color: var(--accent); cursor: pointer; padding: 6px 0; }
+  .metric-help summary:hover { text-decoration: underline; }
+  .help-content { font-size: .8rem; color: var(--fg2); line-height: 1.5; padding: 10px; background: var(--bg); border-radius: var(--radius-xs); margin-top: 4px; }
+  .help-content h4 { font-size: .85rem; color: var(--fg); margin: 8px 0 4px; }
+  .help-content h4:first-child { margin-top: 0; }
+  .help-content p { margin: 0 0 6px; }
+  .help-content p:last-child { margin-bottom: 0; }
+
+  :global(.flag-img) { width: 20px; height: 15px; vertical-align: middle; border-radius: 2px; object-fit: cover; }
 </style>

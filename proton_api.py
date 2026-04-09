@@ -2,8 +2,13 @@
 
 Thin wrapper around the official proton-vpn-api-core library.
 Handles authentication (including 2FA/TOTP), server list queries,
-and WireGuard config generation. All methods are synchronous
+and WireGuard/OpenVPN config generation. All methods are synchronous
 (using sync_wrapper internally) for use with Flask.
+
+WireGuard configs use **persistent-mode certificates** (365-day validity,
+no local agent required). Each VPN profile gets its own Ed25519 key pair,
+registered with Proton as a named "device". The router is fully standalone
+after config upload — no Surface Go dependency for ongoing VPN operation.
 
 Usage:
     api = ProtonAPI()
@@ -11,9 +16,11 @@ Usage:
     if result.twofa_required:
         result = api.submit_2fa("123456")
     servers = api.get_servers(country="GB", feature="streaming")
-    config = api.generate_wireguard_config(servers[0])
+    config, info, key, expiry = api.generate_wireguard_config(servers[0], "MyProfile", opts)
 """
 
+import base64
+import logging
 import re
 import time
 from typing import Optional
@@ -22,6 +29,7 @@ from proton.session.api import sync_wrapper
 from proton.vpn.core.api import ProtonVPNAPI
 from proton.vpn.core.session_holder import ClientTypeMetadata
 from proton.vpn.session.dataclasses import LoginResult
+from proton.vpn.session.key_mgr import KeyHandler
 from proton.vpn.session.servers.logicals import ServerList
 from proton.vpn.session.servers.types import (
     LogicalServer,
@@ -30,6 +38,8 @@ from proton.vpn.session.servers.types import (
     TierEnum,
 )
 from proton.vpn.connection.constants import CA_CERT
+
+log = logging.getLogger("flintvpn")
 
 # Feature name → enum mapping for user-facing filters
 FEATURE_MAP = {
@@ -165,7 +175,7 @@ class ProtonAPI:
         if sl is None:
             raise RuntimeError("Not logged in or session data not loaded.")
 
-        countries = sl.group_by_country(cities=True)
+        countries = sl.group_by_country(group_by_city=True)
         return [
             {
                 "code": c.code.upper(),
@@ -175,56 +185,94 @@ class ProtonAPI:
                 "features": [f.name.lower() for f in c.features],
                 "cities": [
                     {
-                        "name": city.name,
-                        "server_count": len(city.servers),
+                        "name": loc.name,
+                        "server_count": len(loc.servers),
                     }
-                    for city in c.cities
+                    for loc in c.locations
                 ],
             }
             for c in countries
         ]
 
+    # ── Persistent WireGuard certificates ─────────────────────────────────
+    #
+    # Each VPN profile gets its own Ed25519 key pair, registered with Proton
+    # as a persistent "device" (365-day cert). The X25519 WG key is derived
+    # deterministically from the Ed25519 key. No local agent required —
+    # features are baked into the certificate at generation time.
+    #
+    # The old session-mode path (7-day cert + local agent) is not used.
+
+    PERSISTENT_CERT_DURATION_MIN = 525600  # 365 days
+
+    # WireGuard port by transport mode
+    WG_PORTS = {"udp": 51820, "tcp": 443, "tls": 443}
+
     def generate_wireguard_config(
         self,
         server: LogicalServer,
+        profile_name: str = "Unnamed",
         netshield: int = 0,
         moderate_nat: bool = False,
         nat_pmp: bool = False,
         vpn_accelerator: bool = True,
-    ) -> tuple[str, dict]:
-        """Generate a WireGuard .conf for a server, stripping IPv6.
+        existing_wg_key: Optional[str] = None,
+        transport: str = "udp",
+    ) -> tuple[str, dict, str, int]:
+        """Generate a WireGuard .conf with a persistent (365-day) certificate.
+
+        Each call with a new key registers a named "device" in the user's
+        Proton account. Reusing an existing key (via `existing_wg_key`)
+        skips re-registration (the cert is per-key, not per-server).
 
         Args:
-            server: LogicalServer to connect to
-            netshield: 0=off, 1=malware, 2=malware+ads
-            moderate_nat: Enable moderate NAT (gaming)
-            nat_pmp: Enable NAT-PMP port forwarding
-            vpn_accelerator: Enable VPN Accelerator
+            server: LogicalServer to connect to.
+            profile_name: Human-readable name shown in Proton's device list.
+            netshield: 0=off, 1=malware, 2=malware+ads.
+            moderate_nat: Enable moderate NAT (gaming).
+            nat_pmp: Enable NAT-PMP port forwarding.
+            vpn_accelerator: Enable VPN Accelerator.
+            existing_wg_key: Base64 Ed25519 private key from a previous call.
+                If provided, reuses the same key pair (no cert registration).
+                If None, generates a fresh key pair and registers.
+            transport: "udp" (kernel WG), "tcp", or "tls" (proton-wg).
 
         Returns:
-            Tuple of (config_string, server_info_dict).
-            config_string is a valid WireGuard .conf with no IPv6 lines.
-            server_info_dict contains the server details for storage.
+            Tuple of (config_string, server_info_dict, wg_key_b64, cert_expiry).
+            - config_string: valid WireGuard .conf.
+            - server_info_dict: server details for storage.
+            - wg_key_b64: Ed25519 private key (base64) to persist in profile_store.
+            - cert_expiry: Unix timestamp when the persistent cert expires (0 if unchanged).
         """
-        account = self._api.account_data
-        creds = account.vpn_credentials.pubkey_credentials
-        physical = server.get_random_physical_server()
+        # 1. Key pair: reuse existing or generate fresh
+        if existing_wg_key:
+            kh = KeyHandler(base64.b64decode(existing_wg_key))
+            cert_expiry = 0  # Caller keeps existing cert_expiry
+        else:
+            kh = KeyHandler()
+            cert_expiry = self._register_persistent_cert(
+                kh, profile_name,
+                netshield=netshield,
+                moderate_nat=moderate_nat,
+                nat_pmp=nat_pmp,
+                vpn_accelerator=vpn_accelerator,
+            )
 
-        # Build feature suffix for server name (used in Proton's X-PM-netzone header)
-        # These are baked into the certificate, not the WireGuard config itself.
-        # The DNS address determines NetShield level.
+        # 2. Build the WireGuard config
+        physical = server.get_random_physical_server()
         dns = NETSHIELD_DNS.get(netshield, "10.2.0.1")
+        port = self.WG_PORTS.get(transport, 51820)
 
         config_lines = [
             "[Interface]",
-            f"PrivateKey = {creds.wg_private_key}",
+            f"PrivateKey = {kh.x25519_sk_str}",
             "Address = 10.2.0.2/32",
             f"DNS = {dns}",
             "",
             "[Peer]",
             f"PublicKey = {physical.x25519_pk}",
             "AllowedIPs = 0.0.0.0/0",
-            f"Endpoint = {physical.entry_ip}:51820",
+            f"Endpoint = {physical.entry_ip}:{port}",
         ]
 
         config = "\n".join(config_lines) + "\n"
@@ -233,7 +281,90 @@ class ProtonAPI:
         server_info["physical_server_domain"] = physical.domain
         server_info["endpoint"] = f"{physical.entry_ip}:51820"
 
-        return config, server_info
+        return config, server_info, kh.ed25519_sk_str, cert_expiry
+
+    def refresh_wireguard_cert(
+        self,
+        wg_key_b64: str,
+        profile_name: str = "Unnamed",
+        netshield: int = 0,
+        moderate_nat: bool = False,
+        nat_pmp: bool = False,
+        vpn_accelerator: bool = True,
+    ) -> int:
+        """Refresh a persistent WireGuard certificate without changing the key.
+
+        Call this when the cert is approaching expiry, or when VPN options
+        change (features are baked into the cert at generation time).
+
+        Args:
+            wg_key_b64: Base64 Ed25519 private key from the profile.
+            profile_name: Device name in Proton's dashboard.
+            netshield, moderate_nat, nat_pmp, vpn_accelerator: Feature flags.
+
+        Returns:
+            New cert_expiry Unix timestamp.
+        """
+        kh = KeyHandler(base64.b64decode(wg_key_b64))
+        return self._register_persistent_cert(
+            kh, profile_name,
+            netshield=netshield,
+            moderate_nat=moderate_nat,
+            nat_pmp=nat_pmp,
+            vpn_accelerator=vpn_accelerator,
+        )
+
+    def get_wireguard_x25519_key(self, wg_key_b64: str) -> str:
+        """Derive the X25519 WireGuard private key from a stored Ed25519 key.
+
+        Used when switching servers (same key, new peer) to rebuild the
+        WG config without re-registering the certificate.
+        """
+        kh = KeyHandler(base64.b64decode(wg_key_b64))
+        return kh.x25519_sk_str
+
+    def _register_persistent_cert(
+        self,
+        kh: KeyHandler,
+        profile_name: str,
+        netshield: int = 0,
+        moderate_nat: bool = False,
+        nat_pmp: bool = False,
+        vpn_accelerator: bool = True,
+    ) -> int:
+        """Register or refresh a persistent certificate with Proton's API.
+
+        Returns the cert expiry as a Unix timestamp.
+        """
+        features = {}
+        if netshield:
+            features["NetShieldLevel"] = netshield
+        if moderate_nat:
+            features["RandomNAT"] = False  # Proton inverts: moderate_nat = NOT random
+        if not vpn_accelerator:
+            features["SplitTCP"] = False
+        if nat_pmp:
+            features["PortForwarding"] = True
+
+        req = {
+            "ClientPublicKey": kh.ed25519_pk_pem,
+            "ClientPublicKeyMode": "EC",
+            "Mode": "persistent",
+            "DeviceName": profile_name if profile_name.startswith("FlintVPN") else f"FlintVPN-{profile_name}",
+            "Duration": f"{self.PERSISTENT_CERT_DURATION_MIN} min",
+        }
+        if features:
+            req["Features"] = features
+
+        session = self._api._session_holder.session
+        resp = session.api_request("/vpn/v1/certificate", jsondata=req)
+
+        cert_expiry = resp.get("ExpirationTime", 0)
+        log.info(
+            f"Persistent cert registered: device='{profile_name}', "
+            f"expires in {(cert_expiry - time.time()) / 86400:.0f} days"
+        )
+        return cert_expiry
 
     def get_openvpn_credentials(self) -> tuple[str, str]:
         """Get ProtonVPN OpenVPN username and password.

@@ -475,8 +475,8 @@ def server_generate_config(name, netshield, output):
 
     try:
         server = api.get_server_by_name(name)
-        config, info = api.generate_wireguard_config(
-            server, netshield=int(netshield)
+        config, info, _wg_key, _cert_expiry = api.generate_wireguard_config(
+            server, profile_name=name, netshield=int(netshield)
         )
     except Exception as e:
         click.echo(f"Error: {e}")

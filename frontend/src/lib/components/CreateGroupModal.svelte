@@ -11,9 +11,11 @@
 
   const MAX_WG_GROUPS = 5;
   const MAX_OVPN_GROUPS = 5;
+  const MAX_PWG_GROUPS = 4;  // proton-wg TCP/TLS: limited by fwmark address space
 
   let type = 'vpn', name = '', icon = '🔒', color = '#00aaff', isGuest = false;
-  let vpnProtocol = 'wireguard'; // 'wireguard' or 'openvpn'
+  let vpnProtocol = 'wireguard'; // 'wireguard', 'wireguard-tcp', or 'openvpn'
+  let wgTcpTransport = 'tcp'; // 'tcp' or 'tls' (only when vpnProtocol === 'wireguard-tcp')
   let ovpnProtocol = 'udp'; // 'udp' or 'tcp'
   let lanOutbound = 'allowed', lanInbound = 'allowed';
   // Exception lists. Plain entries: [{value, type}] (no source tag — at the
@@ -29,14 +31,14 @@
   // When creating VPN profile, we need the server picker
   export let onNeedServer;
 
-  $: wgCount = $profiles.filter(p => p.type === 'vpn' && p.router_info?.vpn_protocol !== 'openvpn').length;
+  $: wgCount = $profiles.filter(p => p.type === 'vpn' && p.router_info?.vpn_protocol === 'wireguard').length;
+  $: pwgCount = $profiles.filter(p => p.type === 'vpn' && (p.router_info?.vpn_protocol || '').startsWith('wireguard-')).length;
   $: ovpnCount = $profiles.filter(p => p.router_info?.vpn_protocol === 'openvpn').length;
   $: currentLimitReached = type === 'vpn' && (
     (vpnProtocol === 'wireguard' && wgCount >= MAX_WG_GROUPS) ||
+    (vpnProtocol === 'wireguard-tcp' && pwgCount >= MAX_PWG_GROUPS) ||
     (vpnProtocol === 'openvpn' && ovpnCount >= MAX_OVPN_GROUPS)
   );
-  $: currentCount = vpnProtocol === 'wireguard' ? wgCount : ovpnCount;
-  $: currentMax = vpnProtocol === 'wireguard' ? MAX_WG_GROUPS : MAX_OVPN_GROUPS;
 
   // Reset form when modal opens
   $: if (visible) resetForm();
@@ -84,10 +86,13 @@
         const savedOutAllow = entriesToRawList(lanOutboundAllow);
         const savedInAllow = entriesToRawList(lanInboundAllow);
         onNeedServer(async (serverId, options, scope) => {
+          // For wireguard-tcp, append the transport mode (tcp or tls)
+          const effectiveProtocol = vpnProtocol === 'wireguard-tcp'
+            ? `wireguard-${wgTcpTransport}` : vpnProtocol;
           const body = {
             name, type, color, icon, is_guest: isGuest,
             server_id: serverId, options,
-            vpn_protocol: vpnProtocol,
+            vpn_protocol: effectiveProtocol,
             ovpn_protocol: ovpnProtocol,
             server_scope: scope,
           };
@@ -165,20 +170,39 @@
           <button type="button" class="protocol-card" class:selected={vpnProtocol === 'wireguard'}
                   on:click={() => vpnProtocol = 'wireguard'}>
             <div class="proto-name">WireGuard</div>
-            <div class="proto-desc">Fastest speeds, lowest latency, modern encryption. Best for most users.</div>
+            <div class="proto-desc">Fastest speeds, lowest latency. UDP only. Best for most users.</div>
             <div class="proto-slots">{wgCount}/{MAX_WG_GROUPS} used</div>
+          </button>
+          <button type="button" class="protocol-card" class:selected={vpnProtocol === 'wireguard-tcp'}
+                  on:click={() => vpnProtocol = 'wireguard-tcp'}>
+            <div class="proto-name">WireGuard TCP</div>
+            <div class="proto-desc">WireGuard over TCP/TLS. Bypasses firewalls that block UDP.</div>
+            <div class="proto-slots">{pwgCount}/{MAX_PWG_GROUPS} used</div>
           </button>
           <button type="button" class="protocol-card" class:selected={vpnProtocol === 'openvpn'}
                   on:click={() => vpnProtocol = 'openvpn'}>
             <div class="proto-name">OpenVPN</div>
-            <div class="proto-desc">More compatible, works on restricted networks, TCP option bypasses firewalls.</div>
+            <div class="proto-desc">Most compatible. Works on restricted networks.</div>
             <div class="proto-slots">{ovpnCount}/{MAX_OVPN_GROUPS} used</div>
           </button>
         </div>
         {#if currentLimitReached}
-          <div class="limit-error">{vpnProtocol === 'wireguard' ? 'WireGuard' : 'OpenVPN'} limit reached. Try the other protocol or delete an existing group.</div>
+          <div class="limit-error">
+            {vpnProtocol === 'wireguard' ? 'WireGuard' : vpnProtocol === 'wireguard-tcp' ? 'WireGuard TCP/TLS' : 'OpenVPN'} limit reached. Try a different protocol or delete an existing group.
+          </div>
         {/if}
       </div>
+
+      {#if vpnProtocol === 'wireguard-tcp'}
+      <div class="form-group">
+        <label>WireGuard TCP Transport</label>
+        <select bind:value={wgTcpTransport}>
+          <option value="tcp">TCP (recommended)</option>
+          <option value="tls">Stealth / TLS (looks like HTTPS, hardest to block)</option>
+        </select>
+        <span class="hint">Use Stealth in hotels, offices, or countries that actively detect and block VPN traffic.</span>
+      </div>
+      {/if}
 
       {#if vpnProtocol === 'openvpn'}
       <div class="form-group">
@@ -198,23 +222,27 @@
           <ul>
             <li><strong>Speed:</strong> 2-4x faster than OpenVPN, runs in the kernel</li>
             <li><strong>Latency:</strong> Lower latency, ideal for gaming and video calls</li>
-            <li><strong>Battery/CPU:</strong> Much lower resource usage on the router</li>
+            <li><strong>CPU:</strong> Much lower resource usage on the router</li>
             <li><strong>Features:</strong> Moderate NAT, NAT-PMP (port forwarding), VPN Accelerator</li>
-            <li><strong>Reconnection:</strong> Reconnects almost instantly after network changes</li>
+          </ul>
+          <h4>WireGuard TCP</h4>
+          <ul>
+            <li><strong>Bypass firewalls:</strong> WireGuard speeds over TCP port 443 — works when UDP is blocked</li>
+            <li><strong>Stealth/TLS:</strong> Wraps traffic in TLS so it looks like normal HTTPS. Hardest to detect and block.</li>
+            <li><strong>Tradeoff:</strong> Slightly higher latency than UDP (TCP overhead), uses a userspace process</li>
           </ul>
           <h4>OpenVPN</h4>
           <ul>
-            <li><strong>Compatibility:</strong> Works on networks that block WireGuard (hotels, offices, restrictive countries)</li>
-            <li><strong>TCP mode:</strong> Can run on port 443 (HTTPS port), making it nearly impossible to block</li>
-            <li><strong>Maturity:</strong> Older protocol, more widely audited and documented</li>
+            <li><strong>Compatibility:</strong> Widest device and network support</li>
+            <li><strong>TCP mode:</strong> Port 443, hard to block</li>
             <li><strong>Fallback:</strong> Use when WireGuard doesn't connect</li>
           </ul>
           <h4>Quick Guide</h4>
           <ul>
             <li><strong>Home use / streaming / gaming:</strong> WireGuard</li>
-            <li><strong>Hotel / office / restricted WiFi:</strong> OpenVPN TCP</li>
-            <li><strong>Maximum privacy:</strong> Either works, WireGuard for speed</li>
-            <li><strong>WireGuard not connecting:</strong> Try OpenVPN UDP, then TCP</li>
+            <li><strong>Network blocks UDP:</strong> WireGuard TCP</li>
+            <li><strong>VPN traffic actively detected:</strong> WireGuard TCP Stealth</li>
+            <li><strong>Nothing else works:</strong> OpenVPN TCP</li>
           </ul>
         </div>
       </details>

@@ -27,6 +27,103 @@ VALID_TYPES = {"vpn", "no_vpn", "no_internet"}
 VALID_LAN_ACCESS = {"allowed", "group_only", "blocked"}
 _MAC_RE = re.compile(r'^([0-9a-f]{2}:){5}[0-9a-f]{2}$', re.IGNORECASE)
 
+
+# ── Server scope normalization ────────────────────────────────────────────
+#
+# New server_scope shape:
+# {
+#   "country_code": "AU" | None,           # None = "Fastest country"
+#   "city": "Sydney" | None,               # None = "Fastest city"
+#   "entry_country_code": "CH" | None,     # only for secure_core; None = fastest entry
+#   "server_id": "abc123" | None,          # None = "Fastest server"
+#   "features": {
+#       "streaming": bool, "p2p": bool, "secure_core": bool
+#   }
+# }
+#
+# Cascade rule (enforced by normalize_server_scope and the UI):
+#   If country_code is None → city, entry_country_code, server_id all None.
+#   If city is None → entry_country_code, server_id all None.
+#   If features.secure_core is False → entry_country_code is None.
+#
+# normalize_server_scope() also accepts the legacy shape (type='server'|
+# 'country'|'city'|'global') and converts it.
+
+DEFAULT_SCOPE_FEATURES = {"streaming": False, "p2p": False, "secure_core": False}
+
+
+def normalize_server_scope(scope) -> dict:
+    """Normalize server_scope to the canonical shape.
+
+    Accepts the new shape (returns it unchanged after validation) OR the
+    legacy `{type: 'server'|'country'|'city'|'global'}` shape (translates).
+    Always returns a dict with all five fields present and the cascade
+    invariant enforced.
+    """
+    if not isinstance(scope, dict):
+        scope = {}
+    features_in = scope.get("features") or {}
+    if not isinstance(features_in, dict):
+        features_in = {}
+    features = {
+        "streaming": bool(features_in.get("streaming", False)),
+        "p2p": bool(features_in.get("p2p", False)),
+        "secure_core": bool(features_in.get("secure_core", False)),
+    }
+
+    # Check whether this is the new shape (has any of the new top-level fields)
+    is_new_shape = (
+        "country_code" in scope or "city" in scope or "server_id" in scope
+        or "entry_country_code" in scope or "features" in scope
+    )
+
+    if is_new_shape:
+        country_code = scope.get("country_code") or None
+        city = scope.get("city") or None
+        entry_country_code = scope.get("entry_country_code") or None
+        server_id = scope.get("server_id") or None
+    else:
+        # Legacy shape
+        typ = scope.get("type", "server")
+        country_code = scope.get("country_code") if typ in ("country", "city") else None
+        city = scope.get("city") if typ == "city" else None
+        entry_country_code = None
+        server_id = None
+        # In the old design, "server" type meant a specific server was
+        # picked but the id wasn't stored in the scope (it lived on
+        # profile.server.id). We can't recover it here, so leave it None
+        # and let the caller handle it.
+
+    # Enforce cascade
+    if country_code is None:
+        city = None
+        entry_country_code = None
+        server_id = None
+    elif city is None:
+        entry_country_code = None
+        server_id = None
+    if not features["secure_core"]:
+        entry_country_code = None
+
+    return {
+        "country_code": country_code,
+        "city": city,
+        "entry_country_code": entry_country_code,
+        "server_id": server_id,
+        "features": features,
+    }
+
+
+def empty_server_scope() -> dict:
+    """Return a fresh, fully-fastest scope with no features enabled."""
+    return {
+        "country_code": None,
+        "city": None,
+        "entry_country_code": None,
+        "server_id": None,
+        "features": dict(DEFAULT_SCOPE_FEATURES),
+    }
+
 # Optional callback fired after every successful save() — used by app.py to
 # push a copy of profile_store.json to the router as a disaster-recovery
 # backup. Best-effort: failures are logged but never propagate.
@@ -63,10 +160,19 @@ _EMPTY_STORE = {
 
 
 def load() -> dict:
-    """Load the profile store from disk. Returns empty store if file missing."""
+    """Load the profile store from disk. Returns empty store if file missing.
+
+    Also normalizes any legacy server_scope shapes on every load so the rest
+    of the codebase only ever sees the canonical scope shape.
+    """
     if not STORE_FILE.exists():
         return json.loads(json.dumps(_EMPTY_STORE))  # deep copy
-    return json.loads(STORE_FILE.read_text())
+    data = json.loads(STORE_FILE.read_text())
+    # Normalize server_scope on every load (handles legacy shapes transparently)
+    for p in data.get("profiles", []):
+        if p.get("type") == "vpn":
+            p["server_scope"] = normalize_server_scope(p.get("server_scope"))
+    return data
 
 
 def save(data: dict):
@@ -178,6 +284,7 @@ def create_profile(
     options: Optional[dict] = None,
     router_info: Optional[dict] = None,
     server_scope: Optional[dict] = None,
+    **kwargs,
 ) -> dict:
     """Create a new profile and save.
 
@@ -191,6 +298,7 @@ def create_profile(
         server: Server info dict (VPN only)
         options: VPN options dict (VPN only)
         router_info: Dict from router_api.upload_wireguard_config (VPN only)
+        **kwargs: Additional fields stored on VPN profiles (e.g. wg_key, cert_expiry)
 
     Returns:
         The created profile dict.
@@ -237,7 +345,12 @@ def create_profile(
             "secure_core": False,
         }
         profile["router_info"] = router_info or {}
-        profile["server_scope"] = server_scope or {"type": "server"}
+        profile["server_scope"] = normalize_server_scope(server_scope)
+
+        # Additional VPN fields (wg_key, cert_expiry for persistent WG certs)
+        for k, v in kwargs.items():
+            if v is not None:
+                profile[k] = v
 
     data["profiles"].append(profile)
 

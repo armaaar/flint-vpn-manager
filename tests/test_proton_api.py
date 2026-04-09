@@ -4,6 +4,8 @@ Unit tests mock the underlying Proton library.
 Integration tests (marked @pytest.mark.integration) use a live ProtonVPN session.
 """
 
+import time
+
 import pytest
 from unittest.mock import MagicMock, patch, PropertyMock
 
@@ -253,60 +255,97 @@ class TestServerToDict:
         assert "streaming" in result["features"]
 
 
+def _mock_persistent_cert_api(mock):
+    """Set up the mock to handle persistent certificate API calls."""
+    mock_session = MagicMock()
+    mock_session.api_request.return_value = {
+        "Code": 1000,
+        "ExpirationTime": 1807264162,
+        "RefreshTime": 1799380162,
+        "Mode": "persistent",
+        "DeviceName": "FlintVPN-test",
+        "Certificate": "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
+    }
+    mock._session_holder.session = mock_session
+    return mock_session
+
+
 class TestGenerateWireGuardConfig:
     def test_generates_valid_config(self, mock_api):
         api, mock = mock_api
         server = _make_logical("CH#1", entry_ip="1.2.3.4", x25519_pk="serverpk==")
+        _mock_persistent_cert_api(mock)
 
-        # Mock account data
-        mock_creds = MagicMock()
-        mock_creds.wg_private_key = "clientprivatekey=="
-        mock_account = MagicMock()
-        mock_account.vpn_credentials.pubkey_credentials = mock_creds
-        mock.account_data = mock_account
-
-        config, info = api.generate_wireguard_config(server)
+        config, info, wg_key, cert_expiry = api.generate_wireguard_config(server)
 
         assert "[Interface]" in config
-        assert "PrivateKey = clientprivatekey==" in config
+        assert "PrivateKey = " in config
         assert "Address = 10.2.0.2/32" in config
         assert "[Peer]" in config
         assert "PublicKey = serverpk==" in config
         assert "AllowedIPs = 0.0.0.0/0" in config
         assert "Endpoint = 1.2.3.4:51820" in config
         assert "::" not in config  # No IPv6
+        assert wg_key  # Ed25519 key returned for storage
+        assert cert_expiry == 1807264162
+
+    def test_persistent_cert_api_called_with_correct_params(self, mock_api):
+        api, mock = mock_api
+        server = _make_logical("CH#1")
+        mock_session = _mock_persistent_cert_api(mock)
+
+        api.generate_wireguard_config(
+            server, profile_name="MyVPN",
+            netshield=2, moderate_nat=True, vpn_accelerator=False,
+        )
+
+        call_args = mock_session.api_request.call_args
+        req_body = call_args[1]["jsondata"] if "jsondata" in call_args[1] else call_args[0][1]
+        assert req_body["Mode"] == "persistent"
+        assert req_body["DeviceName"] == "FlintVPN-MyVPN"
+        assert req_body["Duration"] == "525600 min"
+        assert req_body["Features"]["NetShieldLevel"] == 2
+        assert req_body["Features"]["RandomNAT"] is False  # moderate_nat inverted
+        assert req_body["Features"]["SplitTCP"] is False
+
+    def test_reuses_existing_key(self, mock_api):
+        """When existing_wg_key is provided, the same X25519 key is used."""
+        api, mock = mock_api
+        server = _make_logical("CH#1")
+        _mock_persistent_cert_api(mock)
+
+        # First call: generate fresh key
+        _, _, key1, _ = api.generate_wireguard_config(server)
+
+        # Second call: reuse key
+        config, _, key2, _ = api.generate_wireguard_config(
+            server, existing_wg_key=key1,
+        )
+
+        assert key1 == key2  # Same Ed25519 key returned
+        # Config should have the same WG private key
+        for line in config.splitlines():
+            if line.startswith("PrivateKey"):
+                pk = line.split("=", 1)[1].strip()
+                # Verify it's deterministically derived from the same Ed25519 key
+                assert pk == api.get_wireguard_x25519_key(key1)
 
     def test_netshield_dns(self, mock_api):
         api, mock = mock_api
         server = _make_logical("CH#1")
-        mock_creds = MagicMock()
-        mock_creds.wg_private_key = "key=="
-        mock_account = MagicMock()
-        mock_account.vpn_credentials.pubkey_credentials = mock_creds
-        mock.account_data = mock_account
+        _mock_persistent_cert_api(mock)
 
-        # NetShield off
-        config0, _ = api.generate_wireguard_config(server, netshield=0)
-        assert "DNS = 10.2.0.1" in config0
-
-        # NetShield malware
-        config1, _ = api.generate_wireguard_config(server, netshield=1)
-        assert "DNS = 10.2.0.1" in config1
-
-        # NetShield malware+ads (all levels use 10.2.0.1 — filtering is server-side)
-        config2, _ = api.generate_wireguard_config(server, netshield=2)
-        assert "DNS = 10.2.0.1" in config2
+        # All NetShield levels use 10.2.0.1 (filtering is server-side via cert)
+        for level in (0, 1, 2):
+            config, _, _, _ = api.generate_wireguard_config(server, netshield=level)
+            assert "DNS = 10.2.0.1" in config
 
     def test_returns_server_info(self, mock_api):
         api, mock = mock_api
         server = _make_logical("UK#5", "UK", "London", 43)
-        mock_creds = MagicMock()
-        mock_creds.wg_private_key = "key=="
-        mock_account = MagicMock()
-        mock_account.vpn_credentials.pubkey_credentials = mock_creds
-        mock.account_data = mock_account
+        _mock_persistent_cert_api(mock)
 
-        _, info = api.generate_wireguard_config(server)
+        _, info, _, _ = api.generate_wireguard_config(server)
 
         assert info["name"] == "UK#5"
         assert info["country_code"] == "UK"
@@ -474,9 +513,17 @@ class TestProtonAPIIntegration:
         assert us["server_count"] > 100
 
     def test_generate_wireguard_config(self, live_api):
+        """Live test: reuses the same key across runs to avoid leaking
+        new 'Unnamed' device registrations in the Proton account."""
         servers = live_api.get_servers(country="US")
         server = live_api.get_server_by_id(servers[0]["id"])
-        config, info = live_api.generate_wireguard_config(server)
+
+        # Use a fixed test key so repeated runs reuse the same device
+        # (existing_wg_key skips cert registration — no new device created)
+        _TEST_KEY = "dGVzdF9rZXlfZm9yX2xpdmVfaW50ZWdyYXRpb24xMjM="
+        config, info, wg_key, cert_expiry = live_api.generate_wireguard_config(
+            server, profile_name="LiveTest", existing_wg_key=_TEST_KEY,
+        )
 
         assert "[Interface]" in config
         assert "PrivateKey" in config
@@ -485,6 +532,8 @@ class TestProtonAPIIntegration:
         assert "Endpoint" in config
         assert "::" not in config  # No IPv6
         assert info["country_code"] == "US"
+        assert wg_key == _TEST_KEY  # Same key returned
+        assert cert_expiry == 0  # Existing key skips registration
 
     def test_user_tier(self, live_api):
         assert live_api.user_tier >= 2  # Plus or higher

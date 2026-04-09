@@ -2,6 +2,22 @@
 
 A local web dashboard for managing ProtonVPN WireGuard and OpenVPN profiles on a GL.iNet Flint 2 (GL-MT6000) router. Runs on a Surface Go 2 (Ultramarine Linux), serves a Svelte frontend to any device on the LAN.
 
+## Features
+
+- **3 VPN protocols**: WireGuard UDP (fastest), WireGuard TCP/TLS (bypasses firewalls), OpenVPN UDP/TCP (most compatible)
+- **Up to 14 simultaneous tunnels**: 5 WG UDP + 4 WG TCP/TLS + 5 OpenVPN
+- **Per-device VPN routing**: assign any device to any VPN group via MAC-based ipset rules
+- **Persistent WireGuard certificates**: 365-day certs, router works standalone without the Surface Go
+- **Auto-optimizer**: daily background task switches VPN groups to faster servers (by Proton score)
+- **Auto cert renewal**: background daily check refreshes WG certs within 30 days of expiry
+- **Server picker**: 3-level browser (Country → City → Server) sorted by Proton's score metric
+- **LAN access control**: per-group and per-device firewall policies (allowed/group_only/blocked) with exception lists
+- **Kill switch**: per-group packet blackholing when tunnel drops (kernel WG via UCI, proton-wg via blackhole route)
+- **WireGuard Stealth/TLS**: traffic looks like normal HTTPS — hardest to detect and block
+- **Live dashboard**: SSE-powered real-time tunnel health, device status, speeds
+- **Disaster recovery**: local state backed up to router, auto-restored on unlock
+- **GL.iNet compatible**: configs visible in the router's native dashboard as fallback
+
 ## Quick Start
 
 ```bash
@@ -29,7 +45,8 @@ Surface Go 2 (this machine)          GL.iNet Flint 2 Router
 │  Svelte (static/)        │         │  WireGuard / OpenVPN    │
 │  ProtonVPN API (keyring) │         │  route_policy + ipset   │
 │  profile_store.json      │         │  vpn-client service     │
-│  secrets.enc, config.json│         │  fvpn_lan iptables      │
+│  secrets.enc, config.json│         │  proton-wg (TCP/TLS)    │
+│                          │         │  fvpn_lan iptables      │
 └──────────────────────────┘         └─────────────────────────┘
 ```
 
@@ -73,8 +90,16 @@ Fields with no router or Proton native source:
       "router_info": { "rule_name": "fvpn_rule_9001", "peer_id": "9001", "vpn_protocol": "wireguard" },
       "server_id": "<proton id>",
       "server": { "id": "...", "endpoint": "...", "physical_server_domain": "...", "protocol": "openvpn-tcp" },
-      "server_scope": { "type": "country", "country_code": "DE" },
+      "server_scope": {
+        "country_code": "DE" | null,
+        "city": "Berlin" | null,
+        "entry_country_code": "CH" | null,
+        "server_id": "<pinned proton id>" | null,
+        "features": { "streaming": false, "p2p": false, "secure_core": false }
+      },
       "options": { "netshield": 2, "moderate_nat": false, "nat_pmp": false, "vpn_accelerator": true, "secure_core": false },
+      "wg_key": "<base64 Ed25519 private key — WG profiles only>",
+      "cert_expiry": 1807264162,
       "lan_access": {
         "outbound": "group_only",
         "inbound": "group_only",
@@ -116,6 +141,8 @@ Notes:
 
 - **Color, icon, is_guest, server_scope, options, lan_access**: pure UI/intent metadata, no router-native concept
 - **`server_id`**: the link from a local profile to a Proton server (no way to derive it from the router config alone)
+- **`wg_key`** (base64 Ed25519 private key): per-profile persistent WireGuard key. The X25519 WG private key is deterministically derived from this via `nacl.bindings.crypto_sign_ed25519_sk_to_curve25519`. Registered with Proton as a named "device" with a 365-day certificate. The router gets the derived X25519 key (in the WG config); the Ed25519 source key stays local for cert refresh.
+- **`cert_expiry`** (Unix timestamp): when the persistent certificate expires. Auto-refreshed on unlock if within 30 days of expiry.
 - **`lan_access` 3-state policy** (`allowed`/`group_only`/`blocked`): UCI rules + ipsets are the execution layer (per-group `fvpn_lan_<short_id>_ips` ipsets, `fvpn_lan_<short_id>_<dir>drop` rule sections), but they can't be parsed back to the 3-state semantic. The router stores intent in its native format (UCI), but the *interpretation* (what counts as `allowed` vs `group_only`) lives in the local store.
 - **`lan_access.{outbound,inbound}_allow` exception lists**: narrow allow lists that pierce a `group_only`/`blocked` posture for specific peers (MAC strings or profile-UUID strings). Same source-of-truth reasoning — iptables ACCEPT rules can't be parsed back to "this was an exception" semantics. Profile-UUID entries reference target groups' ipsets by name (so membership propagates automatically); MAC entries get per-(group, direction) extras ipsets.
 - **`device_lan_overrides`**: same — local source, UCI rules are the execution layer. Per-device override sections (`fvpn_devovr_<mac>_*`) are emitted before group sections in UCI section order so they take precedence in the iptables chain.
@@ -191,13 +218,15 @@ Background thread. At a configured time of day (within a 2-minute window to tole
 | **Client** | An OpenVPN client in `/etc/config/ovpnclient` (`28216_9051`–`28216_9099`) + `.ovpn` file in `/etc/openvpn/profiles/`. |
 | **Kill Switch** | Route policy flag. When the tunnel drops, assigned devices' packets are blackholed instead of leaking. Live from `route_policy.{rule}.killswitch`. |
 | **Private MAC** | Randomized MAC (2nd hex char ∈ `{2,6,A,E}`). VPN routing by MAC won't persist across reconnects. |
-| **Server Scope** | How a group selects its server: `country` (best in country), `city` (best in city), or `server` (specific, never auto-switched). |
-| **Auto-Optimizer** | Background thread that periodically switches VPN groups to better-loaded servers. Only profiles with scope ≠ `server`. |
+| **Server Scope** | How a group selects its server. Three independent levels (`country_code`, `city`, `server_id`) each can be specific or `null` ("Fastest"). Cascade rule: a level being null forces all narrower levels to null. Plus a `features` filter (`streaming`, `p2p`, `secure_core`) that constrains which servers qualify. The auto-optimizer respects all of these — e.g. "fastest streaming server in US" always picks a streaming server in US. `entry_country_code` is only meaningful with `secure_core=true` and identifies the SC entry route. See `profile_store.normalize_server_scope`. |
+| **Auto-Optimizer** | Background thread that periodically switches VPN groups to better-loaded servers within their scope constraints. Skipped for profiles where the user pinned a specific `server_id`. |
 | **LAN Access** | Per-group or per-device firewall rules controlling LAN-to-LAN traffic. Three states: `allowed`, `group_only`, `blocked`. Inbound and outbound independent. Each direction may also carry an **exception list** (allowlist of MACs or profile IDs) that pierces `group_only`/`blocked` for specific peers — e.g. `outbound: blocked` + `outbound_allow: [<group X>]` means *"outbound only to Group X, nothing else."* |
 | **LAN Exception** | An entry in `lan_access.{outbound,inbound}_allow`. Either a MAC string (specific device) or a profile ID (the whole group, members tracked live). At the device-override layer, exception lists merge additively with the group's. Forward-compatible with future deny-list subtraction; not implemented in v1. |
 | **NetShield** | ProtonVPN DNS-level ad/malware blocking. Level 0=off, 1=malware, 2=malware+ads+trackers. Baked into the WG/OVPN config at generation time. |
 | **Guest Group** | The group new (previously unseen) MACs are auto-assigned to by the device tracker. Any group type (VPN/NoVPN/NoInternet) can be the guest group. |
 | **Anonymous section** | A `@rule[N]` route_policy section (positional reference) created when the GL.iNet UI edits one of our rules. We self-heal these back to `fvpn_rule_*` named sections by matching on `peer_id`/`client_id`. |
+| **proton-wg** | Userspace WireGuard binary (ProtonVPN's wireguard-go fork) that supports TCP and TLS transports. Cross-compiled for ARM64, lives at `/usr/bin/proton-wg` on the router. Managed entirely by FlintVPN (not vpn-client). |
+| **Persistent cert** | A 365-day WireGuard certificate from `POST /vpn/v1/certificate` with `Mode: "persistent"`. Each VPN profile gets its own Ed25519 key pair registered as a named "device" in Proton's dashboard. No local agent required — the router is fully standalone after config upload. |
 
 ## Backend Modules
 
@@ -208,13 +237,13 @@ Main server. All API endpoints, SSE stream, profile-list builder, device-list bu
 Pure emitter `serialize_lan_state(store, device_ips, assignment_map)` produces a deterministic dict of desired UCI ipset + rule sections. `diff_state(live, desired)` computes a UCI batch + per-ipset add/remove ops. `sync_lan_to_router(router, ...)` orchestrates: reads live state via `router.fvpn_lan_full_state`, applies the diff via `router.fvpn_uci_apply` (membership-only ops skip the firewall reload). Replaces the legacy `router_api.generate_lan_rules` + the imperative `fvpn_lan` chain.
 
 ### `proton_api.py` — ProtonVPN wrapper
-Thin synchronous wrapper around `proton-vpn-api-core`. Login (with 2FA), server list, WG/OVPN config generation. Exposes `server_to_dict()` for live server resolution by `build_profile_list`.
+Thin synchronous wrapper around `proton-vpn-api-core`. Login (with 2FA), server list, WG/OVPN config generation. WireGuard configs use **persistent-mode certificates** (365-day validity, `Mode: "persistent"` on `POST /vpn/v1/certificate`). Each VPN profile gets its own Ed25519 key pair registered as a named device in Proton's dashboard — no local agent required, the router is fully standalone after config upload. Key methods: `generate_wireguard_config()` (returns config + wg_key + cert_expiry), `refresh_wireguard_cert()` (renews without changing the key), `get_wireguard_x25519_key()` (derives WG key from stored Ed25519). Certificate auto-refresh happens on unlock for certs within 30 days of expiry.
 
 ### `router_api.py` — Router SSH management
 SSH-based API (Paramiko + key auth) for the Flint 2. Manages WG/OVPN configs via UCI, route policy rules, ipset membership, firewall rules, DHCP leases, gl-clients metadata. Helpers: `get_flint_vpn_rules`, `get_device_assignments`, `get_tunnel_health`, `get_kill_switch`, `get_profile_name`, `rename_profile`, `reorder_vpn_rules`, `heal_anonymous_rule_section`, `_from_mac_tokens` (for case-preserving del_list). FlintVPN UCI helpers: `fvpn_uci_apply`, `fvpn_ipset_membership`, `fvpn_lan_full_state`, `fvpn_lan_wipe_all`. Also `read_file`/`write_file` for the disaster-recovery backup file at `/etc/fvpn/profile_store.bak.json`, and `get_router_fingerprint` (br-lan MAC) for the restore-on-unlock fingerprint check.
 
 ### `profile_store.py` — Local JSON persistence
-Atomic JSON read/write for the slim local store (UI metadata + non-VPN assignments + LAN overrides). `_sanitize_mac_keys()` strips legacy fields on every save so post-refactor data is automatically cleaned up.
+Atomic JSON read/write for the slim local store (UI metadata + non-VPN assignments + LAN overrides). `_sanitize_mac_keys()` strips legacy fields on every save so post-refactor data is automatically cleaned up. WireGuard VPN profiles additionally store `wg_key` (base64 Ed25519 private key for persistent cert management) and `cert_expiry` (Unix timestamp).
 
 ### `device_tracker.py` — Background new-device auto-assigner
 Minimal background thread. Polls DHCP leases every 30s. The **only** thing it persists is auto-assigning newly-discovered MACs to the guest profile (writes to router for VPN guest, local store for non-VPN guest). Maintains an in-memory `_known_macs` set and `lan_rules_stale` flag for IP-change detection.
@@ -222,11 +251,13 @@ Minimal background thread. Polls DHCP leases every 30s. The **only** thing it pe
 ### `secrets_manager.py` — Encrypted credentials
 Fernet (AES-128-CBC + HMAC-SHA256) with PBKDF2 key derivation. Stores ProtonVPN and router credentials in `secrets.enc`.
 
-### `server_optimizer.py` — Server load comparison
-Pure function `find_better_server(profile, servers, threshold)`. Used by the auto-optimizer (threshold=30) to pick a less-loaded server during its scheduled run.
+### `server_optimizer.py` — Server score comparison
+Pure function `find_better_server(profile, servers, min_relative_improvement=0.20)`. Ranks by Proton's `score` field (lower = better, matching `proton-vpn-api-core`'s `ServerList.get_fastest_server`, which is literally `min(servers, key=lambda s: s.score)`). The library also adds +1000 to the score of non-auto-connectable servers, so sorting by score implicitly excludes servers Proton's own client wouldn't pick. Auto-switch only fires when a candidate's score is at least 20% lower than the current server's — relative, not absolute, so the threshold stays meaningful across the full Proton score range.
 
-### `auto_optimizer.py` — Background server switcher
-Daemon thread; uses live router health via `build_profile_list`. Within a 2-minute window after the scheduled time, switches each eligible VPN profile to a better server.
+### `auto_optimizer.py` — Background server switcher + cert renewal
+Daemon thread with two daily jobs:
+1. **Server optimization**: Within a 2-minute window after the scheduled time, switches each eligible VPN profile to a better-scored server. Enforces a `MIN_DWELL_HOURS=6` per-profile cooldown (in-memory `_last_switch_at` map) to prevent flapping.
+2. **Certificate renewal**: Once per day (tracked by `_last_cert_check_date`), iterates all VPN profiles with a `wg_key` and refreshes persistent certs within 30 days of expiry via `proton.refresh_wireguard_cert()`. Runs independently of the optimization schedule — doesn't require `auto_optimize` to be enabled. No router interaction needed.
 
 ### `cli.py` — Click-based terminal interface
 Wraps the same backend. Commands: setup, unlock, status, server browse, router status/devices/tunnels, profile CRUD, device assignment, settings.
@@ -340,9 +371,10 @@ GET  /                                  → serve Svelte frontend (static/index.
 6. `bring_tunnel_up`
 
 ### Router limits
-- **5 WireGuard tunnels** (`wgclient1`–`wgclient5`, marks `0x1000`–`0x5000`)
-- **5 OpenVPN tunnels** (`ovpnclient1`–`ovpnclient5`, marks `0xa000`–`0xe000`)
-- **10 total simultaneous VPN tunnels**
+- **5 WireGuard UDP tunnels** (`wgclient1`–`wgclient5`, marks `0x1000`–`0x5000`, vpn-client)
+- **4 WireGuard TCP/TLS tunnels** (`protonwg0`–`protonwg3`, marks `0x6000`/`0x7000`/`0x9000`/`0xf000`, FlintVPN)
+- **5 OpenVPN tunnels** (`ovpnclient1`–`ovpnclient5`, marks `0xa000`–`0xe000`, vpn-client)
+- **14 total simultaneous VPN tunnels** (limited by fwmark address space)
 - **150 DHCP devices** (pool `.100`–`.249`)
 - **65,536 MACs per ipset** (per-group device limit)
 
@@ -367,6 +399,51 @@ Never use heredocs or base64 — they corrupt certificates and keys.
 | Route Policy (OVPN) | `route_policy.fvpn_rule_ovpn_NNNN` | — | — |
 
 These names make our configs visible in the GL.iNet router dashboard (http://192.168.8.1) as a fallback.
+
+## proton-wg (WireGuard TCP/TLS)
+
+WireGuard is UDP-only at the kernel level. ProtonVPN offers WireGuard over TCP (port 443) and TLS/Stealth (port 443, looks like HTTPS). The router's vpn-client only handles kernel WG (UDP). For TCP/TLS, FlintVPN manages the full tunnel lifecycle using `proton-wg` — ProtonVPN's wireguard-go fork cross-compiled for ARM64.
+
+### Architecture
+```
+Kernel WG (UDP):    vpn-client → wgclient1-5 → fwmark 0x1000-0x5000
+proton-wg (TCP/TLS): FlintVPN → protonwg0-3  → fwmark 0x6000,0x7000,0x9000,0xf000
+OpenVPN:            vpn-client → ovpnclient1-5 → fwmark 0xa000-0xe000
+```
+
+### Fwmark allocation (0xf000 mask — 16 values total)
+- `0x0000`: unmarked (reserved)
+- `0x1000`–`0x5000`: kernel WG (5 slots, vpn-client)
+- `0x6000`, `0x7000`, `0x9000`, `0xf000`: proton-wg (**4 slots**, FlintVPN)
+- `0x8000`: default policy / no-VPN
+- `0xa000`–`0xe000`: OpenVPN (5 slots, vpn-client)
+
+### Tunnel lifecycle (FlintVPN-managed, no vpn-client)
+1. `upload_proton_wg_config()` — writes `.conf` + `.env` to `/etc/fvpn/protonwg/`, creates ipset
+2. `start_proton_wg_tunnel()` — starts process, sets up interface/IP/routing/firewall/mangle
+3. `stop_proton_wg_tunnel()` — kills process, cleans routing/firewall, keeps config for reconnect
+4. `delete_proton_wg_config()` — removes config files + ipset, rebuilds mangle rules
+
+### Mangle MARK rules
+Ephemeral iptables rules (lost on firewall reload). A firewall include script at `/etc/fvpn/protonwg/mangle_rules.sh` with `option reload '1'` re-applies them on every reload. Rebuilt by `_rebuild_proton_wg_mangle_rules()` after any tunnel start/stop.
+
+### Boot persistence
+OpenWrt init.d service at `/etc/init.d/fvpn-protonwg` (installed on first proton-wg profile creation). On boot: starts all proton-wg processes from env files, sets up routing + mangle rules.
+
+### Config files on router
+- `/usr/bin/proton-wg` — the binary (6MB, static ARM64)
+- `/etc/fvpn/protonwg/<iface>.conf` — WireGuard config (PrivateKey, Peer, Endpoint:443)
+- `/etc/fvpn/protonwg/<iface>.env` — environment vars + FlintVPN metadata (tunnel_id, mark, ipset)
+- `/etc/fvpn/protonwg/mangle_rules.sh` — auto-generated firewall include
+- `/etc/init.d/fvpn-protonwg` — boot persistence service
+
+### Key differences from kernel WG
+- No route_policy UCI rule (FlintVPN manages routing directly)
+- No vpn-client involvement (process managed via SSH)
+- Kill switch always on (blackhole route, not UCI flag)
+- Device assignment via ipset add (not `uci add_list from_mac`)
+- Server switch via `wg setconf` on the live interface (same as kernel WG `wg set`)
+- Slot allocation checks both live interfaces AND config files (disconnected tunnel reserves its slot)
 
 ## Debugging
 

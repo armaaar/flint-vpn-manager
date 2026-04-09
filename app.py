@@ -378,6 +378,9 @@ def api_unlock():
         except Exception as e:
             log.warning(f"Auto-optimizer start failed: {e}")
 
+        # Persistent WG cert renewal is handled by the auto-optimizer's
+        # daily check_and_refresh_certs() — no need to check here.
+
         return jsonify({"success": True})
     except (ValueError, FileNotFoundError) as e:
         return jsonify({"error": str(e)}), 401
@@ -447,13 +450,15 @@ def _local_router_key(local_profile: dict) -> tuple:
     """Stable key for matching a local profile to a router rule.
 
     Uses (vpn_protocol, peer_id) for WG and (vpn_protocol, client_id) for OVPN.
-    These survive section renames by the GL.iNet UI (which can replace
-    fvpn_rule_9001 with @rule[4] but always preserves peer_id/client_id).
+    For proton-wg (wireguard-tcp/tls), uses (protocol, tunnel_name) since they
+    don't have peer_id (managed outside vpn-client).
     """
     ri = local_profile.get("router_info") or {}
     vpn_protocol = ri.get("vpn_protocol", "wireguard")
+    if vpn_protocol.startswith("wireguard-"):
+        # proton-wg: keyed by tunnel_name (protonwg0, protonwg1, etc.)
+        return (vpn_protocol, ri.get("tunnel_name", ""))
     if vpn_protocol == "openvpn":
-        # client_id may be stored as '9051' or 'peer_9051' style; normalize
         cid = str(ri.get("client_id", "")).lstrip("peer_").lstrip("client_")
         return ("openvpn", cid)
     pid = str(ri.get("peer_id", "")).lstrip("peer_").lstrip("client_")
@@ -559,7 +564,7 @@ def build_profile_list(router, store_data: dict, proton=None) -> list:
             "kill_switch": rule.get("killswitch") == "1",
             "health": health,
             "server": _resolve_server_live(proton, local),
-            "server_scope": local.get("server_scope", {"type": "server"}),
+            "server_scope": ps.normalize_server_scope(local.get("server_scope")),
             "options": local.get("options", {}),
             "lan_access": _normalize_lan_access(local.get("lan_access")),
             "router_info": ri,
@@ -576,6 +581,32 @@ def build_profile_list(router, store_data: dict, proton=None) -> list:
         device_counts[canonical] = device_counts.get(canonical, 0) + 1
     for p in vpn_profiles:
         p["device_count"] = device_counts.get(p["router_info"]["rule_name"], 0)
+
+    # proton-wg profiles (wireguard-tcp / wireguard-tls): managed outside
+    # vpn-client, so they don't appear in router route_policy rules.
+    # Handle them separately from the ghost detection.
+    for key, local in local_vpn_by_key.items():
+        ri = local.get("router_info", {})
+        proto = ri.get("vpn_protocol", "")
+        if not proto.startswith("wireguard-"):
+            continue  # Not a proton-wg profile
+        matched_local_keys.add(key)  # Don't treat as ghost
+
+        p = dict(local)
+        iface = ri.get("tunnel_name", "")
+        try:
+            p["health"] = router.get_proton_wg_health(iface) if iface else "red"
+        except Exception:
+            p["health"] = "red"
+        p["kill_switch"] = True  # Always on for proton-wg (blackhole route)
+        if proton:
+            try:
+                p["server"] = _resolve_server_live(proton, local)
+            except Exception:
+                pass
+        p["lan_access"] = _normalize_lan_access(p.get("lan_access"))
+        p["device_count"] = 0
+        vpn_profiles.append(p)
 
     # Ghost: local VPN profile whose router rule no longer exists
     for key, local in local_vpn_by_key.items():
@@ -632,25 +663,39 @@ def api_create_profile():
 
     MAX_WG_GROUPS = 5
     MAX_OVPN_GROUPS = 5
+    MAX_PWG_GROUPS = 4  # proton-wg TCP/TLS: limited by fwmark address space
 
     data = request.json
     if "name" not in data or "type" not in data:
         return jsonify({"error": "name and type required"}), 400
 
     profile_type = data["type"]
-    vpn_protocol = data.get("vpn_protocol", "wireguard")  # "wireguard" or "openvpn"
+    vpn_protocol = data.get("vpn_protocol", "wireguard")  # "wireguard", "wireguard-tcp", "wireguard-tls", or "openvpn"
+
+    # Normalize: wireguard-tcp and wireguard-tls are both proton-wg tunnels
+    is_proton_wg = vpn_protocol in ("wireguard-tcp", "wireguard-tls")
+    wg_transport = {"wireguard-tcp": "tcp", "wireguard-tls": "tls"}.get(vpn_protocol, "udp")
 
     # Enforce VPN group limits per protocol
     if profile_type == "vpn":
         existing_profiles = ps.get_profiles()
-        if vpn_protocol == "wireguard":
-            count = len([p for p in existing_profiles if p["type"] == "vpn" and p.get("router_info", {}).get("vpn_protocol") != "openvpn"])
+        if is_proton_wg:
+            count = len([p for p in existing_profiles if p["type"] == "vpn"
+                         and p.get("router_info", {}).get("vpn_protocol", "").startswith("wireguard-")])
+            if count >= MAX_PWG_GROUPS:
+                return jsonify({
+                    "error": f"Cannot create more than {MAX_PWG_GROUPS} WireGuard TCP/TLS groups "
+                    "(limited by router fwmark address space)."
+                }), 400
+        elif vpn_protocol == "wireguard":
+            count = len([p for p in existing_profiles if p["type"] == "vpn"
+                         and p.get("router_info", {}).get("vpn_protocol") == "wireguard"])
             if count >= MAX_WG_GROUPS:
                 return jsonify({
-                    "error": f"Cannot create more than {MAX_WG_GROUPS} WireGuard VPN groups. "
-                    "Try OpenVPN instead (5 additional slots), or delete an existing WireGuard group."
+                    "error": f"Cannot create more than {MAX_WG_GROUPS} WireGuard UDP groups. "
+                    "Try WireGuard TCP/TLS or OpenVPN instead."
                 }), 400
-        else:
+        elif vpn_protocol == "openvpn":
             count = len([p for p in existing_profiles if p.get("router_info", {}).get("vpn_protocol") == "openvpn"])
             if count >= MAX_OVPN_GROUPS:
                 return jsonify({
@@ -660,6 +705,8 @@ def api_create_profile():
 
     router_info = None
     server_info = None
+    wg_key = None
+    cert_expiry = None
 
     # For VPN profiles: generate config and upload to router
     if profile_type == "vpn":
@@ -691,13 +738,15 @@ def api_create_profile():
                 password=ovpn_pass,
             )
           else:
-            # Generate WireGuard config
-            config_str, server_info = proton.generate_wireguard_config(
+            # Generate WireGuard config with persistent (365-day) certificate
+            config_str, server_info, wg_key, cert_expiry = proton.generate_wireguard_config(
                 server,
+                profile_name=data["name"],
                 netshield=options.get("netshield", 0),
                 moderate_nat=options.get("moderate_nat", False),
                 nat_pmp=options.get("nat_pmp", False),
                 vpn_accelerator=options.get("vpn_accelerator", True),
+                transport=wg_transport,
             )
 
             # Parse config to extract keys
@@ -715,16 +764,34 @@ def api_create_profile():
                 elif line.startswith("DNS"):
                     dns = line.split("=", 1)[1].strip()
 
-            router_info = router.upload_wireguard_config(
-                profile_name=data["name"],
-                private_key=private_key,
-                public_key=public_key,
-                endpoint=endpoint,
-                dns=dns,
-            )
+            if is_proton_wg:
+                # proton-wg (TCP/TLS): managed entirely by FlintVPN
+                router_info = router.upload_proton_wg_config(
+                    profile_name=data["name"],
+                    private_key=private_key,
+                    public_key=public_key,
+                    endpoint=endpoint,
+                    socket_type=wg_transport,
+                    dns=dns,
+                )
+            else:
+                # Kernel WireGuard (UDP): managed by vpn-client
+                router_info = router.upload_wireguard_config(
+                    profile_name=data["name"],
+                    private_key=private_key,
+                    public_key=public_key,
+                    endpoint=endpoint,
+                    dns=dns,
+                )
         except Exception as e:
             log.error(f"Failed to create VPN profile: {e}", exc_info=True)
             return jsonify({"error": f"Failed to configure router: {e}"}), 500
+
+    # wg_key + cert_expiry are set for WG profiles (persistent cert path)
+    extra_fields = {}
+    if profile_type == "vpn" and vpn_protocol.startswith("wireguard") and wg_key:
+        extra_fields["wg_key"] = wg_key
+        extra_fields["cert_expiry"] = cert_expiry
 
     profile = ps.create_profile(
         name=data["name"],
@@ -735,12 +802,14 @@ def api_create_profile():
         server=server_info,
         options=data.get("options"),
         router_info=router_info,
-        server_scope=data.get("server_scope"),
+        server_scope=ps.normalize_server_scope(data.get("server_scope")),
+        **extra_fields,
     )
 
     # Apply requested kill_switch state to the router (Stage 3: router is the source of truth).
     # upload_*_config writes killswitch='1' by default; only override if the caller asked for off.
-    if profile_type == "vpn" and router_info and router_info.get("rule_name"):
+    # proton-wg profiles always have kill switch on (blackhole route) — skip UCI operations.
+    if profile_type == "vpn" and router_info and router_info.get("rule_name") and not is_proton_wg:
         requested_ks = data.get("kill_switch", True)
         if not requested_ks:
             try:
@@ -837,36 +906,40 @@ def api_update_profile(profile_id):
     router = _get_router()
     ri = profile.get("router_info", {})
     rule_name = ri.get("rule_name")
+    proto = ri.get("vpn_protocol", "wireguard")
+    is_pwg = proto.startswith("wireguard-")
 
-    # Apply kill_switch change to the router (source of truth)
-    if new_kill_switch is not None and rule_name:
+    # Apply kill_switch change to the router (source of truth).
+    # proton-wg always has kill switch on (blackhole route) — skip UCI ops.
+    if new_kill_switch is not None and rule_name and not is_pwg:
         try:
             router.set_kill_switch(rule_name, bool(new_kill_switch))
-            # Reflect the live router value in the response — never trust the request
             profile["kill_switch"] = router.get_kill_switch(rule_name)
         except Exception as e:
             log.error(f"Failed to set kill switch on {rule_name}: {e}")
 
     # Sync name to router if this is a VPN profile (Stage 4: router is the source of truth).
-    if "name" in data and rule_name:
+    # proton-wg profiles have no route_policy rule — name is local-only.
+    if "name" in data and rule_name and not is_pwg:
         try:
             router.rename_profile(
                 rule_name=rule_name,
                 new_name=data["name"],
-                peer_id=ri.get("peer_id", "") if ri.get("vpn_protocol") != "openvpn" else "",
-                client_uci_id=ri.get("client_uci_id", "") if ri.get("vpn_protocol") == "openvpn" else "",
+                peer_id=ri.get("peer_id", "") if proto != "openvpn" else "",
+                client_uci_id=ri.get("client_uci_id", "") if proto == "openvpn" else "",
             )
-            # Reflect the live router name in the response
             profile["name"] = router.get_profile_name(rule_name) or data["name"]
         except Exception as e:
             log.warning(f"Failed to rename profile on router: {e}")
 
     # Always include live kill_switch in the response so the UI is in sync
-    if rule_name:
+    if rule_name and not is_pwg:
         try:
             profile["kill_switch"] = router.get_kill_switch(rule_name)
         except Exception:
             pass
+    elif is_pwg:
+        profile["kill_switch"] = True  # Always on
 
     return jsonify(profile)
 
@@ -886,13 +959,30 @@ def api_delete_profile(profile_id):
     router = _get_router()
     if profile["type"] == "vpn" and profile.get("router_info"):
         ri = profile["router_info"]
+        proto = ri.get("vpn_protocol", "wireguard")
         try:
-            if ri.get("vpn_protocol") == "openvpn":
+            if proto == "openvpn":
                 router.delete_openvpn_config(
                     ri.get("client_uci_id", ""),
                     ri.get("rule_name", ""),
                 )
+            elif proto.startswith("wireguard-"):
+                # proton-wg: stop tunnel + delete all config/state
+                try:
+                    router.stop_proton_wg_tunnel(
+                        iface=ri.get("tunnel_name", ""),
+                        mark=ri.get("mark", ""),
+                        table_num=ri.get("table_num", 0),
+                        tunnel_id=ri.get("tunnel_id", 0),
+                    )
+                except Exception:
+                    pass
+                router.delete_proton_wg_config(
+                    iface=ri.get("tunnel_name", ""),
+                    tunnel_id=ri.get("tunnel_id", 0),
+                )
             else:
+                # Kernel WireGuard (UDP)
                 router.delete_wireguard_config(
                     ri.get("peer_id", ""),
                     ri.get("rule_name", ""),
@@ -943,6 +1033,23 @@ def _switch_server(profile_id: str, server_id: str, options: dict = None,
                    server_scope: dict = None) -> dict:
     """Core server-switch logic. Used by API endpoint and auto-optimizer.
 
+    Two paths depending on protocol:
+
+    WireGuard (fast path, no flicker):
+      - Update the peer's UCI config in place
+      - Atomic peer swap on the running wgclient interface via `wg set`
+        (WireGuard's native hot-reload — adds the new peer first, then
+        removes the old one)
+      - The route_policy rule, peer_id, device assignments, and section
+        position all stay the same
+      - The interface never goes down — no flicker
+
+    OpenVPN (delete + recreate path, brief flicker):
+      - openvpn doesn't support hot config reload, so we have to actually
+        recreate the instance: delete the old client config + route_policy
+        rule, upload a new one, restore the section position, reapply
+        device assignments, and bring the tunnel up if it was running.
+
     Returns the updated profile dict. Raises on error.
     """
     # Per-profile lock to prevent concurrent switches
@@ -963,139 +1070,216 @@ def _switch_server(profile_id: str, server_id: str, options: dict = None,
         proton = _get_proton()
         router = _get_router()
 
-        # Capture devices currently assigned to the OLD rule on the router so
-        # we can reassign them to the new rule below. Must happen BEFORE the
-        # tear-down or the from_mac list is gone.
-        old_ri = profile.get("router_info", {})
-        old_rule_name = old_ri.get("rule_name", "")
-        old_assigned_macs = []
-        if old_rule_name:
-            try:
-                old_assigned_macs = [
-                    t.lower() for t in router._from_mac_tokens(old_rule_name)
-                ]
-            except Exception as e:
-                log.warning(f"_switch_server: failed to read old from_mac: {e}")
+        old_ri = profile.get("router_info", {}) or {}
+        rule_name = old_ri.get("rule_name", "")
+        vpn_protocol = old_ri.get("vpn_protocol", "wireguard")
+        if not rule_name:
+            raise ValueError("Profile has no router_info.rule_name")
 
-        # Capture the current section order so we can restore the new rule
-        # to the same position after upload (otherwise upload appends to the
-        # end and the user loses their group ordering). Also capture whether
-        # the old rule was enabled so we only re-connect if it was.
-        old_rule_index = None
-        old_rule_order = []
-        old_was_enabled = False
-        try:
-            existing_rules = router.get_flint_vpn_rules()
-            old_rule_order = [
-                r.get("rule_name", "")
-                for r in existing_rules
-                if r.get("rule_name", "")
-            ]
-            if old_rule_name in old_rule_order:
-                old_rule_index = old_rule_order.index(old_rule_name)
-            for r in existing_rules:
-                if r.get("rule_name") == old_rule_name:
-                    old_was_enabled = r.get("enabled", "0") == "1"
-                    break
-        except Exception as e:
-            log.warning(f"_switch_server: failed to read rule order: {e}")
-
-        # Tear down old tunnel
-        if old_ri.get("rule_name"):
-            try:
-                if old_ri.get("vpn_protocol") == "openvpn":
-                    router.delete_openvpn_config(
-                        old_ri.get("client_uci_id", ""), old_ri["rule_name"]
-                    )
-                else:
-                    router.delete_wireguard_config(
-                        old_ri.get("peer_id", ""), old_ri["rule_name"]
-                    )
-            except Exception:
-                pass
-
-        # Generate new config based on protocol
         server = proton.get_server_by_id(server_id)
         opts = options or profile.get("options", {})
-        vpn_protocol = old_ri.get("vpn_protocol", "wireguard")
 
-        if vpn_protocol == "openvpn":
-            ovpn_proto = "tcp" if profile.get("server", {}).get("protocol", "").endswith("tcp") else "udp"
-            config_str, server_info, ovpn_user, ovpn_pass = proton.generate_openvpn_config(
-                server, protocol=ovpn_proto, netshield=opts.get("netshield", 0),
-            )
-            new_ri = router.upload_openvpn_config(
-                profile_name=profile["name"], ovpn_config=config_str,
-                username=ovpn_user, password=ovpn_pass,
+        wg_key = None
+        cert_expiry = None
+
+        if vpn_protocol.startswith("wireguard"):
+            # ── WG path (kernel UDP and proton-wg TCP/TLS) ────────────────
+            new_ri, server_info, wg_key, cert_expiry = _switch_server_wireguard(
+                router, proton, profile, server, opts, old_ri,
             )
         else:
-            config_str, server_info = proton.generate_wireguard_config(
-                server, netshield=opts.get("netshield", 0),
-                moderate_nat=opts.get("moderate_nat", False),
-                nat_pmp=opts.get("nat_pmp", False),
-                vpn_accelerator=opts.get("vpn_accelerator", True),
-            )
-            private_key = public_key = endpoint = dns = ""
-            for line in config_str.strip().splitlines():
-                line = line.strip()
-                if line.startswith("PrivateKey"):
-                    private_key = line.split("=", 1)[1].strip()
-                elif line.startswith("PublicKey"):
-                    public_key = line.split("=", 1)[1].strip()
-                elif line.startswith("Endpoint"):
-                    endpoint = line.split("=", 1)[1].strip()
-                elif line.startswith("DNS"):
-                    dns = line.split("=", 1)[1].strip()
-            new_ri = router.upload_wireguard_config(
-                profile_name=profile["name"], private_key=private_key,
-                public_key=public_key, endpoint=endpoint, dns=dns,
+            # ── OVPN delete + recreate path ───────────────────────────────
+            new_ri, server_info = _switch_server_openvpn(
+                router, proton, profile, server, opts, old_ri,
             )
 
-        # Restore the new rule to the OLD rule's section position so the
-        # group keeps its priority in the dashboard. uci reorder is cheap
-        # and only affects the listed sections.
-        if old_rule_index is not None and new_ri.get("rule_name"):
-            try:
-                new_order = [r for r in old_rule_order if r != old_rule_name]
-                new_order.insert(old_rule_index, new_ri["rule_name"])
-                router.reorder_vpn_rules(new_order)
-            except Exception as e:
-                log.warning(f"_switch_server: failed to restore rule order: {e}")
+        # Normalize the new scope (handles legacy shape + enforces cascade).
+        if server_scope is not None:
+            scope = ps.normalize_server_scope(server_scope)
+        else:
+            scope = ps.normalize_server_scope(profile.get("server_scope"))
 
-        # Re-assign devices from the OLD rule to the NEW rule.
-        # Stage 5+: VPN device assignments are router-canonical, not in local
-        # store. The OLD rule's from_mac was captured at the top of this
-        # function, before delete_*_config tore it down.
-        for mac in old_assigned_macs:
-            try:
-                router.set_device_vpn(mac, new_ri["rule_name"])
-            except Exception as e:
-                log.warning(f"_switch_server: failed to reassign {mac}: {e}")
-
-        # Only bring the new tunnel up if the old one was already running.
-        # Editing options on a disconnected group should leave it disconnected.
-        if old_was_enabled:
-            router.bring_tunnel_up(new_ri["rule_name"])
-
-        scope = server_scope or profile.get("server_scope", {"type": "server"})
-        # Stage 7: persist only the server_id reference + minimal cache for
-        # endpoint / physical_server_domain / protocol (not in Proton logical list).
+        # Persist updated server reference + new scope.
         server_cache = {}
         for k in ("id", "endpoint", "physical_server_domain", "protocol"):
             if server_info.get(k):
                 server_cache[k] = server_info[k]
-        ps.update_profile(
-            profile_id,
-            server_id=server_info.get("id", ""),
-            server=server_cache,
-            options=opts,
-            router_info=new_ri,
-            server_scope=scope,
-        )
+
+        update_kwargs = {
+            "server_id": server_info.get("id", ""),
+            "server": server_cache,
+            "options": opts,
+            "server_scope": scope,
+        }
+        # router_info only changes for OVPN (delete+recreate gets a new
+        # rule_name/client_uci_id). WG keeps the same router_info.
+        if new_ri is not None:
+            update_kwargs["router_info"] = new_ri
+        # Persist the WG key + cert expiry for persistent-cert profiles.
+        if wg_key:
+            update_kwargs["wg_key"] = wg_key
+        if cert_expiry:
+            update_kwargs["cert_expiry"] = cert_expiry
+        ps.update_profile(profile_id, **update_kwargs)
         return ps.get_profile(profile_id)
 
     finally:
         lock.release()
+
+
+def _switch_server_wireguard(router, proton, profile, server, opts, old_ri):
+    """WG server switch for both kernel WG (UDP) and proton-wg (TCP/TLS).
+
+    Kernel WG: in-place UCI update + live `wg set` hot peer swap (zero-flicker).
+    proton-wg: update config file + `wg setconf` on the running interface.
+
+    Reuses the profile's existing persistent WG key (Ed25519) so no new
+    certificate registration is needed — the cert is per-key, not per-server.
+
+    Returns (new_router_info_or_None, server_info, wg_key, cert_expiry).
+    router_info doesn't change for either path.
+    """
+    vpn_protocol = old_ri.get("vpn_protocol", "wireguard")
+    is_proton_wg = vpn_protocol.startswith("wireguard-")
+    transport = {"wireguard-tcp": "tcp", "wireguard-tls": "tls"}.get(vpn_protocol, "udp")
+
+    existing_wg_key = profile.get("wg_key")
+    config_str, server_info, wg_key, cert_expiry = proton.generate_wireguard_config(
+        server,
+        profile_name=profile.get("name", "Unnamed"),
+        netshield=opts.get("netshield", 0),
+        moderate_nat=opts.get("moderate_nat", False),
+        nat_pmp=opts.get("nat_pmp", False),
+        vpn_accelerator=opts.get("vpn_accelerator", True),
+        existing_wg_key=existing_wg_key,
+        transport=transport,
+    )
+    private_key = public_key = endpoint = dns = ""
+    for line in config_str.strip().splitlines():
+        line = line.strip()
+        if line.startswith("PrivateKey"):
+            private_key = line.split("=", 1)[1].strip()
+        elif line.startswith("PublicKey"):
+            public_key = line.split("=", 1)[1].strip()
+        elif line.startswith("Endpoint"):
+            endpoint = line.split("=", 1)[1].strip()
+        elif line.startswith("DNS"):
+            dns = line.split("=", 1)[1].strip()
+
+    if is_proton_wg:
+        # proton-wg: rewrite config file, then wg setconf on the live interface
+        iface = old_ri.get("tunnel_name", "protonwg0")
+        conf_path = f"{router.PROTON_WG_DIR}/{iface}.conf"
+        wg_conf = (
+            f"[Interface]\n"
+            f"PrivateKey = {private_key}\n"
+            f"\n"
+            f"[Peer]\n"
+            f"PublicKey = {public_key}\n"
+            f"AllowedIPs = 0.0.0.0/0\n"
+            f"Endpoint = {endpoint}\n"
+            f"PersistentKeepalive = 25\n"
+        )
+        router.write_file(conf_path, wg_conf)
+        router.exec(f"wg setconf {iface} {conf_path}")
+    else:
+        # Kernel WG: in-place UCI update + live wg set hot peer swap
+        peer_id = old_ri.get("peer_id", "")
+        rule_name = old_ri["rule_name"]
+        if not peer_id:
+            raise ValueError("WireGuard profile missing peer_id")
+        router.update_wireguard_peer_live(
+            peer_id=peer_id,
+            rule_name=rule_name,
+            private_key=private_key,
+            public_key=public_key,
+            endpoint=endpoint,
+            dns=dns or "10.2.0.1",
+        )
+    return None, server_info, wg_key, cert_expiry  # router_info unchanged
+
+
+def _switch_server_openvpn(router, proton, profile, server, opts, old_ri):
+    """OVPN path: delete + recreate (brief flicker, but openvpn doesn't
+    support hot config reload).
+
+    Captures section position, device assignments, and enabled state
+    before delete; restores them after upload so the user keeps their
+    group ordering and connection state.
+    """
+    rule_name = old_ri["rule_name"]
+    client_uci_id = old_ri.get("client_uci_id", "")
+    if not client_uci_id:
+        raise ValueError("OpenVPN profile missing client_uci_id")
+
+    # Capture devices currently assigned so we can reattach them.
+    old_assigned_macs = []
+    try:
+        old_assigned_macs = [
+            t.lower() for t in router._from_mac_tokens(rule_name)
+        ]
+    except Exception as e:
+        log.warning(f"_switch_server_openvpn: failed to read from_mac: {e}")
+
+    # Capture section order + enabled state for the post-upload restoration.
+    old_rule_index = None
+    old_rule_order = []
+    old_was_enabled = False
+    try:
+        existing_rules = router.get_flint_vpn_rules()
+        old_rule_order = [
+            r.get("rule_name", "")
+            for r in existing_rules
+            if r.get("rule_name", "")
+        ]
+        if rule_name in old_rule_order:
+            old_rule_index = old_rule_order.index(rule_name)
+        for r in existing_rules:
+            if r.get("rule_name") == rule_name:
+                old_was_enabled = r.get("enabled", "0") == "1"
+                break
+    except Exception as e:
+        log.warning(f"_switch_server_openvpn: failed to read rule order: {e}")
+
+    # Tear down the old client + rule (this is the flicker window).
+    try:
+        router.delete_openvpn_config(client_uci_id, rule_name)
+    except Exception as e:
+        log.warning(f"_switch_server_openvpn: delete failed: {e}")
+
+    # Generate the new .ovpn + upload as a new client section.
+    ovpn_proto = "tcp" if profile.get("server", {}).get("protocol", "").endswith("tcp") else "udp"
+    config_str, server_info, ovpn_user, ovpn_pass = proton.generate_openvpn_config(
+        server, protocol=ovpn_proto, netshield=opts.get("netshield", 0),
+    )
+    new_ri = router.upload_openvpn_config(
+        profile_name=profile["name"],
+        ovpn_config=config_str,
+        username=ovpn_user,
+        password=ovpn_pass,
+    )
+
+    # Restore section position so the dashboard order doesn't shuffle.
+    if old_rule_index is not None and new_ri.get("rule_name"):
+        try:
+            new_order = [r for r in old_rule_order if r != rule_name]
+            new_order.insert(old_rule_index, new_ri["rule_name"])
+            router.reorder_vpn_rules(new_order)
+        except Exception as e:
+            log.warning(f"_switch_server_openvpn: failed to reorder rules: {e}")
+
+    # Re-attach devices to the new rule.
+    for mac in old_assigned_macs:
+        try:
+            router.set_device_vpn(mac, new_ri["rule_name"])
+        except Exception as e:
+            log.warning(f"_switch_server_openvpn: failed to reassign {mac}: {e}")
+
+    # Only bring the new tunnel up if the old one was running.
+    if old_was_enabled:
+        router.bring_tunnel_up(new_ri["rule_name"])
+
+    return new_ri, server_info
 
 
 @app.route("/api/profiles/<profile_id>/server", methods=["PUT"])
@@ -1146,15 +1330,27 @@ def api_connect(profile_id):
         return jsonify({"error": "No tunnel configured. Try changing the server to recreate it."}), 400
 
     router = _get_router()
+    proto = ri.get("vpn_protocol", "wireguard")
+    is_pwg = proto.startswith("wireguard-")
 
     try:
-        log.info(f"Connecting profile '{profile['name']}' (rule={ri['rule_name']}, protocol={ri.get('vpn_protocol', 'wireguard')})")
-        router.bring_tunnel_up(ri["rule_name"])
-        # Read live health from router instead of caching status locally
-        try:
-            health = router.get_tunnel_health(ri["rule_name"])
-        except Exception:
-            health = "loading"
+        log.info(f"Connecting profile '{profile['name']}' (rule={ri['rule_name']}, protocol={proto})")
+        if is_pwg:
+            # proton-wg (TCP/TLS): start the userspace tunnel
+            router.start_proton_wg_tunnel(
+                iface=ri["tunnel_name"],
+                mark=ri["mark"],
+                table_num=ri["table_num"],
+                tunnel_id=ri["tunnel_id"],
+            )
+            health = router.get_proton_wg_health(ri["tunnel_name"])
+        else:
+            # Kernel WG / OpenVPN: vpn-client manages the tunnel
+            router.bring_tunnel_up(ri["rule_name"])
+            try:
+                health = router.get_tunnel_health(ri["rule_name"])
+            except Exception:
+                health = "loading"
         log.info(f"Profile '{profile['name']}' connect issued (health={health})")
         return jsonify({"success": True, "health": health})
     except Exception as e:
@@ -1178,9 +1374,20 @@ def api_disconnect(profile_id):
         return jsonify({"error": "No tunnel configured"}), 400
 
     router = _get_router()
+    proto = ri.get("vpn_protocol", "wireguard")
+    is_pwg = proto.startswith("wireguard-")
+
     try:
         log.info(f"Disconnecting profile '{profile['name']}' (rule={ri['rule_name']})")
-        router.bring_tunnel_down(ri["rule_name"])
+        if is_pwg:
+            router.stop_proton_wg_tunnel(
+                iface=ri["tunnel_name"],
+                mark=ri["mark"],
+                table_num=ri["table_num"],
+                tunnel_id=ri["tunnel_id"],
+            )
+        else:
+            router.bring_tunnel_down(ri["rule_name"])
         log.info(f"Profile '{profile['name']}' disconnected")
         return jsonify({"success": True, "health": "red"})
     except Exception as e:
@@ -1296,6 +1503,23 @@ def _resolve_device_assignments(router, store_data: dict) -> dict:
         if pid:
             out[mac] = pid
         # Else: orphan rule on router — device shows as unassigned
+
+    # proton-wg profiles: read ipset membership directly
+    for p in store_data.get("profiles", []):
+        ri = p.get("router_info") or {}
+        if not ri.get("vpn_protocol", "").startswith("wireguard-"):
+            continue
+        ipset_name = ri.get("ipset_name", f"src_mac_{ri.get('tunnel_id', 0)}")
+        try:
+            members = router.exec(
+                f"ipset list {ipset_name} 2>/dev/null | awk 'p{{print}} /^Members:/{{p=1}}'"
+            ).strip()
+            for mac_line in members.splitlines():
+                mac_val = mac_line.strip().lower()
+                if mac_val:
+                    out[mac_val] = p["id"]
+        except Exception:
+            pass
 
     # Non-VPN: local store
     for mac, pid in store_data.get("device_assignments", {}).items():
@@ -1475,13 +1699,22 @@ def api_assign_device(mac):
             return jsonify({"error": "Profile not found"}), 404
 
         if new_profile["type"] == "vpn" and new_profile.get("router_info"):
+            ri = new_profile["router_info"]
+            proto = ri.get("vpn_protocol", "wireguard")
             # Router is the source for VPN assignments. Drop any local
             # entry so we don't double-track (and so a future unassign
             # can write a fresh sticky-None marker).
             if mac in store_data.get("device_assignments", {}):
                 del store_data["device_assignments"][mac]
                 ps.save(store_data)
-            router.set_device_vpn(mac, new_profile["router_info"]["rule_name"])
+            if proto.startswith("wireguard-"):
+                # proton-wg: add MAC to ipset directly (no route_policy rule)
+                ipset_name = ri.get("ipset_name", f"src_mac_{ri.get('tunnel_id', 0)}")
+                router.exec(f"ipset create {ipset_name} hash:mac -exist")
+                router.exec(f"ipset add {ipset_name} {mac} -exist")
+            else:
+                # Kernel WG / OpenVPN: use route_policy rule
+                router.set_device_vpn(mac, ri["rule_name"])
         else:
             # no_vpn / no_internet — local store; LAN sync below applies the
             # router-side execution (NoInternet ipset membership).

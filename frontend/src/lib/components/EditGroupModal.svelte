@@ -105,8 +105,11 @@
       });
 
       // NetShield / Accelerator / Moderate NAT / NAT-PMP are baked into the
-      // generated WG/OVPN config — changing them requires regenerating the
-      // tunnel via api.changeServer with the same server.
+      // generated WG/OVPN config. Changing them requires regenerating the
+      // peer config via api.changeServer with the same server. The backend
+      // updates the peer in place — the rule stays enabled, vpn-client
+      // restart causes the router to naturally report `connecting` until
+      // the new handshake completes. No frontend optimistic state needed.
       if (liveProfile.type === 'vpn' && optionsChanged && liveProfile.server?.id) {
         const newOptions = {
           netshield: parseInt(netshield),

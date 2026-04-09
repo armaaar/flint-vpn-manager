@@ -1385,3 +1385,181 @@ class TestBackupAndRestore:
         # Should not raise, should not restore
         app_mod._check_and_auto_restore()
         assert not ps.STORE_FILE.exists()
+
+
+class TestProtonWgConnectDisconnect:
+    """Tests for WireGuard TCP/TLS (proton-wg) tunnel lifecycle."""
+
+    def _make_proton_wg_profile(self, app_mod, proto="wireguard-tcp"):
+        ps.save({
+            **ps._EMPTY_STORE,
+            "profiles": [{
+                "id": "test-pwg-1",
+                "type": "vpn",
+                "name": "WG TCP Test",
+                "color": "#00aaff",
+                "icon": "🔒",
+                "is_guest": False,
+                "wg_key": "dGVzdGtleQ==",
+                "cert_expiry": 1807264162,
+                "router_info": {
+                    "tunnel_name": "protonwg0",
+                    "tunnel_id": 303,
+                    "mark": "0x6000",
+                    "table_num": 1006,
+                    "ipset_name": "src_mac_303",
+                    "socket_type": "tcp",
+                    "vpn_protocol": proto,
+                    "rule_name": "fvpn_pwg_protonwg0",
+                },
+            }],
+        })
+
+    def test_connect_calls_start_proton_wg_tunnel(self, unlocked_client):
+        c, app_mod = unlocked_client
+        self._make_proton_wg_profile(app_mod)
+        app_mod._router_api.start_proton_wg_tunnel.return_value = None
+        app_mod._router_api.get_proton_wg_health.return_value = "green"
+
+        resp = c.post("/api/profiles/test-pwg-1/connect")
+        assert resp.status_code == 200
+        assert resp.json["health"] == "green"
+        app_mod._router_api.start_proton_wg_tunnel.assert_called_once_with(
+            iface="protonwg0", mark="0x6000", table_num=1006, tunnel_id=303,
+        )
+        # Should NOT call bring_tunnel_up (that's for kernel WG / OVPN)
+        app_mod._router_api.bring_tunnel_up.assert_not_called()
+
+    def test_disconnect_calls_stop_proton_wg_tunnel(self, unlocked_client):
+        c, app_mod = unlocked_client
+        self._make_proton_wg_profile(app_mod)
+        app_mod._router_api.stop_proton_wg_tunnel.return_value = None
+
+        resp = c.post("/api/profiles/test-pwg-1/disconnect")
+        assert resp.status_code == 200
+        app_mod._router_api.stop_proton_wg_tunnel.assert_called_once_with(
+            iface="protonwg0", mark="0x6000", table_num=1006, tunnel_id=303,
+        )
+        app_mod._router_api.bring_tunnel_down.assert_not_called()
+
+    def test_kernel_wg_still_uses_bring_tunnel_up(self, unlocked_client):
+        """Kernel WG (UDP) profiles must NOT go through proton-wg path."""
+        c, app_mod = unlocked_client
+        ps.save({
+            **ps._EMPTY_STORE,
+            "profiles": [{
+                "id": "test-udp-1", "type": "vpn", "name": "WG UDP",
+                "color": "#fff", "icon": "🔒", "is_guest": False,
+                "router_info": {
+                    "rule_name": "fvpn_rule_9001",
+                    "peer_id": "9001",
+                    "vpn_protocol": "wireguard",
+                },
+            }],
+        })
+        app_mod._router_api.bring_tunnel_up.return_value = None
+        app_mod._router_api.get_tunnel_health.return_value = "green"
+
+        resp = c.post("/api/profiles/test-udp-1/connect")
+        assert resp.status_code == 200
+        app_mod._router_api.bring_tunnel_up.assert_called_once()
+        app_mod._router_api.start_proton_wg_tunnel.assert_not_called()
+
+    def test_openvpn_still_uses_bring_tunnel_up(self, unlocked_client):
+        """OpenVPN profiles must NOT go through proton-wg path."""
+        c, app_mod = unlocked_client
+        ps.save({
+            **ps._EMPTY_STORE,
+            "profiles": [{
+                "id": "test-ovpn-1", "type": "vpn", "name": "OVPN Test",
+                "color": "#fff", "icon": "🔒", "is_guest": False,
+                "router_info": {
+                    "rule_name": "fvpn_rule_ovpn_9051",
+                    "client_uci_id": "28216_9051",
+                    "vpn_protocol": "openvpn",
+                },
+            }],
+        })
+        app_mod._router_api.bring_tunnel_up.return_value = None
+        app_mod._router_api.get_tunnel_health.return_value = "green"
+
+        resp = c.post("/api/profiles/test-ovpn-1/connect")
+        assert resp.status_code == 200
+        app_mod._router_api.bring_tunnel_up.assert_called_once()
+        app_mod._router_api.start_proton_wg_tunnel.assert_not_called()
+
+    def test_delete_proton_wg_calls_stop_and_delete(self, unlocked_client):
+        """Deleting a proton-wg profile must call stop + delete, not delete_wireguard_config."""
+        c, app_mod = unlocked_client
+        self._make_proton_wg_profile(app_mod)
+        app_mod._router_api.stop_proton_wg_tunnel.return_value = None
+        app_mod._router_api.delete_proton_wg_config.return_value = None
+
+        resp = c.delete("/api/profiles/test-pwg-1")
+        assert resp.status_code == 200
+        app_mod._router_api.stop_proton_wg_tunnel.assert_called_once()
+        app_mod._router_api.delete_proton_wg_config.assert_called_once()
+        # Should NOT call kernel WG delete
+        app_mod._router_api.delete_wireguard_config.assert_not_called()
+
+    def test_delete_kernel_wg_still_uses_delete_wireguard_config(self, unlocked_client):
+        c, app_mod = unlocked_client
+        ps.save({
+            **ps._EMPTY_STORE,
+            "profiles": [{
+                "id": "test-udp-1", "type": "vpn", "name": "WG UDP",
+                "color": "#fff", "icon": "🔒", "is_guest": False,
+                "router_info": {
+                    "rule_name": "fvpn_rule_9001",
+                    "peer_id": "9001",
+                    "vpn_protocol": "wireguard",
+                },
+            }],
+        })
+        app_mod._router_api.delete_wireguard_config.return_value = None
+
+        resp = c.delete("/api/profiles/test-udp-1")
+        assert resp.status_code == 200
+        app_mod._router_api.delete_wireguard_config.assert_called_once()
+        app_mod._router_api.stop_proton_wg_tunnel.assert_not_called()
+
+    def test_update_proton_wg_skips_kill_switch_and_rename(self, unlocked_client):
+        """proton-wg profiles: kill_switch is always on, rename is local-only."""
+        c, app_mod = unlocked_client
+        self._make_proton_wg_profile(app_mod)
+
+        resp = c.put("/api/profiles/test-pwg-1", json={
+            "name": "Renamed",
+            "kill_switch": False,
+        })
+        assert resp.status_code == 200
+        assert resp.json["kill_switch"] is True  # Always on for proton-wg
+        # Should NOT call router for rename or kill switch
+        app_mod._router_api.rename_profile.assert_not_called()
+        app_mod._router_api.set_kill_switch.assert_not_called()
+
+    def test_wg_key_stored_for_proton_wg_profiles(self, unlocked_client):
+        """wg_key and cert_expiry must be stored for all WG types including TCP/TLS."""
+        c, app_mod = unlocked_client
+        self._make_proton_wg_profile(app_mod)
+        profile = ps.get_profile("test-pwg-1")
+        assert profile["wg_key"] == "dGVzdGtleQ=="
+        assert profile["cert_expiry"] == 1807264162
+
+    def test_device_assignment_uses_ipset_for_proton_wg(self, unlocked_client):
+        """Device assignment for proton-wg must use ipset add, not set_device_vpn."""
+        c, app_mod = unlocked_client
+        self._make_proton_wg_profile(app_mod)
+        app_mod._router_api.remove_device_from_all_vpn.return_value = None
+        app_mod._router_api.exec.return_value = ""
+
+        resp = c.put("/api/devices/aa:bb:cc:dd:ee:ff/profile", json={
+            "profile_id": "test-pwg-1",
+        })
+        assert resp.status_code == 200
+        # Should call exec for ipset, not set_device_vpn
+        app_mod._router_api.set_device_vpn.assert_not_called()
+        # Verify ipset commands were called
+        exec_calls = [str(c) for c in app_mod._router_api.exec.call_args_list]
+        assert any("ipset create src_mac_303" in s for s in exec_calls)
+        assert any("ipset add src_mac_303" in s for s in exec_calls)

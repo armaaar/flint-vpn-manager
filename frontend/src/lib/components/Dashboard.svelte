@@ -128,15 +128,14 @@
     }
 
     if (serverPickerProfileId) {
-      // Optimistic UI: set health to 'connecting' until SSE confirms with live router state.
-      profiles.update(list => {
-        const p = list.find(x => x.id === serverPickerProfileId);
-        if (p) p.health = 'connecting';
-        return [...list];
+      const res = await api.changeServer(serverPickerProfileId, {
+        server_id: serverId, options, server_scope: scope,
       });
-      const res = await api.changeServer(serverPickerProfileId, { server_id: serverId, options, server_scope: scope });
-      if (res.error) { showToast(res.error, true); }
-      showToast('Server switched');
+      if (res.error) {
+        showToast(res.error, true);
+      } else {
+        showToast('Server switched');
+      }
       await reload();
     }
   }

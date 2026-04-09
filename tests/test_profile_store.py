@@ -38,6 +38,88 @@ class TestLoadSave:
         assert ps.STORE_FILE.exists()
 
 
+class TestNormalizeServerScope:
+    def test_empty_scope_returns_default(self):
+        scope = ps.normalize_server_scope(None)
+        assert scope["country_code"] is None
+        assert scope["city"] is None
+        assert scope["entry_country_code"] is None
+        assert scope["server_id"] is None
+        assert scope["features"] == {"streaming": False, "p2p": False, "secure_core": False}
+
+    def test_new_shape_passes_through(self):
+        scope = ps.normalize_server_scope({
+            "country_code": "US", "city": "New York",
+            "server_id": "abc123", "entry_country_code": None,
+            "features": {"streaming": True, "p2p": False, "secure_core": False},
+        })
+        assert scope["country_code"] == "US"
+        assert scope["city"] == "New York"
+        assert scope["server_id"] == "abc123"
+        assert scope["features"]["streaming"] is True
+
+    def test_legacy_server_type_translates(self):
+        scope = ps.normalize_server_scope({"type": "server"})
+        # Old "server" type meant a specific server was pinned, but the id
+        # wasn't stored in scope. Result is a fully-fastest scope.
+        assert scope["country_code"] is None
+        assert scope["server_id"] is None
+
+    def test_legacy_country_type_translates(self):
+        scope = ps.normalize_server_scope({"type": "country", "country_code": "DE"})
+        assert scope["country_code"] == "DE"
+        assert scope["city"] is None
+        assert scope["server_id"] is None
+
+    def test_legacy_city_type_translates(self):
+        scope = ps.normalize_server_scope({
+            "type": "city", "country_code": "DE", "city": "Berlin"
+        })
+        assert scope["country_code"] == "DE"
+        assert scope["city"] == "Berlin"
+
+    def test_cascade_resets_when_country_is_none(self):
+        scope = ps.normalize_server_scope({
+            "country_code": None, "city": "Berlin", "server_id": "abc",
+            "entry_country_code": "CH",
+        })
+        assert scope["city"] is None
+        assert scope["server_id"] is None
+        assert scope["entry_country_code"] is None
+
+    def test_cascade_resets_when_city_is_none(self):
+        scope = ps.normalize_server_scope({
+            "country_code": "DE", "city": None,
+            "server_id": "abc", "entry_country_code": "CH",
+        })
+        assert scope["server_id"] is None
+        assert scope["entry_country_code"] is None
+
+    def test_entry_country_cleared_when_secure_core_off(self):
+        scope = ps.normalize_server_scope({
+            "country_code": "AU", "city": "Sydney",
+            "entry_country_code": "CH",
+            "features": {"streaming": False, "p2p": False, "secure_core": False},
+        })
+        assert scope["entry_country_code"] is None
+
+    def test_load_normalizes_legacy_scopes(self, tmp_store):
+        """A profile saved with the old scope shape should normalize on load."""
+        ps.STORE_FILE.write_text(json.dumps({
+            "profiles": [{
+                "id": "p1", "type": "vpn", "name": "X",
+                "server_scope": {"type": "country", "country_code": "DE"},
+            }],
+            "device_assignments": {},
+            "device_lan_overrides": {},
+        }))
+        data = ps.load()
+        scope = data["profiles"][0]["server_scope"]
+        assert scope["country_code"] == "DE"
+        assert "type" not in scope
+        assert "features" in scope
+
+
 class TestCreateProfile:
     def test_creates_vpn_profile(self, tmp_store):
         p = ps.create_profile("Gaming", "vpn", color="#ff0000", icon="🎮")
