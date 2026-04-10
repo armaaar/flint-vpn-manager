@@ -540,10 +540,10 @@
             </HelpTooltip>
           </label>
           <input id="gm-dns" bind:value={customDns}
-                 placeholder={vpnProtocol === 'openvpn' ? 'Not available for OpenVPN' : 'e.g. 1.1.1.1 (single IP)'}
-                 disabled={vpnProtocol === 'openvpn'}>
-          {#if vpnProtocol === 'openvpn'}
-            <span class="hint">Custom DNS is only supported for WireGuard protocols.</span>
+                 placeholder={vpnProtocol === 'wireguard' ? 'e.g. 1.1.1.1 (single IP)' : 'Not available for this protocol'}
+                 disabled={vpnProtocol !== 'wireguard'}>
+          {#if vpnProtocol !== 'wireguard'}
+            <span class="hint">Custom DNS is only supported for WireGuard UDP (kernel). {vpnProtocol === 'wireguard-tcp' ? 'Proton-wg manages DNS separately.' : 'OpenVPN pushes DNS from the server.'}</span>
           {:else if customDns.trim() && parseInt(netshield) > 0}
             <div class="opt-warning">Custom DNS overrides NetShield. DNS-level ad/tracker blocking won't work with a custom resolver.</div>
           {/if}

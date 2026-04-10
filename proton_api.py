@@ -320,6 +320,15 @@ class ProtonAPI:
 
         # 2. Build the WireGuard config
         physical = server.get_random_physical_server()
+
+        # Validate port against known-good ports for the transport
+        if port is not None:
+            proto_key = "wireguard" if transport == "udp" else "wireguard-tcp"
+            transport_key = transport if transport != "tls" else "tcp"
+            valid_ports = self.AVAILABLE_PORTS.get(proto_key, {}).get(transport_key, [])
+            if valid_ports and port not in valid_ports:
+                log.warning(f"Port {port} not in known ports for {proto_key}/{transport_key}: {valid_ports}")
+
         if custom_dns:
             # Validate DNS: must be a single valid IPv4 address.
             # UCI stores DNS as a single string value — comma-separated
@@ -498,10 +507,18 @@ class ProtonAPI:
             proto = "tcp"
             if port is None:
                 port = 443
+            else:
+                valid = self.AVAILABLE_PORTS.get("openvpn", {}).get("tcp", [])
+                if valid and port not in valid:
+                    log.warning(f"Port {port} not in known OpenVPN TCP ports: {valid}")
         else:
             proto = "udp"
             if port is None:
                 port = 1194
+            else:
+                valid = self.AVAILABLE_PORTS.get("openvpn", {}).get("udp", [])
+                if valid and port not in valid:
+                    log.warning(f"Port {port} not in known OpenVPN UDP ports: {valid}")
 
         # CA cert from the official ProtonVPN SDK (2019, valid until 2039)
         ca_cert = CA_CERT.strip()
