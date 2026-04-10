@@ -85,7 +85,9 @@ def filter_servers_by_scope(scope: dict, servers: list) -> list:
         # secure_core is binary: enabled = SC servers only, disabled = non-SC only
         if want_secure_core != bool(s.get("secure_core")):
             continue
-        if want_tor and not s.get("tor"):
+        # tor is binary like secure_core: enabled = Tor only, disabled = non-Tor only.
+        # Tor servers have very different performance characteristics.
+        if want_tor != bool(s.get("tor")):
             continue
 
         cc = scope.get("country_code")

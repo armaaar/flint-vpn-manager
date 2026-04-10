@@ -320,7 +320,19 @@ class ProtonAPI:
 
         # 2. Build the WireGuard config
         physical = server.get_random_physical_server()
-        dns = custom_dns if custom_dns else NETSHIELD_DNS.get(netshield, "10.2.0.1")
+        if custom_dns:
+            # Validate DNS: must be a single valid IPv4 address.
+            # UCI stores DNS as a single string value — comma-separated
+            # would break the GL.iNet vpn-client's DNS resolution.
+            import ipaddress as _ipaddress
+            custom_dns = custom_dns.strip()
+            try:
+                _ipaddress.IPv4Address(custom_dns)
+            except ValueError:
+                raise ValueError(f"Invalid DNS address: {custom_dns!r}")
+            dns = custom_dns
+        else:
+            dns = NETSHIELD_DNS.get(netshield, "10.2.0.1")
         if port is None:
             port = self.WG_PORTS.get(transport, 51820)
 
@@ -340,7 +352,7 @@ class ProtonAPI:
 
         server_info = self._server_to_dict(server)
         server_info["physical_server_domain"] = physical.domain
-        server_info["endpoint"] = f"{physical.entry_ip}:51820"
+        server_info["endpoint"] = f"{physical.entry_ip}:{port}"
 
         return config, server_info, kh.ed25519_sk_str, cert_expiry
 

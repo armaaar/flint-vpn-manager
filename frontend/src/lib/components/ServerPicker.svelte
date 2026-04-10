@@ -132,7 +132,7 @@
       if (features.streaming && !s.streaming) return false;
       if (features.p2p && !s.p2p) return false;
       if (features.secure_core !== !!s.secure_core) return false;
-      if (features.tor && !s.tor) return false;
+      if (features.tor !== !!s.tor) return false;
       return true;
     });
   })();
@@ -255,7 +255,12 @@
   // ── Cascade enforcement on changes ────────────────────────────────────
 
   function setFeature(key) {
-    features = { ...features, [key]: !features[key] };
+    const newVal = !features[key];
+    const updated = { ...features, [key]: newVal };
+    // Tor and Secure Core are mutually exclusive (Tor servers are never SC)
+    if (key === 'tor' && newVal) updated.secure_core = false;
+    if (key === 'secure_core' && newVal) updated.tor = false;
+    features = updated;
     // Re-validate selections after the feature filter changes
     revalidate();
   }

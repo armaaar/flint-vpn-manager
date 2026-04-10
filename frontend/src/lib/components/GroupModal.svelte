@@ -48,17 +48,20 @@
   // Edit-mode change detection
   let initialType = 'vpn';
   let initialProto = 'wireguard';
-  let initialOptions = { killSwitch: true, netshield: '2', accelerator: true, moderateNat: false, natPmp: false, portOverride: '', customDns: '' };
+  let initialOptions = { killSwitch: true, netshield: '2', accelerator: true, moderateNat: false, natPmp: false, portOverride: '', customDns: '', smartProtocol: false };
 
   $: typeChanged = mode === 'edit' && type !== initialType;
   $: protocolChanged = mode === 'edit' && type === 'vpn' && vpnProtocol !== initialProto;
+  // Reset port when protocol changes (port options differ per protocol)
+  $: if (protocolChanged) portOverride = '';
   $: optionsChanged = mode === 'edit' && (
     netshield !== initialOptions.netshield ||
     accelerator !== initialOptions.accelerator ||
     moderateNat !== initialOptions.moderateNat ||
     natPmp !== initialOptions.natPmp ||
     portOverride !== initialOptions.portOverride ||
-    customDns !== initialOptions.customDns
+    customDns !== initialOptions.customDns ||
+    smartProtocol !== initialOptions.smartProtocol
   );
 
   // ── Helpers ───────────────────────────────────────────────────────────
@@ -536,8 +539,12 @@
               <p>Override Proton's DNS with your own resolver (e.g. Pi-hole, AdGuard). Leave blank to use Proton's DNS (required for NetShield to work).</p>
             </HelpTooltip>
           </label>
-          <input id="gm-dns" bind:value={customDns} placeholder="e.g. 1.1.1.1 or leave blank for Proton DNS">
-          {#if customDns.trim() && parseInt(netshield) > 0}
+          <input id="gm-dns" bind:value={customDns}
+                 placeholder={vpnProtocol === 'openvpn' ? 'Not available for OpenVPN' : 'e.g. 1.1.1.1 (single IP)'}
+                 disabled={vpnProtocol === 'openvpn'}>
+          {#if vpnProtocol === 'openvpn'}
+            <span class="hint">Custom DNS is only supported for WireGuard protocols.</span>
+          {:else if customDns.trim() && parseInt(netshield) > 0}
             <div class="opt-warning">Custom DNS overrides NetShield. DNS-level ad/tracker blocking won't work with a custom resolver.</div>
           {/if}
         </div>

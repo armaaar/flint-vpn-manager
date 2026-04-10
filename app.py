@@ -370,18 +370,29 @@ def api_available_ports():
     return jsonify(ProtonAPI.AVAILABLE_PORTS)
 
 
+_location_cache = {"data": None, "ts": 0.0}
+_LOCATION_CACHE_TTL = 30  # seconds
+
+
 @app.route("/api/location")
 @require_unlocked
 def api_get_location():
     """Get the current physical location as seen by ProtonVPN.
 
+    Cached for 30 seconds to avoid excessive Proton API calls.
     Returns: {ip, country, isp, lat, lon}
     """
+    now = time.time()
+    if _location_cache["data"] and (now - _location_cache["ts"]) < _LOCATION_CACHE_TTL:
+        return jsonify(_location_cache["data"])
+
     proton = _get_service().proton
     if not proton or not proton.is_logged_in:
         return jsonify({"error": "Not logged into ProtonVPN"}), 400
     try:
         location = proton.get_location()
+        _location_cache["data"] = location
+        _location_cache["ts"] = now
         return jsonify(location)
     except Exception as e:
         log.warning(f"Location check failed: {e}")
@@ -400,9 +411,14 @@ def api_get_sessions():
         return jsonify({"error": "Not logged into ProtonVPN"}), 400
     try:
         sessions = proton.get_sessions()
+        max_conn = 10
+        try:
+            max_conn = 10 if proton.user_tier >= 2 else 1
+        except Exception:
+            pass
         return jsonify({
             "sessions": sessions,
-            "max_connections": 10,
+            "max_connections": max_conn,
         })
     except Exception as e:
         log.warning(f"Sessions fetch failed: {e}")
@@ -864,20 +880,32 @@ def api_clear_log(name):
 # ── Settings ──────────────────────────────────────────────────────────────────
 
 @app.route("/api/settings")
+@require_unlocked
 def api_get_settings():
     """Get non-sensitive config."""
     return jsonify(sm.get_config())
 
 
 @app.route("/api/settings", methods=["PUT"])
+@require_unlocked
 def api_update_settings():
     """Update non-sensitive config (router_ip etc)."""
     data = request.json
     config = sm.update_config(**data)
 
+    # Apply alternative routing change at runtime
+    if "alternative_routing" in data:
+        try:
+            _get_proton().set_alternative_routing(data["alternative_routing"] is not False)
+        except Exception as e:
+            log.warning(f"Failed to apply alternative routing setting: {e}")
+
     # Reset router API if IP changed
-    global _router_api
-    _router_api = None
+    if "router_ip" in data:
+        global _router_api
+        _router_api = None
+        if _service is not None:
+            _service.router = _get_router()
 
     return jsonify(config)
 

@@ -38,12 +38,15 @@
     loadLocation();
   });
 
+  let locationError = false;
   async function loadLocation() {
     locationLoading = true;
+    locationError = false;
     try {
       location = await api.getLocation();
     } catch {
       location = null;
+      locationError = true;
     }
     locationLoading = false;
   }
@@ -176,6 +179,8 @@
         </a>
       {:else if locationLoading}
         <a href="#"><span class="nav-icon">🌍</span> Checking IP...</a>
+      {:else if locationError}
+        <a href="#" on:click|preventDefault={loadLocation}><span class="nav-icon">🌍</span> IP check failed (retry)</a>
       {:else}
         <a href="#" on:click|preventDefault={loadLocation}><span class="nav-icon">🌍</span> Check IP</a>
       {/if}

@@ -270,6 +270,7 @@ class VPNService:
         # Smart Protocol: in-memory state for pending retries.
         # {profile_id: {started_at, chain, attempt_idx, original_proto}}
         self._smart_pending = {}
+        self._smart_lock = threading.Lock()
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -1174,16 +1175,18 @@ class VPNService:
             (p, t) for p, t in self.SMART_PROTOCOL_CHAIN
             if p != current_proto
         ]
-        self._smart_pending[profile_id] = {
-            "started_at": time.time(),
-            "chain": chain,
-            "attempt_idx": -1,  # -1 = still on original protocol
-            "original_proto": current_proto,
-        }
+        with self._smart_lock:
+            self._smart_pending[profile_id] = {
+                "started_at": time.time(),
+                "chain": chain,
+                "attempt_idx": -1,  # -1 = still on original protocol
+                "original_proto": current_proto,
+            }
 
     def _smart_cancel(self, profile_id):
         """Cancel smart protocol monitoring for a profile."""
-        self._smart_pending.pop(profile_id, None)
+        with self._smart_lock:
+            self._smart_pending.pop(profile_id, None)
 
     def _smart_has_slot(self, profile_id, proto):
         """Check if there's an available slot for a protocol."""
@@ -1216,8 +1219,15 @@ class VPNService:
         - If timeout reached: disconnect, switch to next protocol, connect.
         - If all protocols exhausted: remove from pending, log warning.
         """
-        for profile_id in list(self._smart_pending):
-            state = self._smart_pending[profile_id]
+        with self._smart_lock:
+            pending_ids = list(self._smart_pending)
+        if not pending_ids:
+            return
+
+        for profile_id in pending_ids:
+            state = self._smart_pending.get(profile_id)
+            if state is None:
+                continue  # Cancelled by disconnect_profile between snapshot and access
             profile = ps.get_profile(profile_id)
             if not profile or profile.get("type") != PROFILE_TYPE_VPN:
                 self._smart_cancel(profile_id)
@@ -1265,14 +1275,21 @@ class VPNService:
             log.info(f"Smart Protocol: switching {profile_id} from {proto} to {next_proto}")
 
             try:
-                # Disconnect current tunnel
-                strategy.disconnect(self.router, ri)
+                # Re-check: user may have disconnected between health check and here
+                with self._smart_lock:
+                    if profile_id not in self._smart_pending:
+                        continue
 
-                # Switch protocol (tear down + recreate)
+                # change_protocol handles disconnect + teardown + recreate
                 self.change_protocol(
                     profile_id, next_proto,
                     ovpn_protocol=next_transport if next_proto == PROTO_OPENVPN else "udp",
                 )
+
+                # Re-check again after protocol change (user could disconnect during)
+                with self._smart_lock:
+                    if profile_id not in self._smart_pending:
+                        continue
 
                 # Connect with new protocol
                 profile = ps.get_profile(profile_id)
@@ -1281,10 +1298,14 @@ class VPNService:
                 new_strategy.connect(self.router, new_ri)
 
                 # Reset timer for the new protocol attempt
-                state["started_at"] = time.time()
+                with self._smart_lock:
+                    if profile_id in self._smart_pending:
+                        self._smart_pending[profile_id]["started_at"] = time.time()
             except Exception as e:
                 log.warning(f"Smart Protocol: {next_proto} failed for {profile_id}: {e}")
-                state["started_at"] = time.time()  # Reset timer, will try next on next tick
+                with self._smart_lock:
+                    if profile_id in self._smart_pending:
+                        self._smart_pending[profile_id]["started_at"] = time.time()
 
     def get_smart_protocol_status(self):
         """Return smart protocol retry status for SSE streaming.
@@ -1292,8 +1313,10 @@ class VPNService:
         Returns:
             Dict of {profile_id: {attempting, attempt, total, elapsed}}.
         """
+        with self._smart_lock:
+            snapshot = dict(self._smart_pending)
         result = {}
-        for pid, state in self._smart_pending.items():
+        for pid, state in snapshot.items():
             idx = state["attempt_idx"]
             chain = state["chain"]
             if idx < 0:
