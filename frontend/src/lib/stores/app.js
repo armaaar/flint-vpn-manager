@@ -41,6 +41,12 @@ export function startSSE() {
               if (p && name) p.name = name;
             }
           }
+          if (data.server_info) {
+            for (const [pid, srv] of Object.entries(data.server_info)) {
+              const p = list.find(x => x.id === pid);
+              if (p) p.server = srv;
+            }
+          }
           return [...list];
         });
       }

@@ -539,6 +539,7 @@ def api_connect(profile_id):
     """
     try:
         result = _get_service().connect_profile(profile_id)
+        _location_cache["data"] = None  # IP may have changed
         return jsonify(result)
     except NotFoundError:
         return jsonify({"error": "VPN profile not found"}), 404
@@ -555,6 +556,7 @@ def api_disconnect(profile_id):
     """Bring a VPN profile's tunnel down."""
     try:
         result = _get_service().disconnect_profile(profile_id)
+        _location_cache["data"] = None  # IP may have changed
         return jsonify(result)
     except NotFoundError:
         return jsonify({"error": "VPN profile not found"}), 404
@@ -750,6 +752,9 @@ def api_stream():
     - Tunnel health per VPN profile (green/amber/red)
     - Device count changes
     """
+    if not _session_unlocked:
+        return Response("data: {\"error\": \"locked\"}\n\n", mimetype="text/event-stream", status=401)
+
     def generate():
         while True:
             try:
@@ -766,6 +771,7 @@ def api_stream():
                 tunnel_health = {}
                 kill_switch_state = {}
                 profile_names = {}
+                server_info = {}
                 for p in merged_profiles:
                     if p.get("type") != PROFILE_TYPE_VPN:
                         continue
@@ -776,6 +782,8 @@ def api_stream():
                         kill_switch_state[pid] = p["kill_switch"]
                     if p.get("name"):
                         profile_names[pid] = p["name"]
+                    if p.get("server"):
+                        server_info[pid] = p["server"]
 
                 # Smart Protocol: check pending retries and switch protocols
                 try:
@@ -806,13 +814,15 @@ def api_stream():
                     "tunnel_health": tunnel_health,
                     "kill_switch": kill_switch_state,
                     "profile_names": profile_names,
+                    "server_info": server_info,
                     "devices": all_devices,
                     "device_count": len(all_devices),
                     "smart_protocol_status": smart_status,
                     "timestamp": time.time(),
                 }
                 yield f"data: {json.dumps(event_data)}\n\n"
-            except Exception:
+            except Exception as e:
+                log.warning(f"SSE tick failed: {e}")
                 yield f"data: {json.dumps({'error': 'update failed'})}\n\n"
 
             time.sleep(10)

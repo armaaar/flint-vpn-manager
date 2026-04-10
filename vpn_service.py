@@ -1280,6 +1280,12 @@ class VPNService:
                     if profile_id not in self._smart_pending:
                         continue
 
+                # Clear port override — WG ports are not valid for OVPN and vice versa
+                profile = ps.get_profile(profile_id)
+                opts = dict(profile.get("options") or {})
+                opts.pop("port", None)
+                ps.update_profile(profile_id, options=opts)
+
                 # change_protocol handles disconnect + teardown + recreate
                 self.change_protocol(
                     profile_id, next_proto,
