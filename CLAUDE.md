@@ -8,9 +8,12 @@ A local web dashboard for managing ProtonVPN WireGuard and OpenVPN profiles on a
 - **Up to 14 simultaneous tunnels**: 5 WG UDP + 4 WG TCP/TLS + 5 OpenVPN
 - **Per-device VPN routing**: assign any device to any VPN group via MAC-based ipset rules
 - **Persistent WireGuard certificates**: 365-day certs, router works standalone without the Surface Go
-- **Auto-optimizer**: daily background task switches VPN groups to faster servers (by Proton score)
+- **Auto-optimizer**: daily background task switches VPN groups to faster servers (by Proton score + latency tiebreaker)
+- **Server score refresh**: background thread keeps Proton server scores fresh (~15min loads, ~3h full list)
+- **Server blacklist & favourites**: exclude bad servers, prefer known-good ones — persisted in `config.json`
+- **Latency probing**: TCP connect-time measurement from the router's direct WAN to VPN server IPs
 - **Auto cert renewal**: background daily check refreshes WG certs within 30 days of expiry
-- **Server picker**: 3-level browser (Country → City → Server) sorted by Proton's score metric
+- **Server picker**: 3-level browser (Country → City → Server) with star/ban toggles and latency test
 - **LAN access control**: per-group and per-device firewall policies (allowed/group_only/blocked) with exception lists
 - **Kill switch**: per-group packet blackholing when tunnel drops (kernel WG via UCI, proton-wg via blackhole route)
 - **WireGuard Stealth/TLS**: traffic looks like normal HTTPS — hardest to detect and block
@@ -205,7 +208,21 @@ Every 10 seconds, builds the merged profile list and pushes:
 The frontend's Svelte stores are mutated in place from each event. No local persistence of any of these fields.
 
 ### Auto-optimizer — `auto_optimizer.py`
-Background thread. At a configured time of day (within a 2-minute window to tolerate clock drift), it reads the live merged profile list via `build_profile_list_fn(router, data, proton)` and calls `find_better_server` for each VPN profile whose **live `health`** (not cached status) is `green`/`amber`. Uses `_switch_server` to apply changes.
+Background thread. At a configured time of day (within a 2-minute window to tolerate clock drift), it reads the live merged profile list via `build_profile_list_fn(router, data, proton)` and calls `find_better_server` for each VPN profile whose **live `health`** (not cached status) is `green`/`amber`. Uses `_switch_server` to apply changes. Reads `server_blacklist` + `server_favourites` from config. Probes latency from the router to top-10 candidate servers per scope before evaluating.
+
+### Server score refresh — `auto_optimizer._maybe_refresh_server_data()`
+Runs every 60 seconds in the poll loop (independent of the daily optimization window). Calls `proton.refresh_server_loads()` when loads are stale (~15min) or `proton.refresh_server_list()` when the full list is stale (~3h). This keeps scores fresh so the ServerPicker and auto-optimizer always see current data — previously scores were only updated when the ProtonVPN GTK app was running.
+
+### "Fastest server" selection algorithm
+The selection pipeline for non-pinned servers (scope.server_id is null):
+
+1. **Scope filter**: country, city, entry_country (SC), features (streaming/p2p/secure_core) — AND-combined
+2. **Blacklist filter**: remove servers in `config.server_blacklist`
+3. **Sort by Proton score** (lower = better)
+4. **Favourite boost**: if any favourite is within 30% of the best score, prefer it
+5. **Latency tiebreaker** (auto-optimizer only): among servers within 15% of the best score, pick lowest TCP latency from the router
+
+**Known limitation**: Proton's `score` field reflects server load and geographic distance from Proton's infrastructure, but does NOT reflect ISP-specific peering or throughput. Two servers with similar scores on adjacent physical nodes (e.g. node-de-34 vs node-de-35) can have 13x different throughput from the same ISP. The latency tiebreaker helps when scores are close and nodes differ in latency, but cannot measure throughput. For persistent ISP peering issues, the user should blacklist slow physical nodes and/or favourite fast ones — this is the primary mechanism for overriding score-based selection.
 
 ## Terminology
 
@@ -219,7 +236,10 @@ Background thread. At a configured time of day (within a 2-minute window to tole
 | **Kill Switch** | Route policy flag. When the tunnel drops, assigned devices' packets are blackholed instead of leaking. Live from `route_policy.{rule}.killswitch`. |
 | **Private MAC** | Randomized MAC (2nd hex char ∈ `{2,6,A,E}`). VPN routing by MAC won't persist across reconnects. |
 | **Server Scope** | How a group selects its server. Three independent levels (`country_code`, `city`, `server_id`) each can be specific or `null` ("Fastest"). Cascade rule: a level being null forces all narrower levels to null. Plus a `features` filter (`streaming`, `p2p`, `secure_core`) that constrains which servers qualify. The auto-optimizer respects all of these — e.g. "fastest streaming server in US" always picks a streaming server in US. `entry_country_code` is only meaningful with `secure_core=true` and identifies the SC entry route. See `profile_store.normalize_server_scope`. |
-| **Auto-Optimizer** | Background thread that periodically switches VPN groups to better-loaded servers within their scope constraints. Skipped for profiles where the user pinned a specific `server_id`. |
+| **Auto-Optimizer** | Background thread that periodically switches VPN groups to better-loaded servers within their scope constraints. Applies blacklist/favourites/latency. Skipped for profiles where the user pinned a specific `server_id`. |
+| **Server Blacklist** | List of server IDs excluded from automatic selection (auto-optimizer, "fastest" resolution in ServerPicker). Stored in `config.json` as `server_blacklist`. Pinned servers bypass the blacklist. Mutually exclusive with favourites (adding to one removes from the other). |
+| **Server Favourites** | List of server IDs preferred when scores are close. If a favourite's score is within 30% of the best candidate, it wins. Stored in `config.json` as `server_favourites`. |
+| **Latency Probe** | TCP connect-time measurement to VPN server entry IPs on port 443. Always runs **from the router** via SSH (never locally — the Surface Go may be behind a VPN tunnel). Uses `curl -w "%{time_connect}"` because BusyBox `nc` lacks `-z`/`-w` flags. Used as a tiebreaker when scores are within 15%. |
 | **LAN Access** | Per-group or per-device firewall rules controlling LAN-to-LAN traffic. Three states: `allowed`, `group_only`, `blocked`. Inbound and outbound independent. Each direction may also carry an **exception list** (allowlist of MACs or profile IDs) that pierces `group_only`/`blocked` for specific peers — e.g. `outbound: blocked` + `outbound_allow: [<group X>]` means *"outbound only to Group X, nothing else."* |
 | **LAN Exception** | An entry in `lan_access.{outbound,inbound}_allow`. Either a MAC string (specific device) or a profile ID (the whole group, members tracked live). At the device-override layer, exception lists merge additively with the group's. Forward-compatible with future deny-list subtraction; not implemented in v1. |
 | **NetShield** | ProtonVPN DNS-level ad/malware blocking. Level 0=off, 1=malware, 2=malware+ads+trackers. Baked into the WG/OVPN config at generation time. |
@@ -240,7 +260,7 @@ Core orchestrator. `VPNService` class owns `build_profile_list`, profile CRUD (`
 Pure emitter `serialize_lan_state(store, device_ips, assignment_map)` produces a deterministic dict of desired UCI ipset + rule sections. `diff_state(live, desired)` computes a UCI batch + per-ipset add/remove ops. `sync_lan_to_router(router, ...)` orchestrates: reads live state via `router.fvpn_lan_full_state`, applies the diff via `router.fvpn_uci_apply` (membership-only ops skip the firewall reload). Replaces the legacy `router_api.generate_lan_rules` + the imperative `fvpn_lan` chain.
 
 ### `proton_api.py` — ProtonVPN wrapper
-Thin synchronous wrapper around `proton-vpn-api-core`. Login (with 2FA), server list, WG/OVPN config generation. WireGuard configs use **persistent-mode certificates** (365-day validity, `Mode: "persistent"` on `POST /vpn/v1/certificate`). Each VPN profile gets its own Ed25519 key pair registered as a named device in Proton's dashboard — no local agent required, the router is fully standalone after config upload. Key methods: `generate_wireguard_config()` (returns config + wg_key + cert_expiry), `refresh_wireguard_cert()` (renews without changing the key), `get_wireguard_x25519_key()` (derives WG key from stored Ed25519). Certificate auto-refresh happens on unlock for certs within 30 days of expiry. All VPN options (NetShield, Moderate NAT, NAT-PMP, VPN Accelerator) work with both WireGuard (certificate features) and OpenVPN (username suffixes: `+f{level}`, `+nr`, `+pmp`, `+nst`).
+Thin synchronous wrapper around `proton-vpn-api-core`. Login (with 2FA), server list, WG/OVPN config generation. WireGuard configs use **persistent-mode certificates** (365-day validity, `Mode: "persistent"` on `POST /vpn/v1/certificate`). Each VPN profile gets its own Ed25519 key pair registered as a named device in Proton's dashboard — no local agent required, the router is fully standalone after config upload. Key methods: `generate_wireguard_config()` (returns config + wg_key + cert_expiry), `refresh_wireguard_cert()` (renews without changing the key), `get_wireguard_x25519_key()` (derives WG key from stored Ed25519), `refresh_server_loads()` / `refresh_server_list()` (keep scores fresh), `get_server_entry_ips()` (resolve server IDs to physical IPs for latency probing). Certificate auto-refresh happens on unlock for certs within 30 days of expiry. All VPN options (NetShield, Moderate NAT, NAT-PMP, VPN Accelerator) work with both WireGuard (certificate features) and OpenVPN (username suffixes: `+f{level}`, `+nr`, `+pmp`, `+nst`).
 
 ### `router_api.py` — Router SSH management
 SSH-based API (Paramiko + key auth) for the Flint 2. Manages WG/OVPN configs via UCI, route policy rules, ipset membership, firewall rules, DHCP leases, gl-clients metadata. Helpers: `get_flint_vpn_rules`, `get_device_assignments`, `get_tunnel_health`, `get_kill_switch`, `get_profile_name`, `rename_profile`, `reorder_vpn_rules`, `heal_anonymous_rule_section`, `_from_mac_tokens` (for case-preserving del_list). FlintVPN UCI helpers: `fvpn_uci_apply`, `fvpn_ipset_membership`, `fvpn_lan_full_state`, `fvpn_lan_wipe_all`. Also `read_file`/`write_file` for the disaster-recovery backup file at `/etc/fvpn/profile_store.bak.json`, and `get_router_fingerprint` (br-lan MAC) for the restore-on-unlock fingerprint check.
@@ -254,13 +274,27 @@ Minimal background thread. Polls DHCP leases every 30s. The **only** thing it pe
 ### `secrets_manager.py` — Encrypted credentials
 Fernet (AES-128-CBC + HMAC-SHA256) with PBKDF2 key derivation. Stores ProtonVPN and router credentials in `secrets.enc`.
 
-### `server_optimizer.py` — Server score comparison
-Pure function `find_better_server(profile, servers, min_relative_improvement=0.20)`. Ranks by Proton's `score` field (lower = better, matching `proton-vpn-api-core`'s `ServerList.get_fastest_server`, which is literally `min(servers, key=lambda s: s.score)`). The library also adds +1000 to the score of non-auto-connectable servers, so sorting by score implicitly excludes servers Proton's own client wouldn't pick. Auto-switch only fires when a candidate's score is at least 20% lower than the current server's — relative, not absolute, so the threshold stays meaningful across the full Proton score range.
+### `server_optimizer.py` — Server scoring, filtering, and selection
+Pure functions for server selection. Primary ranking by Proton's `score` field (lower = better, matching `proton-vpn-api-core`'s `ServerList.get_fastest_server`). Three layers of filtering/boosting applied in order:
 
-### `auto_optimizer.py` — Background server switcher + cert renewal
-Daemon thread with two daily jobs:
-1. **Server optimization**: Within a 2-minute window after the scheduled time, switches each eligible VPN profile to a better-scored server. Enforces a `MIN_DWELL_HOURS=6` per-profile cooldown (in-memory `_last_switch_at` map) to prevent flapping.
-2. **Certificate renewal**: Once per day (tracked by `_last_cert_check_date`), iterates all VPN profiles with a `wg_key` and refreshes persistent certs within 30 days of expiry via `proton.refresh_wireguard_cert()`. Runs independently of the optimization schedule — doesn't require `auto_optimize` to be enabled. No router interaction needed.
+1. **Blacklist** (`filter_blacklisted`): removes servers the user blocked. Stored in `config.json` as `server_blacklist: [id, ...]`. Pinned servers (scope.server_id) bypass the blacklist.
+2. **Favourites** (`apply_favourites`): if a favourite server's score is within 30% of the best candidate (`FAVOURITE_SCORE_TOLERANCE=0.30`), prefer it. Stored in `config.json` as `server_favourites: [id, ...]`.
+3. **Latency tiebreaker** (`_pick_best_by_latency`): among servers within 15% of the best score (`SCORE_SIMILARITY_THRESHOLD=0.15`), pick the one with the lowest measured TCP latency. Latency data is optional — when absent, falls back to score-only.
+
+Key functions:
+- `resolve_scope_to_server(scope, servers, blacklist, favourites, latencies)` — used by profile creation and ServerPicker preview.
+- `find_better_server(profile, servers, ..., blacklist, favourites, latencies)` — used by auto-optimizer. Only triggers a switch when the best candidate's score is at least 20% lower than the current server's (`MIN_RELATIVE_IMPROVEMENT=0.20`).
+
+**Limitation**: Proton's score reflects server load and geographic distance from Proton's infrastructure, but does NOT reflect ISP-specific peering or throughput. Two servers with similar scores may have wildly different actual speeds from a given ISP. The latency tiebreaker helps when scores are close, but for servers with different scores (like DE#743 vs DE#747), the user must manually blacklist/favourite to override.
+
+### `latency_probe.py` — TCP latency measurement from router
+Measures TCP connect time to VPN server entry IPs. **Probes run from the router via SSH** (not the Surface Go, which may be behind a VPN tunnel). Uses `curl -w "%{time_connect}"` on the router because BusyBox `nc` doesn't support `-z`/`-w` flags and BusyBox `date` lacks nanosecond precision. `probe_servers_via_router(router, servers)` builds a single SSH command that probes all IPs sequentially and parses "IP MS" output lines. A local fallback (`probe_servers_local`) exists for testing but is never used in production — the Surface Go's VPN routing would give misleading results.
+
+### `auto_optimizer.py` — Background server switcher + cert renewal + score refresh
+Daemon thread with three jobs running in the `_poll_loop` (every 60 seconds):
+1. **Server data refresh** (`_maybe_refresh_server_data`): keeps Proton server scores fresh. Calls `refresh_server_loads()` when loads are stale (~15min) or `refresh_server_list()` when the full list is stale (~3h). Runs every poll cycle regardless of auto-optimize being enabled.
+2. **Server optimization**: Within a 2-minute window after the scheduled time, evaluates all connected VPN profiles. Reads blacklist/favourites from `config.json`. Probes latency to candidate servers via the router (`_probe_candidate_latencies` — top 10 per scope). Switches profiles where `find_better_server` returns a result. Enforces `MIN_DWELL_HOURS=6` per-profile cooldown to prevent flapping.
+3. **Certificate renewal**: Once per day, refreshes WG persistent certs within 30 days of expiry. Runs independently of auto_optimize — doesn't require it to be enabled. No router interaction needed.
 
 ### `cli.py` — Click-based terminal interface
 Wraps the same backend. Commands: setup, unlock, status, server browse, router status/devices/tunnels, profile CRUD, device assignment, settings.
@@ -277,11 +311,11 @@ Built with Svelte 5 + Vite. Source in `frontend/src/`, builds to `static/`.
 | `DeviceRow.svelte` | Device in a group: icon, name, online dot, IP, speed, signal, private-MAC badge |
 | `DeviceModal.svelte` | Device settings: custom name, device type (synced to router gl-client), group assignment |
 | `GroupModal.svelte` | Unified create/edit group modal. Same field order in both modes: type → protocol → VPN options → name → icon/color → guest → LAN access. Create mode opens ServerPicker for VPN groups. Edit mode handles protocol change, type change (VPN ↔ NoVPN ↔ NoInternet), and VPN option regeneration on Save. |
-| `ServerPicker.svelte` | 3-level server browser: Country → City → Server. Filters, scope selector. |
+| `ServerPicker.svelte` | 3-level server browser: Country → City → Server. Filters, scope selector. Per-server star (favourite) and ban (blacklist) toggles. "Test latency" button probes from router and shows color-coded ms badges (green <50ms, yellow <150ms, red >=150ms). Blacklisted servers dimmed + strikethrough + sorted last. Favourites sorted first. |
 | `LanPeerPicker.svelte` | Multi-select chip picker for LAN access exception lists. Searchable dropdown grouped into Groups + Devices. Inherited (group-source) entries are greyed out and non-removable in DeviceModal. |
 | `EmojiPicker.svelte` | Categorized emoji grid with search |
 | `ColorPicker.svelte` | Color selection for card accent |
-| `SettingsModal.svelte` | Router IP, credentials, master password change |
+| `SettingsModal.svelte` | Router IP, auto-optimize schedule, server preferences (blacklist/favourites counts + clear all), credentials, master password change |
 | `LogsModal.svelte` | Live log viewer (app.log, error.log, access.log) with tabs |
 | `SetupScreen.svelte` | First-time credential setup |
 | `UnlockScreen.svelte` | Master password entry |
@@ -320,15 +354,22 @@ PUT  /api/devices/:mac/label            → write to gl-client.alias and .class 
 PUT  /api/profiles/:id/lan-access       → set group LAN policy + exception lists
 PUT  /api/devices/:mac/lan-access       → set per-device LAN override + exception lists
 
-POST /api/refresh                       → trigger device tracker poll
+POST /api/refresh                       → trigger device tracker poll + server score refresh
+POST /api/probe-latency                 → TCP latency probe from router {server_ids:[]} → {latencies:{id:ms}}
 GET  /api/stream                        → SSE: tunnel_health + kill_switch + profile_names + devices (10s)
 
 GET  /api/logs                          → list log files
 GET  /api/logs/:name                    → tail log content
 DELETE /api/logs/:name                  → clear a log
 
-GET  /api/settings                      → non-sensitive config
+GET  /api/settings                      → non-sensitive config (includes server_blacklist, server_favourites)
 PUT  /api/settings                      → update router IP etc
+GET  /api/settings/server-preferences   → {blacklist:[], favourites:[]}
+PUT  /api/settings/server-preferences   → replace blacklist and/or favourites
+POST /api/settings/server-preferences/blacklist/:id    → add to blacklist (auto-removes from favourites)
+DELETE /api/settings/server-preferences/blacklist/:id  → remove from blacklist
+POST /api/settings/server-preferences/favourites/:id   → add to favourites (auto-removes from blacklist)
+DELETE /api/settings/server-preferences/favourites/:id → remove from favourites
 PUT  /api/settings/credentials          → update encrypted creds
 PUT  /api/settings/master-password      → change master password
 

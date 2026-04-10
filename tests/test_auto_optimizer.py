@@ -295,6 +295,72 @@ class TestAutoOptimizer:
         switch_fn.assert_called_once_with("p1", "s4")
 
 
+class TestServerRefresh:
+    """Tests for _maybe_refresh_server_data in the poll loop."""
+
+    def test_refreshes_loads_when_expired(self, optimizer):
+        opt, get_proton, *_ = optimizer
+        mock_proton = MagicMock()
+        mock_proton.is_logged_in = True
+        mock_proton.server_list_expired = False
+        mock_proton.server_loads_expired = True
+        get_proton.return_value = mock_proton
+
+        opt._maybe_refresh_server_data()
+
+        mock_proton.refresh_server_loads.assert_called_once()
+        mock_proton.refresh_server_list.assert_not_called()
+
+    def test_refreshes_full_list_when_expired(self, optimizer):
+        opt, get_proton, *_ = optimizer
+        mock_proton = MagicMock()
+        mock_proton.is_logged_in = True
+        mock_proton.server_list_expired = True
+        mock_proton.server_loads_expired = True  # both expired
+        get_proton.return_value = mock_proton
+
+        opt._maybe_refresh_server_data()
+
+        # Full list refresh takes priority
+        mock_proton.refresh_server_list.assert_called_once()
+        mock_proton.refresh_server_loads.assert_not_called()
+
+    def test_skips_when_fresh(self, optimizer):
+        opt, get_proton, *_ = optimizer
+        mock_proton = MagicMock()
+        mock_proton.is_logged_in = True
+        mock_proton.server_list_expired = False
+        mock_proton.server_loads_expired = False
+        get_proton.return_value = mock_proton
+
+        opt._maybe_refresh_server_data()
+
+        mock_proton.refresh_server_list.assert_not_called()
+        mock_proton.refresh_server_loads.assert_not_called()
+
+    def test_skips_when_not_logged_in(self, optimizer):
+        opt, get_proton, *_ = optimizer
+        mock_proton = MagicMock()
+        mock_proton.is_logged_in = False
+        get_proton.return_value = mock_proton
+
+        opt._maybe_refresh_server_data()
+
+        mock_proton.refresh_server_list.assert_not_called()
+        mock_proton.refresh_server_loads.assert_not_called()
+
+    def test_refresh_failure_does_not_propagate(self, optimizer):
+        opt, get_proton, *_ = optimizer
+        mock_proton = MagicMock()
+        mock_proton.is_logged_in = True
+        mock_proton.server_list_expired = True
+        mock_proton.refresh_server_list.side_effect = RuntimeError("network error")
+        get_proton.return_value = mock_proton
+
+        # Should not raise
+        opt._maybe_refresh_server_data()
+
+
 class TestCertRenewal:
     """Tests for the background WireGuard persistent cert renewal."""
 

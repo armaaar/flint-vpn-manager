@@ -57,6 +57,69 @@
     loading = false;
   }
 
+  // ── Blacklist / Favourite toggles ─────────────────────────────────────
+  async function toggleBlacklist(serverId, e) {
+    e.stopPropagation();
+    const s = allServers.find(x => x.id === serverId);
+    if (!s) return;
+    try {
+      if (s.blacklisted) {
+        await api.removeFromBlacklist(serverId);
+      } else {
+        await api.addToBlacklist(serverId);
+      }
+      // Update local state immediately
+      allServers = allServers.map(x => {
+        if (x.id === serverId) {
+          return { ...x, blacklisted: !x.blacklisted, favourite: false };
+        }
+        return x;
+      });
+    } catch (err) {
+      showToast('Failed to update blacklist: ' + err.message, true);
+    }
+  }
+
+  async function toggleFavourite(serverId, e) {
+    e.stopPropagation();
+    const s = allServers.find(x => x.id === serverId);
+    if (!s) return;
+    try {
+      if (s.favourite) {
+        await api.removeFromFavourites(serverId);
+      } else {
+        await api.addToFavourites(serverId);
+      }
+      allServers = allServers.map(x => {
+        if (x.id === serverId) {
+          return { ...x, favourite: !x.favourite, blacklisted: false };
+        }
+        return x;
+      });
+    } catch (err) {
+      showToast('Failed to update favourites: ' + err.message, true);
+    }
+  }
+
+  // ── Latency probing ────────────────────────────────────────────────────
+  let latencies = {};  // {server_id: ms_or_null}
+  let probing = false;
+
+  async function probeVisibleServers() {
+    if (probing) return;
+    const ids = filteredServerOptions.map(s => s.id);
+    if (ids.length === 0) return;
+    probing = true;
+    try {
+      const resp = await api.probeLatency(ids);
+      latencies = { ...latencies, ...resp.latencies };
+    } catch (err) {
+      showToast('Latency probe failed: ' + err.message, true);
+    } finally {
+      probing = false;
+    }
+  }
+
   // ── Filtering pipeline ────────────────────────────────────────────────
   // 1. Apply features (streaming/p2p/secure_core) — AND combination.
   // 2. The Country options come from this pre-filtered set.
@@ -154,7 +217,12 @@
             s.entry_country_code !== selEntryCountry) return false;
         return true;
       })
-      .sort((a, b) => (a.score ?? Infinity) - (b.score ?? Infinity));
+      .sort((a, b) => {
+        // Favourites first, blacklisted last, then by score
+        if (a.favourite !== b.favourite) return a.favourite ? -1 : 1;
+        if (a.blacklisted !== b.blacklisted) return a.blacklisted ? 1 : -1;
+        return (a.score ?? Infinity) - (b.score ?? Infinity);
+      });
   })();
 
   // ── Resolved server preview ───────────────────────────────────────────
@@ -166,16 +234,20 @@
       if (exact) return exact;
       // Pinned server vanished — fall back to fastest
     }
-    let candidates = featureFiltered;
+    let candidates = featureFiltered.filter(s => !s.blacklisted);
     if (selCountry) candidates = candidates.filter(s => s.country_code === selCountry);
     if (selCity) candidates = candidates.filter(s => s.city === selCity);
     if (features.secure_core && selEntryCountry) {
       candidates = candidates.filter(s => s.entry_country_code === selEntryCountry);
     }
     if (candidates.length === 0) return null;
-    return candidates.reduce((a, b) =>
-      (a.score ?? Infinity) < (b.score ?? Infinity) ? a : b
-    );
+    // Prefer favourites when score is close (within 30%)
+    candidates.sort((a, b) => (a.score ?? Infinity) - (b.score ?? Infinity));
+    const best = candidates[0];
+    const bestScore = best.score ?? Infinity;
+    const threshold = bestScore * 1.3;
+    const fav = candidates.find(s => s.favourite && (s.score ?? Infinity) <= threshold);
+    return fav || best;
   })();
 
   // ── Cascade enforcement on changes ────────────────────────────────────
@@ -455,7 +527,15 @@
 
       <!-- Server select -->
       <div class="form-group">
-        <label>Server</label>
+        <label class="server-label">
+          Server
+          {#if !serverDisabled}
+            <span class="label-action" on:click|stopPropagation={probeVisibleServers}
+                  role="button" tabindex="-1">
+              {#if probing}testing...{:else}Test latency{/if}
+            </span>
+          {/if}
+        </label>
         <div class="dropdown-wrap">
           <button class="dropdown-trigger" class:disabled={serverDisabled}
                   disabled={serverDisabled}
@@ -487,7 +567,11 @@
                 {:else}
                   {#each filteredServerOptions as s (s.id)}
                     <button class="dropdown-item" class:selected={selServerId === s.id}
+                            class:blacklisted={s.blacklisted}
                             on:click={() => setServer(s.id)}>
+                      <span class="pref-btn" class:active={s.favourite} role="button" tabindex="-1"
+                              title={s.favourite ? 'Remove from favourites' : 'Add to favourites'}
+                              on:click={(e) => toggleFavourite(s.id, e)}>&#9733;</span>
                       <span class="item-main">{s.name}</span>
                       <span class="srv-badges">
                         {#if s.streaming}<span class="srv-badge str">STR</span>{/if}
@@ -496,7 +580,18 @@
                       </span>
                       <div class="load-bar"><div class="load-fill" style="width:{s.load}%;background:{loadBarColor(s.load)}"></div></div>
                       <span class="load-pct">{s.load}%</span>
-                      <span class="score-pct" title="Proton score (lower = better) — what determines this list's order">{formatScore(s.score)}</span>
+                      <span class="score-pct" title="Proton score (lower = better)">{formatScore(s.score)}</span>
+                      {#if latencies[s.id] !== undefined}
+                        <span class="latency-badge" class:good={latencies[s.id] !== null && latencies[s.id] < 50}
+                              class:warn={latencies[s.id] !== null && latencies[s.id] >= 50 && latencies[s.id] < 150}
+                              class:bad={latencies[s.id] === null || latencies[s.id] >= 150}
+                              title="TCP connect latency from router">
+                          {latencies[s.id] !== null ? Math.round(latencies[s.id]) + 'ms' : 'fail'}
+                        </span>
+                      {/if}
+                      <span class="pref-btn ban-btn" class:active={s.blacklisted} role="button" tabindex="-1"
+                              title={s.blacklisted ? 'Remove from blacklist' : 'Block this server'}
+                              on:click={(e) => toggleBlacklist(s.id, e)}>&#128683;</span>
                     </button>
                   {/each}
                 {/if}
@@ -624,6 +719,37 @@
     min-width: 38px; text-align: right; flex-shrink: 0;
   }
   .score-pct::before { content: "⚡ "; opacity: .55; }
+
+  /* Blacklisted server rows — dimmed, strikethrough name */
+  .dropdown-item.blacklisted { opacity: .45; }
+  .dropdown-item.blacklisted .item-main { text-decoration: line-through; }
+
+  /* Star (favourite) and ban (blacklist) toggle buttons inline in server rows */
+  .pref-btn {
+    background: none; border: none; cursor: pointer; padding: 0 2px;
+    font-size: .85rem; color: var(--fg3); opacity: .35;
+    transition: opacity .15s, color .15s; flex-shrink: 0; line-height: 1;
+  }
+  .pref-btn:hover { opacity: 1; }
+  .pref-btn.active { opacity: 1; color: #f1c40f; }
+  .ban-btn.active { opacity: 1; color: #e74c3c; }
+
+  /* "Test latency" action link in the Server label */
+  .label-action {
+    margin-left: auto; font-size: .7rem; color: var(--accent);
+    cursor: pointer; text-transform: none; letter-spacing: 0;
+    font-weight: normal;
+  }
+  .label-action:hover { text-decoration: underline; }
+
+  /* Latency badges on server items */
+  .latency-badge {
+    font-size: .65rem; padding: 1px 5px; border-radius: 3px;
+    font-weight: 600; flex-shrink: 0; font-family: ui-monospace, monospace;
+  }
+  .latency-badge.good { background: rgba(46, 204, 113, .15); color: #2ecc71; }
+  .latency-badge.warn { background: rgba(243, 156, 18, .15); color: #f39c12; }
+  .latency-badge.bad { background: rgba(231, 76, 60, .15); color: #e74c3c; }
 
   .empty { padding: 16px; text-align: center; color: var(--fg3); font-size: .82rem; }
 

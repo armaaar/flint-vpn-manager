@@ -12,6 +12,7 @@
   let masterError = '';
   let savingRouter = false, savingCreds = false, savingMaster = false;
   let autoOptEnabled = false, autoOptTime = '04:00', savingAutoOpt = false;
+  let blacklistCount = 0, favouritesCount = 0, clearingPrefs = false;
 
   $: if (visible) loadSettings();
 
@@ -21,6 +22,17 @@
     const ao = s.auto_optimize || {};
     autoOptEnabled = ao.enabled || false;
     autoOptTime = ao.time || '04:00';
+    blacklistCount = (s.server_blacklist || []).length;
+    favouritesCount = (s.server_favourites || []).length;
+  }
+
+  async function clearServerPreferences() {
+    clearingPrefs = true;
+    await api.updateServerPreferences({ blacklist: [], favourites: [] });
+    blacklistCount = 0;
+    favouritesCount = 0;
+    clearingPrefs = false;
+    showToast('Server preferences cleared');
   }
 
   async function saveAutoOpt() {
@@ -120,6 +132,23 @@
           {#if savingAutoOpt}Saving...{:else}Save{/if}
         </button>
       </div>
+      <div style="border-top:1px solid var(--border);padding-top:20px;margin-bottom:20px">
+        <h3 class="section-title">Server Preferences</h3>
+        <span class="hint" style="display:block;margin-bottom:12px">
+          Manage server blacklist and favourites. Use the star and block buttons in the
+          Server Picker (when changing a group's server) to add individual servers.
+        </span>
+        <div class="pref-counts">
+          <span class="pref-count">Favourites: <strong>{favouritesCount}</strong></span>
+          <span class="pref-count">Blacklisted: <strong>{blacklistCount}</strong></span>
+        </div>
+        {#if blacklistCount > 0 || favouritesCount > 0}
+          <button class="btn-outline btn-sm" on:click={clearServerPreferences}
+                  disabled={clearingPrefs} style="margin-top:8px">
+            {#if clearingPrefs}Clearing...{:else}Clear All{/if}
+          </button>
+        {/if}
+      </div>
       <div style="border-top:1px solid var(--border);padding-top:20px">
         <h3 class="section-title">Update Credentials</h3>
         <div class="form-group">
@@ -172,4 +201,6 @@
   .ao-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
   .ao-row input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer; }
   .ao-row label { font-size: .85rem; cursor: pointer; }
+  .pref-counts { display: flex; gap: 16px; font-size: .85rem; color: var(--fg2); }
+  .pref-count strong { color: var(--fg); }
 </style>

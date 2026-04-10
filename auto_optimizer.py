@@ -18,7 +18,7 @@ from typing import Callable, Dict, Optional
 import profile_store as ps
 import secrets_manager as sm
 from consts import HEALTH_AMBER, HEALTH_GREEN, PROFILE_TYPE_VPN
-from server_optimizer import find_better_server
+from server_optimizer import find_better_server, filter_servers_by_scope
 
 log = logging.getLogger("flintvpn")
 
@@ -69,6 +69,10 @@ class AutoOptimizer:
     def _poll_loop(self):
         while not self._stop_event.is_set():
             try:
+                self._maybe_refresh_server_data()
+            except Exception:
+                pass
+            try:
                 self.check_and_optimize()
             except Exception:
                 pass
@@ -77,6 +81,19 @@ class AutoOptimizer:
             except Exception:
                 pass
             self._stop_event.wait(self.poll_interval)
+
+    def _maybe_refresh_server_data(self):
+        """Refresh server scores/loads if stale. Runs every poll cycle (~60s)."""
+        try:
+            proton = self.get_proton()
+            if not proton or not proton.is_logged_in:
+                return
+            if proton.server_list_expired:
+                proton.refresh_server_list()
+            elif proton.server_loads_expired:
+                proton.refresh_server_loads()
+        except Exception as e:
+            log.warning(f"Server data refresh failed: {e}")
 
     @staticmethod
     def _within_window(scheduled_hhmm: str, now: datetime, window_minutes: int = 2) -> bool:
@@ -126,6 +143,15 @@ class AutoOptimizer:
             # and resolved server info come from the router and Proton API.
             data = ps.load()
             profiles = self.build_profile_list_fn(router, data, proton=proton)
+
+            blacklist = config.get("server_blacklist", [])
+            favourites = config.get("server_favourites", [])
+
+            # Probe latency for candidate servers across all profiles' scopes.
+            # Only probe the top 10 by score per scope to keep it fast.
+            latencies = self._probe_candidate_latencies(
+                proton, router, profiles, all_servers, blacklist,
+            )
             switched = 0
 
             for p in profiles:
@@ -141,7 +167,11 @@ class AutoOptimizer:
                 if scope.get("server_id"):
                     continue
 
-                better = find_better_server(p, all_servers)
+                better = find_better_server(
+                    p, all_servers,
+                    blacklist=blacklist, favourites=favourites,
+                    latencies=latencies,
+                )
                 if not better:
                     continue
 
@@ -177,6 +207,48 @@ class AutoOptimizer:
 
         except Exception as e:
             log.error(f"Auto-optimize: failed: {e}")
+
+    def _probe_candidate_latencies(
+        self, proton, router, profiles, all_servers, blacklist,
+    ) -> dict:
+        """Probe latency for top candidate servers across all profiles' scopes."""
+        from server_optimizer import filter_blacklisted
+        try:
+            from latency_probe import probe_servers_via_router
+
+            candidate_ids = set()
+            for p in profiles:
+                if p.get("type") != PROFILE_TYPE_VPN:
+                    continue
+                scope = p.get("server_scope") or {}
+                if scope.get("server_id"):
+                    continue
+                matches = filter_servers_by_scope(scope, all_servers)
+                matches = filter_blacklisted(matches, blacklist)
+                matches.sort(key=lambda s: s.get("score") or float("inf"))
+                for s in matches[:10]:
+                    candidate_ids.add(s["id"])
+
+            if not candidate_ids:
+                return {}
+
+            to_probe = proton.get_server_entry_ips(list(candidate_ids))
+            if not to_probe:
+                return {}
+
+            try:
+                latencies = probe_servers_via_router(router, to_probe)
+            except Exception as e:
+                log.warning(f"Auto-optimize: router probe failed: {e}")
+                latencies = {}
+
+            probed = sum(1 for v in latencies.values() if v is not None)
+            log.info(f"Auto-optimize: probed {probed}/{len(to_probe)} servers")
+            return latencies
+
+        except Exception as e:
+            log.warning(f"Auto-optimize: latency probing failed: {e}")
+            return {}
 
     # ── Persistent WireGuard certificate renewal ──────────────────────────
 

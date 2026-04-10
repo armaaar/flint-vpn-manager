@@ -345,6 +345,15 @@ def api_get_servers(profile_id):
     feature = request.args.get("feature")
 
     servers = proton.get_servers(country=country, city=city, feature=feature)
+
+    # Tag servers with blacklist/favourite status for frontend display
+    config = sm.get_config()
+    blacklist_set = set(config.get("server_blacklist", []))
+    favourites_set = set(config.get("server_favourites", []))
+    for s in servers:
+        s["blacklisted"] = s["id"] in blacklist_set
+        s["favourite"] = s["id"] in favourites_set
+
     return jsonify(servers)
 
 
@@ -612,7 +621,51 @@ def api_refresh():
     if tracker:
         tracker.poll_once()
 
+    # Refresh server scores if stale
+    try:
+        proton = _get_service().proton
+        if proton and proton.is_logged_in:
+            if proton.server_list_expired:
+                proton.refresh_server_list()
+            elif proton.server_loads_expired:
+                proton.refresh_server_loads()
+    except Exception as e:
+        log.warning(f"Server refresh on manual poll failed: {e}")
+
     return jsonify({"success": True})
+
+
+@app.route("/api/probe-latency", methods=["POST"])
+@require_unlocked
+def api_probe_latency():
+    """Probe TCP latency to a list of VPN servers (from the router).
+
+    Body: {server_ids: ["id1", "id2", ...]}
+    Returns: {latencies: {server_id: latency_ms_or_null}}
+    """
+    data = request.json or {}
+    server_ids = data.get("server_ids", [])
+    if not server_ids:
+        return jsonify({"latencies": {}})
+
+    proton = _get_service().proton
+    if not proton or not proton.is_logged_in:
+        return jsonify({"error": "Not logged into ProtonVPN"}), 400
+
+    to_probe = proton.get_server_entry_ips(server_ids)
+    if not to_probe:
+        return jsonify({"latencies": {}})
+
+    from latency_probe import probe_servers_via_router
+
+    try:
+        router = _get_router()
+        latencies = probe_servers_via_router(router, to_probe)
+    except Exception as e:
+        log.warning(f"Latency probe failed: {e}")
+        latencies = {}
+
+    return jsonify({"latencies": latencies})
 
 
 # ── SSE Stream ────────────────────────────────────────────────────────────────
@@ -757,6 +810,89 @@ def api_update_settings():
     _router_api = None
 
     return jsonify(config)
+
+
+# ── Server Preferences (Blacklist / Favourites) ─────────────────────────────
+
+@app.route("/api/settings/server-preferences")
+@require_unlocked
+def api_get_server_preferences():
+    """Get server blacklist and favourites."""
+    config = sm.get_config()
+    return jsonify({
+        "blacklist": config.get("server_blacklist", []),
+        "favourites": config.get("server_favourites", []),
+    })
+
+
+@app.route("/api/settings/server-preferences", methods=["PUT"])
+@require_unlocked
+def api_update_server_preferences():
+    """Replace server blacklist and/or favourites."""
+    data = request.json or {}
+    updates = {}
+    if "blacklist" in data:
+        updates["server_blacklist"] = list(data["blacklist"])
+    if "favourites" in data:
+        updates["server_favourites"] = list(data["favourites"])
+    if not updates:
+        return jsonify({"error": "Provide blacklist and/or favourites"}), 400
+    sm.update_config(**updates)
+    config = sm.get_config()
+    return jsonify({
+        "blacklist": config.get("server_blacklist", []),
+        "favourites": config.get("server_favourites", []),
+    })
+
+
+@app.route("/api/settings/server-preferences/blacklist/<server_id>", methods=["POST"])
+@require_unlocked
+def api_add_to_blacklist(server_id):
+    """Add a server to the blacklist."""
+    config = sm.get_config()
+    blacklist = config.get("server_blacklist", [])
+    # Also remove from favourites if present
+    favourites = config.get("server_favourites", [])
+    if server_id not in blacklist:
+        blacklist.append(server_id)
+    favourites = [s for s in favourites if s != server_id]
+    sm.update_config(server_blacklist=blacklist, server_favourites=favourites)
+    return jsonify({"success": True})
+
+
+@app.route("/api/settings/server-preferences/blacklist/<server_id>", methods=["DELETE"])
+@require_unlocked
+def api_remove_from_blacklist(server_id):
+    """Remove a server from the blacklist."""
+    config = sm.get_config()
+    blacklist = [s for s in config.get("server_blacklist", []) if s != server_id]
+    sm.update_config(server_blacklist=blacklist)
+    return jsonify({"success": True})
+
+
+@app.route("/api/settings/server-preferences/favourites/<server_id>", methods=["POST"])
+@require_unlocked
+def api_add_to_favourites(server_id):
+    """Add a server to favourites."""
+    config = sm.get_config()
+    favourites = config.get("server_favourites", [])
+    # Also remove from blacklist if present
+    blacklist = config.get("server_blacklist", [])
+    if server_id not in favourites:
+        favourites.append(server_id)
+    blacklist = [s for s in blacklist if s != server_id]
+    sm.update_config(server_blacklist=blacklist, server_favourites=favourites)
+    return jsonify({"success": True})
+
+
+@app.route("/api/settings/server-preferences/favourites/<server_id>", methods=["DELETE"])
+@require_unlocked
+def api_remove_from_favourites(server_id):
+    """Remove a server from favourites."""
+    config = sm.get_config()
+    favourites = [s for s in config.get("server_favourites", []) if s != server_id]
+    sm.update_config(server_favourites=favourites)
+    return jsonify({"success": True})
 
 
 @app.route("/api/settings/credentials", methods=["PUT"])

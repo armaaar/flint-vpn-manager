@@ -47,6 +47,17 @@ export const api = {
   updateSettings: (data) => request('/api/settings', { method: 'PUT', body: data }),
   updateCredentials: (data) => request('/api/settings/credentials', { method: 'PUT', body: data }),
 
+  // Server Preferences (Blacklist / Favourites)
+  getServerPreferences: () => request('/api/settings/server-preferences'),
+  updateServerPreferences: (data) => request('/api/settings/server-preferences', { method: 'PUT', body: data }),
+  addToBlacklist: (serverId) => request(`/api/settings/server-preferences/blacklist/${encodeURIComponent(serverId)}`, { method: 'POST' }),
+  removeFromBlacklist: (serverId) => request(`/api/settings/server-preferences/blacklist/${encodeURIComponent(serverId)}`, { method: 'DELETE' }),
+  addToFavourites: (serverId) => request(`/api/settings/server-preferences/favourites/${encodeURIComponent(serverId)}`, { method: 'POST' }),
+  removeFromFavourites: (serverId) => request(`/api/settings/server-preferences/favourites/${encodeURIComponent(serverId)}`, { method: 'DELETE' }),
+
+  // Latency Probing
+  probeLatency: (serverIds) => request('/api/probe-latency', { method: 'POST', body: { server_ids: serverIds } }),
+
   // Refresh
   refresh: () => request('/api/refresh', { method: 'POST' }),
 };

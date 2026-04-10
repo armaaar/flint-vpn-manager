@@ -114,6 +114,30 @@ class ProtonAPI:
             return None
         return self._api.server_list
 
+    @property
+    def server_list_expired(self) -> bool:
+        """True if the full server list needs re-downloading (>3h old)."""
+        sl = self.server_list
+        return sl is not None and sl.expired
+
+    @property
+    def server_loads_expired(self) -> bool:
+        """True if server loads/scores need refreshing (>15min old)."""
+        sl = self.server_list
+        return sl is not None and sl.loads_expired
+
+    def refresh_server_list(self):
+        """Full server list refresh (~3h interval). Network call to Proton API."""
+        session = self._api._session_holder.session
+        sync_wrapper(session.fetch_server_list)()
+        log.info("Server list refreshed (full)")
+
+    def refresh_server_loads(self):
+        """Lightweight server loads/scores refresh (~15min interval)."""
+        session = self._api._session_holder.session
+        sync_wrapper(session.update_server_loads)()
+        log.info("Server loads refreshed")
+
     def get_servers(
         self,
         country: Optional[str] = None,
@@ -487,6 +511,25 @@ aeb893d9a96d1f15519bb3c4dcb40ee3
         server_info["protocol"] = "openvpn-" + protocol
 
         return config, server_info, ovpn_username, password
+
+    def get_server_entry_ips(self, server_ids: list[str]) -> list[dict]:
+        """Resolve server IDs to entry IPs for latency probing.
+
+        Returns:
+            List of {id, entry_ip} dicts. Skips IDs not found in the server list.
+        """
+        sl = self.server_list
+        if sl is None:
+            return []
+        result = []
+        for sid in server_ids:
+            try:
+                server = sl.get_by_id(sid)
+                physical = server.get_random_physical_server()
+                result.append({"id": sid, "entry_ip": physical.entry_ip})
+            except Exception:
+                continue
+        return result
 
     def server_to_dict(self, server: LogicalServer) -> dict:
         """Public wrapper around _server_to_dict for callers that resolve

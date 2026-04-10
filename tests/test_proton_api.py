@@ -442,6 +442,70 @@ class TestGetCountries:
         assert len(ch["cities"]) == 2
 
 
+class TestServerRefresh:
+    def test_server_loads_expired_true(self, mock_api):
+        api, mock = mock_api
+        sl = _make_server_list([_make_logical("CH#1")])
+        sl._loads_expiration_time = 0  # expired
+        mock.vpn_session_loaded = True
+        mock.server_list = sl
+        assert api.server_loads_expired is True
+
+    def test_server_loads_expired_false(self, mock_api):
+        api, mock = mock_api
+        sl = _make_server_list([_make_logical("CH#1")])
+        sl._loads_expiration_time = time.time() + 3600  # far future
+        mock.vpn_session_loaded = True
+        mock.server_list = sl
+        assert api.server_loads_expired is False
+
+    def test_server_list_expired_true(self, mock_api):
+        api, mock = mock_api
+        sl = _make_server_list([_make_logical("CH#1")])
+        sl._expiration_time = 0  # expired
+        mock.vpn_session_loaded = True
+        mock.server_list = sl
+        assert api.server_list_expired is True
+
+    def test_server_list_expired_false(self, mock_api):
+        api, mock = mock_api
+        sl = _make_server_list([_make_logical("CH#1")])
+        sl._expiration_time = time.time() + 86400  # far future
+        mock.vpn_session_loaded = True
+        mock.server_list = sl
+        assert api.server_list_expired is False
+
+    def test_staleness_none_when_not_logged_in(self, mock_api):
+        api, mock = mock_api
+        mock.vpn_session_loaded = False
+        assert api.server_loads_expired is False
+        assert api.server_list_expired is False
+
+    def test_refresh_server_loads_calls_session(self, mock_api):
+        api, mock = mock_api
+        mock_session = MagicMock()
+        mock_session.update_server_loads = MagicMock(return_value=None)
+        mock._session_holder.session = mock_session
+
+        with patch("proton_api.sync_wrapper") as mock_sw:
+            mock_sw.return_value = MagicMock()
+            api.refresh_server_loads()
+            mock_sw.assert_called_once_with(mock_session.update_server_loads)
+            mock_sw.return_value.assert_called_once()
+
+    def test_refresh_server_list_calls_session(self, mock_api):
+        api, mock = mock_api
+        mock_session = MagicMock()
+        mock_session.fetch_server_list = MagicMock(return_value=None)
+        mock._session_holder.session = mock_session
+
+        with patch("proton_api.sync_wrapper") as mock_sw:
+            mock_sw.return_value = MagicMock()
+            api.refresh_server_list()
+            mock_sw.assert_called_once_with(mock_session.fetch_server_list)
+            mock_sw.return_value.assert_called_once()
+
+
 class TestGetServerByName:
     def test_finds_server(self, mock_api):
         api, mock = mock_api

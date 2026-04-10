@@ -15,8 +15,13 @@ import pytest
 
 from server_optimizer import (
     filter_servers_by_scope,
+    filter_blacklisted,
+    apply_favourites,
+    _pick_best_by_latency,
     resolve_scope_to_server,
     find_better_server,
+    FAVOURITE_SCORE_TOLERANCE,
+    SCORE_SIMILARITY_THRESHOLD,
 )
 
 
@@ -282,3 +287,246 @@ class TestFindBetterServer:
         profile = _profile()
         profile["server"] = {"id": "s1"}  # no score
         assert find_better_server(profile, [_server("s2", load=5)]) is None
+
+
+# ── Blacklist Tests ──────────────────────────────────────────────────────────
+
+class TestFilterBlacklisted:
+    def test_empty_blacklist_returns_all(self):
+        servers = [_server("s1"), _server("s2")]
+        assert len(filter_blacklisted(servers, [])) == 2
+
+    def test_removes_blacklisted(self):
+        servers = [_server("s1"), _server("s2"), _server("s3")]
+        result = filter_blacklisted(servers, ["s2"])
+        assert [s["id"] for s in result] == ["s1", "s3"]
+
+    def test_removes_multiple(self):
+        servers = [_server("s1"), _server("s2"), _server("s3")]
+        result = filter_blacklisted(servers, ["s1", "s3"])
+        assert [s["id"] for s in result] == ["s2"]
+
+    def test_nonexistent_blacklist_id_ignored(self):
+        servers = [_server("s1"), _server("s2")]
+        result = filter_blacklisted(servers, ["s999"])
+        assert len(result) == 2
+
+    def test_none_blacklist_returns_all(self):
+        servers = [_server("s1"), _server("s2")]
+        assert len(filter_blacklisted(servers, None)) == 2
+
+
+class TestBlacklistInResolve:
+    def test_blacklisted_excluded_from_fastest(self):
+        servers = [_server("s1", load=10), _server("s2", load=20)]
+        result = resolve_scope_to_server(_scope(), servers, blacklist=["s1"])
+        assert result["id"] == "s2"
+
+    def test_pinned_server_bypasses_blacklist(self):
+        """User explicitly pinned a server — blacklist does not override."""
+        servers = [_server("s1", load=10), _server("s2", load=20)]
+        result = resolve_scope_to_server(
+            _scope(server_id="s1"), servers, blacklist=["s1"]
+        )
+        assert result["id"] == "s1"
+
+    def test_all_blacklisted_returns_none(self):
+        servers = [_server("s1"), _server("s2")]
+        result = resolve_scope_to_server(_scope(), servers, blacklist=["s1", "s2"])
+        assert result is None
+
+
+class TestBlacklistInFindBetter:
+    def test_blacklisted_excluded(self):
+        profile = _profile(server_id="s1", load=90)
+        servers = [
+            _server("s1", load=90),
+            _server("s2", load=10),  # best but blacklisted
+            _server("s3", load=60),  # 33% better, passes threshold
+        ]
+        result = find_better_server(profile, servers, blacklist=["s2"])
+        assert result["id"] == "s3"
+
+    def test_all_candidates_blacklisted(self):
+        profile = _profile(server_id="s1", load=90)
+        servers = [
+            _server("s1", load=90),
+            _server("s2", load=10),
+        ]
+        result = find_better_server(profile, servers, blacklist=["s2"])
+        assert result is None
+
+
+# ── Favourites Tests ─────────────────────────────────────────────────────────
+
+class TestApplyFavourites:
+    def test_no_favourites_returns_best(self):
+        candidates = [_server("s1", load=10), _server("s2", load=20)]
+        result = apply_favourites(candidates, [])
+        assert result["id"] == "s1"
+
+    def test_best_is_already_favourite(self):
+        candidates = [_server("s1", load=10), _server("s2", load=20)]
+        result = apply_favourites(candidates, ["s1"])
+        assert result["id"] == "s1"
+
+    def test_favourite_within_tolerance_wins(self):
+        # s1 score=10, s2 score=12 (20% worse, within 30% tolerance)
+        candidates = [_server("s1", load=10), _server("s2", load=12)]
+        result = apply_favourites(candidates, ["s2"])
+        assert result["id"] == "s2"
+
+    def test_favourite_beyond_tolerance_loses(self):
+        # s1 score=10, s2 score=14 (40% worse, beyond 30% tolerance)
+        candidates = [_server("s1", load=10), _server("s2", load=14)]
+        result = apply_favourites(candidates, ["s2"])
+        assert result["id"] == "s1"
+
+    def test_favourite_exactly_at_threshold(self):
+        # s1 score=10, threshold = 10 * 1.3 = 13.0
+        candidates = [_server("s1", load=10), _server("s2", score=13.0)]
+        result = apply_favourites(candidates, ["s2"])
+        assert result["id"] == "s2"
+
+    def test_multiple_favourites_picks_best_scoring(self):
+        candidates = [
+            _server("s1", load=10),
+            _server("s2", load=11),  # favourite, 10% worse
+            _server("s3", load=12),  # favourite, 20% worse
+        ]
+        result = apply_favourites(candidates, ["s2", "s3"])
+        assert result["id"] == "s2"  # best-scoring favourite
+
+    def test_favourite_not_in_candidates_ignored(self):
+        candidates = [_server("s1", load=10), _server("s2", load=20)]
+        result = apply_favourites(candidates, ["s999"])
+        assert result["id"] == "s1"
+
+
+class TestFavouritesInResolve:
+    def test_favourite_boosted_in_resolve(self):
+        servers = [_server("s1", load=10), _server("s2", load=12)]
+        result = resolve_scope_to_server(_scope(), servers, favourites=["s2"])
+        assert result["id"] == "s2"
+
+    def test_pinned_bypasses_favourites(self):
+        servers = [_server("s1", load=10), _server("s2", load=5)]
+        result = resolve_scope_to_server(
+            _scope(server_id="s1"), servers, favourites=["s2"]
+        )
+        assert result["id"] == "s1"
+
+
+class TestFavouritesInFindBetter:
+    def test_favourite_preferred_when_close(self):
+        profile = _profile(server_id="s1", load=90)
+        servers = [
+            _server("s1", load=90),
+            _server("s2", load=10),  # best score
+            _server("s3", load=12),  # favourite, within tolerance of s2
+        ]
+        result = find_better_server(profile, servers, favourites=["s3"])
+        assert result["id"] == "s3"
+
+    def test_blacklist_and_favourite_combined(self):
+        profile = _profile(server_id="s1", load=90)
+        servers = [
+            _server("s1", load=90),
+            _server("s2", load=10),  # best but blacklisted
+            _server("s3", load=12),  # favourite
+            _server("s4", load=11),  # non-favourite, slightly better
+        ]
+        result = find_better_server(
+            profile, servers,
+            blacklist=["s2"], favourites=["s3"]
+        )
+        # s2 excluded, s4 is best remaining, s3 favourite within tolerance
+        assert result["id"] == "s3"
+
+
+# ── Latency Tiebreaker Tests ─────────────────────────────────────────────
+
+class TestPickBestByLatency:
+    def test_picks_lowest_latency_among_tied(self):
+        # s1 and s2 within 15% threshold (10 vs 11), s2 has lower latency
+        candidates = [_server("s1", load=10), _server("s2", load=11)]
+        latencies = {"s1": 120.0, "s2": 30.0}
+        result = _pick_best_by_latency(candidates, latencies)
+        assert result["id"] == "s2"
+
+    def test_ignores_latency_for_distant_scores(self):
+        # s2 is 50% worse in score — NOT tied, so latency doesn't help
+        candidates = [_server("s1", load=10), _server("s2", load=15)]
+        latencies = {"s1": 200.0, "s2": 5.0}
+        result = _pick_best_by_latency(candidates, latencies)
+        assert result["id"] == "s1"
+
+    def test_none_latency_treated_as_infinity(self):
+        candidates = [_server("s1", load=10), _server("s2", load=11)]
+        latencies = {"s1": None, "s2": 30.0}
+        result = _pick_best_by_latency(candidates, latencies)
+        assert result["id"] == "s2"
+
+    def test_no_latency_data_returns_best_score(self):
+        candidates = [_server("s1", load=10), _server("s2", load=11)]
+        result = _pick_best_by_latency(candidates, {})
+        assert result["id"] == "s1"
+
+    def test_single_candidate(self):
+        candidates = [_server("s1", load=10)]
+        result = _pick_best_by_latency(candidates, {"s1": 50.0})
+        assert result["id"] == "s1"
+
+    def test_all_tied_picks_lowest_latency(self):
+        # All very close scores
+        candidates = [
+            _server("s1", score=10.0),
+            _server("s2", score=10.1),
+            _server("s3", score=10.2),
+        ]
+        latencies = {"s1": 100.0, "s2": 20.0, "s3": 50.0}
+        result = _pick_best_by_latency(candidates, latencies)
+        assert result["id"] == "s2"
+
+
+class TestLatencyInResolve:
+    def test_latency_tiebreaker_in_resolve(self):
+        servers = [
+            _server("s1", score=10.0),
+            _server("s2", score=10.5),  # within 15% of s1
+        ]
+        latencies = {"s1": 200.0, "s2": 30.0}
+        result = resolve_scope_to_server(_scope(), servers, latencies=latencies)
+        assert result["id"] == "s2"
+
+    def test_no_latencies_falls_back_to_score(self):
+        servers = [_server("s1", score=10.0), _server("s2", score=10.5)]
+        result = resolve_scope_to_server(_scope(), servers, latencies=None)
+        assert result["id"] == "s1"
+
+
+class TestLatencyInFindBetter:
+    def test_latency_tiebreaker_in_find_better(self):
+        profile = _profile(server_id="s1", load=90)
+        servers = [
+            _server("s1", load=90),
+            _server("s2", score=10.0),
+            _server("s3", score=10.5),  # tied with s2
+        ]
+        latencies = {"s2": 200.0, "s3": 25.0}
+        result = find_better_server(profile, servers, latencies=latencies)
+        assert result["id"] == "s3"
+
+    def test_favourites_take_priority_over_latency(self):
+        """When favourites are provided, they take priority over latency."""
+        profile = _profile(server_id="s1", load=90)
+        servers = [
+            _server("s1", load=90),
+            _server("s2", score=10.0),  # best score, worst latency
+            _server("s3", score=12.0),  # favourite, within 30% tolerance
+        ]
+        result = find_better_server(
+            profile, servers,
+            favourites=["s3"], latencies={"s2": 200.0, "s3": 5.0}
+        )
+        assert result["id"] == "s3"
