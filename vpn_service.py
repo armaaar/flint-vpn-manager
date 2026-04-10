@@ -682,26 +682,38 @@ class VPNService:
     def delete_profile(self, profile_id):
         """Delete a profile and tear down its tunnel if VPN.
 
+        Acquires the per-profile switch lock (blocking) to wait for any
+        in-progress smart protocol switch to finish before deleting.
+
         Raises:
             NotFoundError: If the profile is not found.
         """
-        profile = ps.get_profile(profile_id)
-        if not profile:
-            raise NotFoundError("Profile not found")
+        self._smart_cancel(profile_id)
 
-        # Tear down router resources
-        if profile["type"] == PROFILE_TYPE_VPN and profile.get("router_info"):
-            ri = profile["router_info"]
-            proto = ri.get("vpn_protocol", PROTO_WIREGUARD)
-            try:
-                strategy = get_strategy(proto)
-                strategy.delete(self.router, ri)
-            except Exception:
-                pass  # Best effort cleanup
+        # Wait for any in-progress smart protocol switch to finish
+        lock = self._switch_locks.setdefault(profile_id, threading.RLock())
+        lock.acquire()
+        try:
+            profile = ps.get_profile(profile_id)
+            if not profile:
+                raise NotFoundError("Profile not found")
 
-        log.info(f"Deleted profile '{profile['name']}' (id={profile_id})")
+            # Tear down router resources (reads fresh router_info after lock)
+            if profile["type"] == PROFILE_TYPE_VPN and profile.get("router_info"):
+                ri = profile["router_info"]
+                proto = ri.get("vpn_protocol", PROTO_WIREGUARD)
+                try:
+                    strategy = get_strategy(proto)
+                    strategy.delete(self.router, ri)
+                except Exception:
+                    pass  # Best effort cleanup
 
-        ps.delete_profile(profile_id)
+            log.info(f"Deleted profile '{profile['name']}' (id={profile_id})")
+
+            ps.delete_profile(profile_id)
+        finally:
+            lock.release()
+            self._switch_locks.pop(profile_id, None)
 
         # Sync router LAN state -- handles ipset removal, rule deletion, and
         # NoInternet reconciliation in a single pass via the new UCI execution
@@ -727,6 +739,8 @@ class VPNService:
 
         Returns the updated profile dict.
         """
+        self._smart_cancel(profile_id)
+
         profile = ps.get_profile(profile_id)
         if not profile:
             raise NotFoundError("Profile not found")
@@ -749,15 +763,22 @@ class VPNService:
 
         # ── Case 2: VPN → non-VPN ───────────────────────────────────────
         if old_type == PROFILE_TYPE_VPN:
-            # Tear down tunnel
-            ri = profile.get("router_info") or {}
-            if ri:
-                proto = ri.get("vpn_protocol", PROTO_WIREGUARD)
-                try:
-                    strategy = get_strategy(proto)
-                    strategy.delete(self.router, ri)
-                except Exception as e:
-                    log.warning(f"change_type: tunnel teardown failed: {e}")
+            # Wait for any in-progress smart protocol switch before tearing down
+            lock = self._switch_locks.setdefault(profile_id, threading.RLock())
+            lock.acquire()
+            try:
+                # Re-read profile under lock to get current router_info
+                profile = ps.get_profile(profile_id)
+                ri = (profile.get("router_info") or {}) if profile else {}
+                if ri:
+                    proto = ri.get("vpn_protocol", PROTO_WIREGUARD)
+                    try:
+                        strategy = get_strategy(proto)
+                        strategy.delete(self.router, ri)
+                    except Exception as e:
+                        log.warning(f"change_type: tunnel teardown failed: {e}")
+            finally:
+                lock.release()
 
             # Clear VPN-specific fields
             ps.update_profile(profile_id,
@@ -895,9 +916,7 @@ class VPNService:
             RuntimeError: If a switch is already in progress.
         """
         # Per-profile lock to prevent concurrent switches
-        if profile_id not in self._switch_locks:
-            self._switch_locks[profile_id] = threading.Lock()
-        lock = self._switch_locks[profile_id]
+        lock = self._switch_locks.setdefault(profile_id, threading.RLock())
 
         if not lock.acquire(blocking=False):
             raise RuntimeError("Server switch already in progress for this profile")
@@ -917,6 +936,27 @@ class VPNService:
 
             server = self.proton.get_server_by_id(server_id)
             opts = options or profile.get("options", {})
+
+            # If cert-relevant VPN options changed, re-register the persistent
+            # certificate BEFORE generating the new config. These features are
+            # baked into the cert at registration time — without refresh, the
+            # Proton server continues enforcing the old features.
+            if vpn_protocol.startswith("wireguard") and profile.get("wg_key") and options:
+                old_opts = profile.get("options") or {}
+                cert_keys = ("netshield", "moderate_nat", "nat_pmp", "vpn_accelerator")
+                old_cert = {k: old_opts.get(k) for k in cert_keys}
+                new_cert = {k: opts.get(k) for k in cert_keys}
+                if old_cert != new_cert:
+                    log.info(f"Refreshing WG cert for '{profile['name']}' — options changed: {old_cert} → {new_cert}")
+                    cert_expiry_new = self.proton.refresh_wireguard_cert(
+                        profile["wg_key"],
+                        profile_name=profile.get("name", "Unnamed"),
+                        netshield=opts.get("netshield", 0),
+                        moderate_nat=opts.get("moderate_nat", False),
+                        nat_pmp=opts.get("nat_pmp", False),
+                        vpn_accelerator=opts.get("vpn_accelerator", True),
+                    )
+                    ps.update_profile(profile_id, cert_expiry=cert_expiry_new)
 
             strategy = get_strategy(vpn_protocol)
             new_ri, server_info, wg_key, cert_expiry = strategy.switch_server(
@@ -974,9 +1014,7 @@ class VPNService:
             RuntimeError: If tunnel creation fails.
         """
         # Per-profile lock to prevent concurrent operations
-        if profile_id not in self._switch_locks:
-            self._switch_locks[profile_id] = threading.Lock()
-        lock = self._switch_locks[profile_id]
+        lock = self._switch_locks.setdefault(profile_id, threading.RLock())
 
         if not lock.acquire(blocking=False):
             raise RuntimeError("Another operation is in progress for this profile")
@@ -1175,6 +1213,13 @@ class VPNService:
             (p, t) for p, t in self.SMART_PROTOCOL_CHAIN
             if p != current_proto
         ]
+        # Tor and Secure Core servers are WireGuard-only on Proton —
+        # exclude OpenVPN from the fallback chain for these profiles
+        profile = ps.get_profile(profile_id)
+        if profile:
+            features = (profile.get("server_scope") or {}).get("features") or {}
+            if features.get("tor") or features.get("secure_core"):
+                chain = [(p, t) for p, t in chain if p != PROTO_OPENVPN]
         with self._smart_lock:
             self._smart_pending[profile_id] = {
                 "started_at": time.time(),
@@ -1254,54 +1299,62 @@ class VPNService:
             if elapsed < self.SMART_CONNECT_TIMEOUT:
                 continue  # Still waiting for current protocol
 
-            # Timeout — try next protocol in chain
-            state["attempt_idx"] += 1
-            idx = state["attempt_idx"]
-
-            # Skip protocols without available slots
-            while idx < len(state["chain"]):
-                next_proto, _ = state["chain"][idx]
-                if self._smart_has_slot(profile_id, next_proto):
-                    break
-                idx += 1
-                state["attempt_idx"] = idx
-
-            if idx >= len(state["chain"]):
-                log.warning(f"Smart Protocol: all protocols exhausted for {profile_id}")
-                self._smart_cancel(profile_id)
-                continue
-
-            next_proto, next_transport = state["chain"][idx]
-            log.info(f"Smart Protocol: switching {profile_id} from {proto} to {next_proto}")
+            # Timeout — try next protocol. Use per-profile switch lock to
+            # prevent concurrent SSE tabs from double-switching.
+            lock = self._switch_locks.setdefault(profile_id, threading.RLock())
+            if not lock.acquire(blocking=False):
+                continue  # Another thread (SSE tab or user action) is switching this profile
 
             try:
-                # Re-check: user may have disconnected between health check and here
+                # Re-check under lock: user may have disconnected/deleted
                 with self._smart_lock:
                     if profile_id not in self._smart_pending:
                         continue
 
+                state["attempt_idx"] += 1
+                idx = state["attempt_idx"]
+
+                # Skip protocols without available slots
+                while idx < len(state["chain"]):
+                    next_proto, _ = state["chain"][idx]
+                    if self._smart_has_slot(profile_id, next_proto):
+                        break
+                    idx += 1
+                    state["attempt_idx"] = idx
+
+                if idx >= len(state["chain"]):
+                    log.warning(f"Smart Protocol: all protocols exhausted for {profile_id}")
+                    self._smart_cancel(profile_id)
+                    continue
+
+                next_proto, next_transport = state["chain"][idx]
+                log.info(f"Smart Protocol: switching {profile_id} from {proto} to {next_proto}")
+
                 # Clear port + custom_dns — ports differ per protocol, and
                 # custom DNS only works with kernel WireGuard (UCI-managed)
                 profile = ps.get_profile(profile_id)
+                if not profile:
+                    self._smart_cancel(profile_id)
+                    continue
                 opts = dict(profile.get("options") or {})
                 opts.pop("port", None)
                 if next_proto != PROTO_WIREGUARD:
                     opts.pop("custom_dns", None)
                 ps.update_profile(profile_id, options=opts)
 
-                # change_protocol handles disconnect + teardown + recreate
+                # change_protocol handles disconnect + teardown + recreate.
+                # We hold _switch_locks[profile_id] (RLock), so change_protocol's
+                # acquire will succeed (reentrant).
                 self.change_protocol(
                     profile_id, next_proto,
                     ovpn_protocol=next_transport if next_proto == PROTO_OPENVPN else "udp",
                 )
 
-                # Re-check again after protocol change (user could disconnect during)
-                with self._smart_lock:
-                    if profile_id not in self._smart_pending:
-                        continue
-
                 # Connect with new protocol
                 profile = ps.get_profile(profile_id)
+                if not profile:
+                    self._smart_cancel(profile_id)
+                    continue
                 new_ri = profile.get("router_info", {})
                 new_strategy = get_strategy(next_proto)
                 new_strategy.connect(self.router, new_ri)
@@ -1311,10 +1364,12 @@ class VPNService:
                     if profile_id in self._smart_pending:
                         self._smart_pending[profile_id]["started_at"] = time.time()
             except Exception as e:
-                log.warning(f"Smart Protocol: {next_proto} failed for {profile_id}: {e}")
+                log.warning(f"Smart Protocol: failed for {profile_id}: {e}")
                 with self._smart_lock:
                     if profile_id in self._smart_pending:
                         self._smart_pending[profile_id]["started_at"] = time.time()
+            finally:
+                lock.release()
 
     def get_smart_protocol_status(self):
         """Return smart protocol retry status for SSE streaming.
