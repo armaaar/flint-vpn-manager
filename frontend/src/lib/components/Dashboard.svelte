@@ -12,6 +12,8 @@
 
   let refreshing = false;
   let initialLoading = true;
+  let location = null;
+  let locationLoading = false;
   let selectedDevice = null;
   let showCreate = false;
   let editProfile = null;
@@ -33,7 +35,18 @@
   onMount(async () => {
     await reload();
     initialLoading = false;
+    loadLocation();
   });
+
+  async function loadLocation() {
+    locationLoading = true;
+    try {
+      location = await api.getLocation();
+    } catch {
+      location = null;
+    }
+    locationLoading = false;
+  }
 
   async function reload() {
     const [p, d] = await Promise.all([api.getProfiles(), api.getDevices()]);
@@ -153,6 +166,19 @@
       <a href="#" on:click|preventDefault={() => showLogs = true}><span class="nav-icon">📋</span> Logs</a>
     </div>
     <div class="sidebar-bottom">
+      {#if location}
+        <a href="#" on:click|preventDefault={loadLocation} title="Your public IP as seen by ProtonVPN. Click to refresh.">
+          <span class="nav-icon">🌍</span>
+          <span class="location-info">
+            <span class="location-ip">{location.ip}</span>
+            <span class="location-detail">{location.country}{location.isp ? ' · ' + location.isp : ''}</span>
+          </span>
+        </a>
+      {:else if locationLoading}
+        <a href="#"><span class="nav-icon">🌍</span> Checking IP...</a>
+      {:else}
+        <a href="#" on:click|preventDefault={loadLocation}><span class="nav-icon">🌍</span> Check IP</a>
+      {/if}
       <a href="#" title="ProtonVPN API session status. 'Ready' means we can fetch servers and generate configs.">
         <span class="nav-icon" style="color: {$protonLoggedIn ? 'var(--green)' : 'var(--red)'}">●</span>
         Proton API: {$protonLoggedIn ? 'Ready' : 'Not logged in'}
@@ -259,6 +285,10 @@
   .unassigned-chip-wrap.moving { opacity: .5; animation: shimmer 1.2s ease-in-out infinite; pointer-events: none; }
   @keyframes shimmer { 0%, 100% { opacity: .5; } 50% { opacity: .3; } }
   .badge-random { font-size: .65rem; padding: 2px 6px; border-radius: 3px; font-weight: 600; background: rgba(243,156,18,.12); color: var(--amber); }
+
+  .location-info { display: flex; flex-direction: column; gap: 1px; }
+  .location-ip { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: .82rem; color: var(--fg); font-weight: 500; }
+  .location-detail { font-size: .7rem; color: var(--fg3); }
 
   .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .6s linear infinite; }
   .spinner-lg { display: inline-block; width: 28px; height: 28px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .6s linear infinite; }

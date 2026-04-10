@@ -13,6 +13,11 @@
   let savingRouter = false, savingCreds = false, savingMaster = false;
   let autoOptEnabled = false, autoOptTime = '04:00', savingAutoOpt = false;
   let blacklistCount = 0, favouritesCount = 0, clearingPrefs = false;
+  let altRouting = true;
+  let savingAltRouting = false;
+  let sessions = [];
+  let maxConnections = 10;
+  let sessionsLoading = false;
 
   $: if (visible) loadSettings();
 
@@ -24,6 +29,20 @@
     autoOptTime = ao.time || '04:00';
     blacklistCount = (s.server_blacklist || []).length;
     favouritesCount = (s.server_favourites || []).length;
+    altRouting = s.alternative_routing !== false;
+    loadSessions();
+  }
+
+  async function loadSessions() {
+    sessionsLoading = true;
+    try {
+      const resp = await api.getSessions();
+      sessions = resp.sessions || [];
+      maxConnections = resp.max_connections || 10;
+    } catch {
+      sessions = [];
+    }
+    sessionsLoading = false;
   }
 
   async function clearServerPreferences() {
@@ -33,6 +52,13 @@
     favouritesCount = 0;
     clearingPrefs = false;
     showToast('Server preferences cleared');
+  }
+
+  async function saveAltRouting() {
+    savingAltRouting = true;
+    await api.updateSettings({ alternative_routing: altRouting });
+    savingAltRouting = false;
+    showToast('Alternative routing ' + (altRouting ? 'enabled' : 'disabled'));
   }
 
   async function saveAutoOpt() {
@@ -133,6 +159,20 @@
         </button>
       </div>
       <div style="border-top:1px solid var(--border);padding-top:20px;margin-bottom:20px">
+        <h3 class="section-title">Alternative Routing</h3>
+        <span class="hint" style="display:block;margin-bottom:12px">
+          When enabled, API calls are routed through third-party infrastructure (DNS-over-HTTPS) when Proton
+          servers are directly blocked. Useful in censored networks.
+        </span>
+        <div class="ao-row">
+          <input type="checkbox" id="alt-routing" bind:checked={altRouting}>
+          <label for="alt-routing">Enable alternative routing</label>
+        </div>
+        <button class="btn-primary btn-sm" on:click={saveAltRouting} disabled={savingAltRouting} style="margin-top:8px">
+          {#if savingAltRouting}Saving...{:else}Save{/if}
+        </button>
+      </div>
+      <div style="border-top:1px solid var(--border);padding-top:20px;margin-bottom:20px">
         <h3 class="section-title">Server Preferences</h3>
         <span class="hint" style="display:block;margin-bottom:12px">
           Manage server blacklist and favourites. Use the star and block buttons in the
@@ -148,6 +188,29 @@
             {#if clearingPrefs}Clearing...{:else}Clear All{/if}
           </button>
         {/if}
+      </div>
+      <div style="border-top:1px solid var(--border);padding-top:20px;margin-bottom:20px">
+        <h3 class="section-title">Active VPN Sessions</h3>
+        <span class="hint" style="display:block;margin-bottom:12px">
+          Currently active VPN connections on your Proton account ({sessions.length}/{maxConnections} slots used).
+        </span>
+        {#if sessionsLoading}
+          <div style="text-align:center;padding:12px"><span class="spinner-sm"></span></div>
+        {:else if sessions.length === 0}
+          <div class="hint">No active VPN sessions.</div>
+        {:else}
+          <div class="sessions-list">
+            {#each sessions as s}
+              <div class="session-row">
+                <span class="session-ip" title="Exit IP">{s.exit_ip || '—'}</span>
+                <span class="session-proto">{s.protocol || 'unknown'}</span>
+              </div>
+            {/each}
+          </div>
+        {/if}
+        <button class="btn-outline btn-sm" on:click={loadSessions} style="margin-top:8px">
+          Refresh
+        </button>
       </div>
       <div style="border-top:1px solid var(--border);padding-top:20px">
         <h3 class="section-title">Update Credentials</h3>
@@ -203,4 +266,10 @@
   .ao-row label { font-size: .85rem; cursor: pointer; }
   .pref-counts { display: flex; gap: 16px; font-size: .85rem; color: var(--fg2); }
   .pref-count strong { color: var(--fg); }
+  .sessions-list { display: flex; flex-direction: column; gap: 4px; }
+  .session-row { display: flex; align-items: center; gap: 10px; padding: 6px 10px; background: var(--bg3); border-radius: var(--radius-xs); font-size: .82rem; }
+  .session-ip { font-family: ui-monospace, "SF Mono", Menlo, monospace; color: var(--fg); flex: 1; }
+  .session-proto { font-size: .7rem; padding: 2px 6px; border-radius: 3px; background: rgba(0,180,216,.15); color: var(--accent); font-weight: 500; text-transform: uppercase; }
+  .spinner-sm { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .6s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
 </style>

@@ -18,7 +18,7 @@
   let lastInitProfileId = null;
 
   // Three independent selects + features filter. All start as "Fastest".
-  let features = { streaming: false, p2p: false, secure_core: false };
+  let features = { streaming: false, p2p: false, secure_core: false, tor: false };
   let selCountry = null;     // null = Fastest
   let selCity = null;        // null = Fastest
   let selEntryCountry = null; // null = Fastest (only meaningful with secure_core)
@@ -43,6 +43,7 @@
       streaming: !!(sc.features && sc.features.streaming),
       p2p: !!(sc.features && sc.features.p2p),
       secure_core: !!(sc.features && sc.features.secure_core),
+      tor: !!(sc.features && sc.features.tor),
     };
     selCountry = sc.country_code || null;
     selCity = sc.city || null;
@@ -131,6 +132,7 @@
       if (features.streaming && !s.streaming) return false;
       if (features.p2p && !s.p2p) return false;
       if (features.secure_core !== !!s.secure_core) return false;
+      if (features.tor && !s.tor) return false;
       return true;
     });
   })();
@@ -417,6 +419,8 @@
                   on:click={() => setFeature('p2p')}>⇄ P2P</button>
           <button class="filter-chip" class:active={features.secure_core}
                   on:click={() => setFeature('secure_core')}>🛡 Secure Core</button>
+          <button class="filter-chip" class:active={features.tor}
+                  on:click={() => setFeature('tor')}>🧅 Tor</button>
         </div>
       </div>
 
@@ -577,6 +581,7 @@
                         {#if s.streaming}<span class="srv-badge str">STR</span>{/if}
                         {#if s.p2p}<span class="srv-badge p2p">P2P</span>{/if}
                         {#if s.secure_core}<span class="srv-badge sc">SC</span>{/if}
+                        {#if s.tor}<span class="srv-badge tor">TOR</span>{/if}
                       </span>
                       <div class="load-bar"><div class="load-fill" style="width:{s.load}%;background:{loadBarColor(s.load)}"></div></div>
                       <span class="load-pct">{s.load}%</span>
@@ -706,6 +711,7 @@
   .srv-badge.str { background: rgba(155, 89, 182, .2); color: #b07cd6; }
   .srv-badge.p2p { background: rgba(46, 204, 113, .2); color: #2ecc71; }
   .srv-badge.sc { background: rgba(243, 156, 18, .2); color: #f39c12; }
+  .srv-badge.tor { background: rgba(124, 77, 255, .2); color: #9b59b6; }
 
   .load-bar { width: 50px; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; flex-shrink: 0; }
   .load-fill { height: 100%; }

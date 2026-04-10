@@ -160,7 +160,7 @@
       if (p) p.health = 'connecting';
       return [...list];
     });
-    const res = await api.connectProfile(profile.id);
+    const res = await api.connectProfile(profile.id, { smart_protocol: !!profile.options?.smart_protocol });
     if (res.error) {
       showToast(res.error, true);
       // Roll back to disconnected on error
@@ -274,8 +274,13 @@
       <span class="opt-summary">
         {#if profile.kill_switch}<span class="opt-pill ks-on" title="Kill switch enabled">🛡 KS</span>{/if}
         {#if (profile.options?.netshield ?? 0) > 0}
-          <span class="opt-pill ns-on" title="NetShield {netshieldLabel}">⛨ NS{profile.options.netshield}</span>
+          <span class="opt-pill ns-on" class:ns-active={connState === 'connected'}
+                title="NetShield {netshieldLabel}{connState === 'connected' ? ' — Active' : ''}">
+            ⛨ {connState === 'connected' ? netshieldLabel : 'NS' + profile.options.netshield}
+          </span>
         {/if}
+        {#if profile.options?.smart_protocol}<span class="opt-pill sp-on" title="Smart Protocol">⚡ SP</span>{/if}
+        {#if profile.server_scope?.features?.tor}<span class="opt-pill tor-on" title="Tor routing">🧅</span>{/if}
       </span>
       <span class="caret">{showOptions ? '▴' : '▾'}</span>
     </button>
@@ -301,9 +306,33 @@
           <span class="opt-label">VPN Accelerator</span>
           <span class="opt-value">{profile.options?.vpn_accelerator !== false ? 'On' : 'Off'}</span>
         </div>
+        {#if profile.options?.port}
+          <div class="opt-row">
+            <span class="opt-label">Port</span>
+            <span class="opt-value">{profile.options.port}</span>
+          </div>
+        {/if}
+        {#if profile.options?.custom_dns}
+          <div class="opt-row">
+            <span class="opt-label">Custom DNS</span>
+            <span class="opt-value">{profile.options.custom_dns}</span>
+          </div>
+        {/if}
+        {#if profile.options?.smart_protocol}
+          <div class="opt-row">
+            <span class="opt-label">Smart Protocol</span>
+            <span class="opt-value">On</span>
+          </div>
+        {/if}
         {#if profile.options?.secure_core}
           <div class="opt-row">
             <span class="opt-label">Secure Core</span>
+            <span class="opt-value">On</span>
+          </div>
+        {/if}
+        {#if profile.server_scope?.features?.tor}
+          <div class="opt-row">
+            <span class="opt-label">Tor</span>
             <span class="opt-value">On</span>
           </div>
         {/if}
@@ -374,6 +403,9 @@
   }
   .opt-pill.ks-on { background: rgba(46,204,113,.18); color: #2ecc71; }
   .opt-pill.ns-on { background: rgba(0,180,216,.18); color: #00b4d8; }
+  .opt-pill.ns-active { background: rgba(46,204,113,.2); color: #2ecc71; font-weight: 600; }
+  .opt-pill.sp-on { background: rgba(243,156,18,.18); color: #f39c12; }
+  .opt-pill.tor-on { background: rgba(155,89,182,.18); color: #9b59b6; }
   .caret { color: var(--fg3); font-size: .7rem; }
   .vpn-options {
     padding: 8px 16px 12px; background: var(--bg2); border-bottom: 1px solid var(--border);

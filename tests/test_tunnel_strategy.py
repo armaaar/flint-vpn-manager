@@ -181,6 +181,8 @@ class TestWireGuardStrategy:
             nat_pmp=False,
             vpn_accelerator=True,
             transport="udp",
+            port=None,
+            custom_dns=None,
         )
 
         # Router upload called with parsed WG fields
@@ -243,6 +245,8 @@ class TestWireGuardStrategy:
             vpn_accelerator=True,
             existing_wg_key="existing_ed25519_key",
             transport="udp",
+            port=None,
+            custom_dns=None,
         )
 
         # In-place update, not delete-recreate
@@ -302,6 +306,7 @@ class TestOpenVPNStrategy:
             moderate_nat=False,
             nat_pmp=False,
             vpn_accelerator=True,
+            port=None,
         )
 
         self.router.upload_openvpn_config.assert_called_once_with(
@@ -329,6 +334,7 @@ class TestOpenVPNStrategy:
             moderate_nat=False,
             nat_pmp=False,
             vpn_accelerator=True,
+            port=None,
         )
 
     def test_delete(self):
@@ -401,6 +407,7 @@ class TestOpenVPNStrategy:
             moderate_nat=False,
             nat_pmp=False,
             vpn_accelerator=True,
+            port=None,
         )
 
         # 4. Uploaded new config
@@ -524,6 +531,8 @@ class TestProtonWGStrategy:
             nat_pmp=False,
             vpn_accelerator=True,
             transport="tcp",
+            port=None,
+            custom_dns=None,
         )
 
         # Should upload via proton_wg path with socket_type
@@ -626,6 +635,8 @@ class TestProtonWGStrategy:
             vpn_accelerator=True,
             existing_wg_key="existing_ed25519_key",
             transport="tcp",
+            port=None,
+            custom_dns=None,
         )
 
         # Should write the conf file and apply with wg setconf

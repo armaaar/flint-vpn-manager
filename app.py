@@ -190,6 +190,11 @@ def api_unlock():
         except Exception as e:
             log.warning(f"Auto-restore check failed: {e}")
 
+        # Apply alternative routing setting
+        config = sm.get_config()
+        if config.get("alternative_routing") is False:
+            proton.set_alternative_routing(False)
+
         # Start device tracker and poll immediately so devices are ready
         tracker = start_tracker(router)
         tracker.poll_once()
@@ -357,6 +362,53 @@ def api_get_servers(profile_id):
     return jsonify(servers)
 
 
+@app.route("/api/available-ports")
+@require_unlocked
+def api_available_ports():
+    """Get available VPN ports per protocol."""
+    from proton_api import ProtonAPI
+    return jsonify(ProtonAPI.AVAILABLE_PORTS)
+
+
+@app.route("/api/location")
+@require_unlocked
+def api_get_location():
+    """Get the current physical location as seen by ProtonVPN.
+
+    Returns: {ip, country, isp, lat, lon}
+    """
+    proton = _get_service().proton
+    if not proton or not proton.is_logged_in:
+        return jsonify({"error": "Not logged into ProtonVPN"}), 400
+    try:
+        location = proton.get_location()
+        return jsonify(location)
+    except Exception as e:
+        log.warning(f"Location check failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/sessions")
+@require_unlocked
+def api_get_sessions():
+    """Get active VPN sessions for the Proton account.
+
+    Returns: {sessions: [{session_id, exit_ip, protocol}], max_connections: int}
+    """
+    proton = _get_service().proton
+    if not proton or not proton.is_logged_in:
+        return jsonify({"error": "Not logged into ProtonVPN"}), 400
+    try:
+        sessions = proton.get_sessions()
+        return jsonify({
+            "sessions": sessions,
+            "max_connections": 10,
+        })
+    except Exception as e:
+        log.warning(f"Sessions fetch failed: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/profiles/<profile_id>/server", methods=["PUT"])
 @require_unlocked
 def api_change_server(profile_id):
@@ -464,9 +516,14 @@ def api_change_protocol(profile_id):
 @app.route("/api/profiles/<profile_id>/connect", methods=["POST"])
 @require_unlocked
 def api_connect(profile_id):
-    """Bring a VPN profile's tunnel up."""
+    """Bring a VPN profile's tunnel up.
+
+    Body (optional): {smart_protocol: true} to enable automatic protocol fallback.
+    """
+    data = request.get_json(silent=True) or {}
+    smart = data.get("smart_protocol", False)
     try:
-        result = _get_service().connect_profile(profile_id)
+        result = _get_service().connect_profile(profile_id, smart_protocol=smart)
         return jsonify(result)
     except NotFoundError:
         return jsonify({"error": "VPN profile not found"}), 404

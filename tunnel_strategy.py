@@ -169,6 +169,8 @@ class WireGuardStrategy(TunnelStrategy):
             nat_pmp=options.get("nat_pmp", False),
             vpn_accelerator=options.get("vpn_accelerator", True),
             transport="udp",
+            port=options.get("port"),
+            custom_dns=options.get("custom_dns"),
         )
         wg = _parse_wg_config(config_str)
         router_info = router.upload_wireguard_config(
@@ -221,6 +223,8 @@ class WireGuardStrategy(TunnelStrategy):
             vpn_accelerator=options.get("vpn_accelerator", True),
             existing_wg_key=existing_wg_key,
             transport="udp",
+            port=options.get("port"),
+            custom_dns=options.get("custom_dns"),
         )
         wg = _parse_wg_config(config_str)
 
@@ -274,6 +278,7 @@ class OpenVPNStrategy(TunnelStrategy):
             moderate_nat=options.get("moderate_nat", False),
             nat_pmp=options.get("nat_pmp", False),
             vpn_accelerator=options.get("vpn_accelerator", True),
+            port=options.get("port"),
         )
         router_info = router.upload_openvpn_config(
             profile_name=profile_name,
@@ -367,6 +372,7 @@ class OpenVPNStrategy(TunnelStrategy):
             moderate_nat=options.get("moderate_nat", False),
             nat_pmp=options.get("nat_pmp", False),
             vpn_accelerator=options.get("vpn_accelerator", True),
+            port=options.get("port"),
         )
         new_ri = router.upload_openvpn_config(
             profile_name=profile["name"],
@@ -442,6 +448,8 @@ class ProtonWGStrategy(TunnelStrategy):
             nat_pmp=options.get("nat_pmp", False),
             vpn_accelerator=options.get("vpn_accelerator", True),
             transport=self.transport,
+            port=options.get("port"),
+            custom_dns=options.get("custom_dns"),
         )
         wg = _parse_wg_config(config_str)
         router_info = router.upload_proton_wg_config(
@@ -518,6 +526,8 @@ class ProtonWGStrategy(TunnelStrategy):
             vpn_accelerator=options.get("vpn_accelerator", True),
             existing_wg_key=existing_wg_key,
             transport=self.transport,
+            port=options.get("port"),
+            custom_dns=options.get("custom_dns"),
         )
         wg = _parse_wg_config(config_str)
 

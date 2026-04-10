@@ -17,6 +17,14 @@ A local web dashboard for managing ProtonVPN WireGuard and OpenVPN profiles on a
 - **LAN access control**: per-group and per-device firewall policies (allowed/group_only/blocked) with exception lists
 - **Kill switch**: per-group packet blackholing when tunnel drops (kernel WG via UCI, proton-wg via blackhole route)
 - **WireGuard Stealth/TLS**: traffic looks like normal HTTPS — hardest to detect and block
+- **Tor server routing**: filter and connect through ProtonVPN's Tor exit nodes for .onion access
+- **Port selection**: choose alternate ports per protocol (WG: 443/88/1224/51820/500/4500, OVPN UDP: 80/51820/4569/1194/5060, OVPN TCP: 443/7770/8443) when ISPs block defaults
+- **Smart Protocol**: automatic protocol fallback — if a tunnel doesn't connect within 45s, cycles through WireGuard → OpenVPN → WG TCP/TLS until one works
+- **Custom DNS**: per-profile DNS override (e.g. Pi-hole, AdGuard) instead of Proton's default resolver
+- **Alternative routing**: DNS-over-HTTPS transport fallback for API calls when Proton servers are blocked (censored networks)
+- **NetShield status**: prominent protection-level display on group cards (active indicator when connected)
+- **Location/IP check**: sidebar widget showing current public IP, country, and ISP as seen by ProtonVPN
+- **Active sessions**: view all connected VPN sessions on the Proton account with exit IP and protocol
 - **Live dashboard**: SSE-powered real-time tunnel health, device status, speeds
 - **Disaster recovery**: local state backed up to router, auto-restored on unlock
 - **GL.iNet compatible**: configs visible in the router's native dashboard as fallback
@@ -98,9 +106,9 @@ Fields with no router or Proton native source:
         "city": "Berlin" | null,
         "entry_country_code": "CH" | null,
         "server_id": "<pinned proton id>" | null,
-        "features": { "streaming": false, "p2p": false, "secure_core": false }
+        "features": { "streaming": false, "p2p": false, "secure_core": false, "tor": false }
       },
-      "options": { "netshield": 2, "moderate_nat": false, "nat_pmp": false, "vpn_accelerator": true, "secure_core": false },
+      "options": { "netshield": 2, "moderate_nat": false, "nat_pmp": false, "vpn_accelerator": true, "secure_core": false, "port": null, "custom_dns": null, "smart_protocol": false },
       "wg_key": "<base64 Ed25519 private key — WG profiles only>",
       "cert_expiry": 1807264162,
       "lan_access": {
@@ -247,6 +255,11 @@ The selection pipeline for non-pinned servers (scope.server_id is null):
 | **Anonymous section** | A `@rule[N]` route_policy section (positional reference) created when the GL.iNet UI edits one of our rules. We self-heal these back to `fvpn_rule_*` named sections by matching on `peer_id`/`client_id`. |
 | **proton-wg** | Userspace WireGuard binary (ProtonVPN's wireguard-go fork) that supports TCP and TLS transports. Cross-compiled for ARM64, lives at `/usr/bin/proton-wg` on the router. Managed entirely by FlintVPN (not vpn-client). |
 | **Persistent cert** | A 365-day WireGuard certificate from `POST /vpn/v1/certificate` with `Mode: "persistent"`. Each VPN profile gets its own Ed25519 key pair registered as a named "device" in Proton's dashboard. No local agent required — the router is fully standalone after config upload. |
+| **Smart Protocol** | Per-profile option. When enabled and a tunnel doesn't connect within 45 seconds, automatically cycles through alternate protocols (WG UDP → OVPN UDP → OVPN TCP → WG TCP → WG TLS) until one works. Checks slot availability before each attempt. |
+| **Custom DNS** | Per-profile DNS override. When set, replaces Proton's `10.2.0.1` resolver in the WG config. Disables NetShield DNS filtering (server-side cert features still apply but DNS queries go to the custom resolver). |
+| **Port Override** | Per-profile port selection. Alternate ports per protocol from Proton's `clientconfig`. Useful when ISPs block default VPN ports (51820 for WG, 1194 for OVPN). |
+| **Alternative Routing** | Global setting. When enabled (default), Proton API calls fall back to DNS-over-HTTPS routing through third-party infrastructure (Google/Quad9 DNS) when Proton servers are directly unreachable. Handled transparently by the `proton-vpn-api-core` library's `AutoTransport`. |
+| **Tor Server** | ProtonVPN server connected to the Tor network. Allows routing traffic through Tor exit nodes for `.onion` access without the Tor browser. Filtered via the `tor` feature flag in `server_scope.features`. |
 
 ## Backend Modules
 
@@ -260,7 +273,7 @@ Core orchestrator. `VPNService` class owns `build_profile_list`, profile CRUD (`
 Pure emitter `serialize_lan_state(store, device_ips, assignment_map)` produces a deterministic dict of desired UCI ipset + rule sections. `diff_state(live, desired)` computes a UCI batch + per-ipset add/remove ops. `sync_lan_to_router(router, ...)` orchestrates: reads live state via `router.fvpn_lan_full_state`, applies the diff via `router.fvpn_uci_apply` (membership-only ops skip the firewall reload). Replaces the legacy `router_api.generate_lan_rules` + the imperative `fvpn_lan` chain.
 
 ### `proton_api.py` — ProtonVPN wrapper
-Thin synchronous wrapper around `proton-vpn-api-core`. Login (with 2FA), server list, WG/OVPN config generation. WireGuard configs use **persistent-mode certificates** (365-day validity, `Mode: "persistent"` on `POST /vpn/v1/certificate`). Each VPN profile gets its own Ed25519 key pair registered as a named device in Proton's dashboard — no local agent required, the router is fully standalone after config upload. Key methods: `generate_wireguard_config()` (returns config + wg_key + cert_expiry), `refresh_wireguard_cert()` (renews without changing the key), `get_wireguard_x25519_key()` (derives WG key from stored Ed25519), `refresh_server_loads()` / `refresh_server_list()` (keep scores fresh), `get_server_entry_ips()` (resolve server IDs to physical IPs for latency probing). Certificate auto-refresh happens on unlock for certs within 30 days of expiry. All VPN options (NetShield, Moderate NAT, NAT-PMP, VPN Accelerator) work with both WireGuard (certificate features) and OpenVPN (username suffixes: `+f{level}`, `+nr`, `+pmp`, `+nst`).
+Thin synchronous wrapper around `proton-vpn-api-core`. Login (with 2FA), server list, WG/OVPN config generation. WireGuard configs use **persistent-mode certificates** (365-day validity, `Mode: "persistent"` on `POST /vpn/v1/certificate`). Each VPN profile gets its own Ed25519 key pair registered as a named device in Proton's dashboard — no local agent required, the router is fully standalone after config upload. Key methods: `generate_wireguard_config()` (returns config + wg_key + cert_expiry, accepts `port` and `custom_dns` overrides), `refresh_wireguard_cert()` (renews without changing the key), `get_wireguard_x25519_key()` (derives WG key from stored Ed25519), `refresh_server_loads()` / `refresh_server_list()` (keep scores fresh), `get_server_entry_ips()` (resolve server IDs to physical IPs for latency probing), `get_location()` (current IP/country/ISP via `/vpn/v1/location`), `get_sessions()` (active VPN sessions via `/vpn/v1/sessions`), `set_alternative_routing()` (enable/disable DoH transport fallback). Certificate auto-refresh happens on unlock for certs within 30 days of expiry. All VPN options (NetShield, Moderate NAT, NAT-PMP, VPN Accelerator) work with both WireGuard (certificate features) and OpenVPN (username suffixes: `+f{level}`, `+nr`, `+pmp`, `+nst`).
 
 ### `router_api.py` — Router SSH management
 SSH-based API (Paramiko + key auth) for the Flint 2. Manages WG/OVPN configs via UCI, route policy rules, ipset membership, firewall rules, DHCP leases, gl-clients metadata. Helpers: `get_flint_vpn_rules`, `get_device_assignments`, `get_tunnel_health`, `get_kill_switch`, `get_profile_name`, `rename_profile`, `reorder_vpn_rules`, `heal_anonymous_rule_section`, `_from_mac_tokens` (for case-preserving del_list). FlintVPN UCI helpers: `fvpn_uci_apply`, `fvpn_ipset_membership`, `fvpn_lan_full_state`, `fvpn_lan_wipe_all`. Also `read_file`/`write_file` for the disaster-recovery backup file at `/etc/fvpn/profile_store.bak.json`, and `get_router_fingerprint` (br-lan MAC) for the restore-on-unlock fingerprint check.
@@ -344,7 +357,7 @@ GET  /api/profiles/:id/servers          → ProtonVPN server list (filtered)
 PUT  /api/profiles/:id/server           → switch server (regenerate tunnel, carry over devices)
 PUT  /api/profiles/:id/protocol         → change VPN protocol (tear down + recreate tunnel)
 PUT  /api/profiles/:id/type             → change group type (VPN ↔ NoVPN ↔ NoInternet)
-POST /api/profiles/:id/connect          → bring tunnel up; returns live health
+POST /api/profiles/:id/connect          → bring tunnel up; body: {smart_protocol?: true}; returns live health
 POST /api/profiles/:id/disconnect       → bring tunnel down; returns live health
 PUT  /api/profiles/:id/guest            → set as guest group
 
@@ -357,6 +370,10 @@ PUT  /api/devices/:mac/lan-access       → set per-device LAN override + except
 POST /api/refresh                       → trigger device tracker poll + server score refresh
 POST /api/probe-latency                 → TCP latency probe from router {server_ids:[]} → {latencies:{id:ms}}
 GET  /api/stream                        → SSE: tunnel_health + kill_switch + profile_names + devices (10s)
+
+GET  /api/location                      → current public IP/country/ISP via Proton's /vpn/v1/location
+GET  /api/sessions                      → active VPN sessions {sessions:[], max_connections: int}
+GET  /api/available-ports               → available VPN ports per protocol
 
 GET  /api/logs                          → list log files
 GET  /api/logs/:name                    → tail log content

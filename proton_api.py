@@ -73,6 +73,33 @@ class ProtonAPI:
         self._sync_2fa = sync_wrapper(self._api.submit_2fa_code)
         self._sync_logout = sync_wrapper(self._api.logout)
 
+    def set_alternative_routing(self, enabled: bool):
+        """Enable or disable alternative routing (DoH-based transport fallback).
+
+        When enabled (default), API calls automatically fall back to
+        DNS-over-HTTPS routing through third-party infrastructure when
+        Proton's servers are directly unreachable. Useful in censored networks.
+        """
+        try:
+            session = self._api._session_holder.session
+            if hasattr(session, '_transport'):
+                transport = session._transport
+                if hasattr(transport, 'transport_choices'):
+                    from proton.session.transports.aiohttp import AiohttpTransport
+                    from proton.session.transports.alternativerouting import AlternativeRoutingTransport
+                    if enabled:
+                        transport.transport_choices = [
+                            (0, AiohttpTransport),
+                            (5, AlternativeRoutingTransport),
+                        ]
+                    else:
+                        transport.transport_choices = [
+                            (0, AiohttpTransport),
+                        ]
+                    log.info(f"Alternative routing {'enabled' if enabled else 'disabled'}")
+        except Exception as e:
+            log.warning(f"Failed to set alternative routing: {e}")
+
     @property
     def is_logged_in(self) -> bool:
         return self._api.is_user_logged_in()
@@ -232,6 +259,13 @@ class ProtonAPI:
     # WireGuard port by transport mode
     WG_PORTS = {"udp": 51820, "tcp": 443, "tls": 443}
 
+    # Available alternate ports per protocol (from Proton's /vpn/v2/clientconfig)
+    AVAILABLE_PORTS = {
+        "wireguard": {"udp": [443, 88, 1224, 51820, 500, 4500]},
+        "wireguard-tcp": {"tcp": [443], "tls": [443]},
+        "openvpn": {"udp": [80, 51820, 4569, 1194, 5060], "tcp": [443, 7770, 8443]},
+    }
+
     def generate_wireguard_config(
         self,
         server: LogicalServer,
@@ -242,6 +276,8 @@ class ProtonAPI:
         vpn_accelerator: bool = True,
         existing_wg_key: Optional[str] = None,
         transport: str = "udp",
+        port: Optional[int] = None,
+        custom_dns: Optional[str] = None,
     ) -> tuple[str, dict, str, int]:
         """Generate a WireGuard .conf with a persistent (365-day) certificate.
 
@@ -284,8 +320,9 @@ class ProtonAPI:
 
         # 2. Build the WireGuard config
         physical = server.get_random_physical_server()
-        dns = NETSHIELD_DNS.get(netshield, "10.2.0.1")
-        port = self.WG_PORTS.get(transport, 51820)
+        dns = custom_dns if custom_dns else NETSHIELD_DNS.get(netshield, "10.2.0.1")
+        if port is None:
+            port = self.WG_PORTS.get(transport, 51820)
 
         config_lines = [
             "[Interface]",
@@ -407,6 +444,7 @@ class ProtonAPI:
         moderate_nat: bool = False,
         nat_pmp: bool = False,
         vpn_accelerator: bool = True,
+        port: Optional[int] = None,
     ) -> tuple[str, dict]:
         """Generate an OpenVPN .ovpn config for a server.
 
@@ -445,11 +483,13 @@ class ProtonAPI:
 
         # Port selection based on protocol
         if protocol == "tcp":
-            port = 443
             proto = "tcp"
+            if port is None:
+                port = 443
         else:
-            port = 1194
             proto = "udp"
+            if port is None:
+                port = 1194
 
         # CA cert from the official ProtonVPN SDK (2019, valid until 2039)
         ca_cert = CA_CERT.strip()
@@ -531,6 +571,50 @@ aeb893d9a96d1f15519bb3c4dcb40ee3
                 continue
         return result
 
+    def get_location(self) -> dict:
+        """Get the current physical location as seen by ProtonVPN.
+
+        Calls ``GET /vpn/v1/location`` which returns the exit IP, country,
+        and ISP as seen from Proton's servers.
+
+        Returns:
+            Dict with keys: ip, country, isp, lat, lon.
+        """
+        session = self._api._session_holder.session
+        resp = session.api_request("/vpn/v1/location")
+        return {
+            "ip": resp.get("IP", ""),
+            "country": resp.get("Country", ""),
+            "isp": resp.get("ISP", ""),
+            "lat": resp.get("Lat"),
+            "lon": resp.get("Long"),
+        }
+
+    def get_sessions(self) -> list:
+        """Get the list of active VPN sessions.
+
+        Calls ``GET /vpn/v1/sessions`` which returns all currently connected
+        VPN sessions for the user's account.
+
+        Returns:
+            List of dicts with keys: session_id, exit_ip, protocol.
+        """
+        session = self._api._session_holder.session
+        resp = session.api_request("/vpn/v1/sessions")
+        sessions_raw = resp.get("Sessions", [])
+        return [
+            {
+                "session_id": s.get("SessionID", ""),
+                "exit_ip": s.get("ExitIP", ""),
+                "protocol": s.get("Protocol", ""),
+            }
+            for s in sessions_raw
+        ]
+
+    def get_available_ports(self) -> dict:
+        """Return the available ports per protocol for the port selection UI."""
+        return dict(self.AVAILABLE_PORTS)
+
     def server_to_dict(self, server: LogicalServer) -> dict:
         """Public wrapper around _server_to_dict for callers that resolve
         a LogicalServer to a JSON-serializable dict on demand (Stage 7)."""
@@ -553,4 +637,5 @@ aeb893d9a96d1f15519bb3c4dcb40ee3
             "secure_core": ServerFeatureEnum.SECURE_CORE in server.features,
             "streaming": ServerFeatureEnum.STREAMING in server.features,
             "p2p": ServerFeatureEnum.P2P in server.features,
+            "tor": ServerFeatureEnum.TOR in server.features,
         }

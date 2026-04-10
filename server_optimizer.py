@@ -74,6 +74,7 @@ def filter_servers_by_scope(scope: dict, servers: list) -> list:
     want_streaming = bool(features.get("streaming"))
     want_p2p = bool(features.get("p2p"))
     want_secure_core = bool(features.get("secure_core"))
+    want_tor = bool(features.get("tor"))
 
     out = []
     for s in servers:
@@ -83,6 +84,8 @@ def filter_servers_by_scope(scope: dict, servers: list) -> list:
             continue
         # secure_core is binary: enabled = SC servers only, disabled = non-SC only
         if want_secure_core != bool(s.get("secure_core")):
+            continue
+        if want_tor and not s.get("tor"):
             continue
 
         cc = scope.get("country_code")

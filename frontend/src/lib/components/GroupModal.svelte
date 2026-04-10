@@ -36,6 +36,9 @@
   let accelerator = true;
   let moderateNat = false;
   let natPmp = false;
+  let portOverride = '';  // '' = default, or specific port number
+  let customDns = '';     // '' = Proton DNS, or custom DNS IP
+  let smartProtocol = false;
   let lanOutbound = 'allowed', lanInbound = 'allowed';
   let lanOutboundAllow = [];
   let lanInboundAllow = [];
@@ -45,7 +48,7 @@
   // Edit-mode change detection
   let initialType = 'vpn';
   let initialProto = 'wireguard';
-  let initialOptions = { killSwitch: true, netshield: '2', accelerator: true, moderateNat: false, natPmp: false };
+  let initialOptions = { killSwitch: true, netshield: '2', accelerator: true, moderateNat: false, natPmp: false, portOverride: '', customDns: '' };
 
   $: typeChanged = mode === 'edit' && type !== initialType;
   $: protocolChanged = mode === 'edit' && type === 'vpn' && vpnProtocol !== initialProto;
@@ -53,7 +56,9 @@
     netshield !== initialOptions.netshield ||
     accelerator !== initialOptions.accelerator ||
     moderateNat !== initialOptions.moderateNat ||
-    natPmp !== initialOptions.natPmp
+    natPmp !== initialOptions.natPmp ||
+    portOverride !== initialOptions.portOverride ||
+    customDns !== initialOptions.customDns
   );
 
   // ── Helpers ───────────────────────────────────────────────────────────
@@ -100,7 +105,10 @@
     accelerator = opts.vpn_accelerator !== false;
     moderateNat = !!opts.moderate_nat;
     natPmp = !!opts.nat_pmp;
-    initialOptions = { killSwitch, netshield, accelerator, moderateNat, natPmp };
+    portOverride = opts.port ? String(opts.port) : '';
+    customDns = opts.custom_dns || '';
+    smartProtocol = !!opts.smart_protocol;
+    initialOptions = { killSwitch, netshield, accelerator, moderateNat, natPmp, portOverride, customDns, smartProtocol };
     // Protocol
     const curProto = liveProfile.router_info?.vpn_protocol || 'wireguard';
     if (curProto === 'wireguard-tls') { vpnProtocol = 'wireguard-tcp'; wgTcpTransport = 'tls'; }
@@ -117,6 +125,7 @@
     type = 'vpn'; name = ''; icon = '🔒'; color = '#00aaff'; isGuest = false;
     vpnProtocol = 'wireguard'; wgTcpTransport = 'tcp'; ovpnProtocol = 'udp';
     killSwitch = true; netshield = '2'; accelerator = true; moderateNat = false; natPmp = false;
+    portOverride = ''; customDns = ''; smartProtocol = false;
     lanOutbound = 'allowed'; lanInbound = 'allowed';
     lanOutboundAllow = []; lanInboundAllow = [];
     error = '';
@@ -138,12 +147,16 @@
 
   // ── Submit ────────────────────────────────────────────────────────────
   function buildVpnOptions() {
-    return {
+    const opts = {
       netshield: parseInt(netshield),
       vpn_accelerator: accelerator,
       moderate_nat: moderateNat,
       nat_pmp: natPmp,
     };
+    if (portOverride) opts.port = parseInt(portOverride);
+    if (customDns.trim()) opts.custom_dns = customDns.trim();
+    if (smartProtocol) opts.smart_protocol = true;
+    return opts;
   }
 
   function effectiveProtocol() {
@@ -488,6 +501,54 @@
           </label>
           <HelpTooltip title="NAT-PMP (Port Forwarding)">
             <p>Lets apps inside the tunnel accept incoming connections. Turn on for torrent seeding or hosting.</p>
+          </HelpTooltip>
+        </div>
+        <div class="form-group" style="margin-top:8px">
+          <label for="gm-port" class="opt-label-with-help">
+            Port
+            <HelpTooltip title="Port Override">
+              <p>Use a non-default port when your ISP blocks the standard VPN port. Leave as Default unless connections fail.</p>
+            </HelpTooltip>
+          </label>
+          <select id="gm-port" bind:value={portOverride}>
+            <option value="">Default</option>
+            {#if vpnProtocol === 'wireguard'}
+              {#each [443, 88, 1224, 51820, 500, 4500] as p}
+                <option value={String(p)}>{p} UDP</option>
+              {/each}
+            {:else if vpnProtocol === 'wireguard-tcp'}
+              <option value="443">443 TCP</option>
+            {:else if vpnProtocol === 'openvpn' && ovpnProtocol === 'udp'}
+              {#each [80, 51820, 4569, 1194, 5060] as p}
+                <option value={String(p)}>{p} UDP</option>
+              {/each}
+            {:else if vpnProtocol === 'openvpn' && ovpnProtocol === 'tcp'}
+              {#each [443, 7770, 8443] as p}
+                <option value={String(p)}>{p} TCP</option>
+              {/each}
+            {/if}
+          </select>
+        </div>
+        <div class="form-group" style="margin-top:8px">
+          <label for="gm-dns" class="opt-label-with-help">
+            Custom DNS
+            <HelpTooltip title="Custom DNS">
+              <p>Override Proton's DNS with your own resolver (e.g. Pi-hole, AdGuard). Leave blank to use Proton's DNS (required for NetShield to work).</p>
+            </HelpTooltip>
+          </label>
+          <input id="gm-dns" bind:value={customDns} placeholder="e.g. 1.1.1.1 or leave blank for Proton DNS">
+          {#if customDns.trim() && parseInt(netshield) > 0}
+            <div class="opt-warning">Custom DNS overrides NetShield. DNS-level ad/tracker blocking won't work with a custom resolver.</div>
+          {/if}
+        </div>
+        <div class="option-item">
+          <input type="checkbox" id="gm-smart" bind:checked={smartProtocol}>
+          <label for="gm-smart">
+            Smart Protocol
+            <span class="opt-hint">— auto-try other protocols if connection fails</span>
+          </label>
+          <HelpTooltip title="Smart Protocol">
+            <p>When enabled, if the tunnel doesn't connect within 45 seconds, FlintVPN automatically tries alternate protocols (WireGuard, OpenVPN, WG TCP/TLS) until one works.</p>
           </HelpTooltip>
         </div>
         {#if mode === 'edit' && optionsChanged && !protocolChanged}

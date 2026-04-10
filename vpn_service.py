@@ -1109,10 +1109,29 @@ class VPNService:
 
     # ── Tunnel Control ───────────────────────────────────────────────────────
 
-    def connect_profile(self, profile_id):
+    # Smart Protocol fallback order: try alternate protocols when connection fails.
+    # Each entry is (protocol_str, transport_hint). Only protocols with available
+    # slots are attempted.
+    SMART_PROTOCOL_CHAIN = [
+        (PROTO_WIREGUARD, "udp"),
+        (PROTO_OPENVPN, "udp"),
+        (PROTO_OPENVPN, "tcp"),
+        (PROTO_WIREGUARD_TCP, "tcp"),
+        (PROTO_WIREGUARD_TLS, "tls"),
+    ]
+
+    SMART_CONNECT_TIMEOUT = 45  # seconds to wait before trying next protocol
+
+    def connect_profile(self, profile_id, smart_protocol=False):
         """Bring a VPN profile's tunnel up.
 
-        Returns dict with success and health.
+        Args:
+            profile_id: Profile UUID.
+            smart_protocol: If True and the connection doesn't establish within
+                SMART_CONNECT_TIMEOUT seconds, automatically try alternate
+                protocols until one connects.
+
+        Returns dict with success, health, and optionally protocol_changed.
 
         Raises:
             NotFoundError: If the profile is not found or not VPN.
@@ -1133,10 +1152,100 @@ class VPNService:
             strategy = get_strategy(proto)
             health = strategy.connect(self.router, ri)
             log.info(f"Profile '{profile['name']}' connect issued (health={health})")
-            return {"success": True, "health": health}
+
+            if not smart_protocol:
+                return {"success": True, "health": health}
+
+            # Smart Protocol: wait and check if connection establishes
+            import time as _time
+            if health in (HEALTH_GREEN, HEALTH_AMBER):
+                return {"success": True, "health": health}
+
+            deadline = _time.time() + self.SMART_CONNECT_TIMEOUT
+            while _time.time() < deadline:
+                _time.sleep(5)
+                health = strategy.get_health(self.router, ri)
+                if health in (HEALTH_GREEN, HEALTH_AMBER):
+                    return {"success": True, "health": health}
+
+            # Connection didn't establish — try alternate protocols
+            log.info(f"Smart Protocol: '{profile['name']}' failed with {proto}, trying alternatives")
+            strategy.disconnect(self.router, ri)
+
+            attempted = self._smart_protocol_fallback(profile_id, proto)
+            if attempted:
+                return {"success": True, "health": attempted["health"],
+                        "protocol_changed": attempted["protocol"]}
+
+            # All protocols failed — reconnect with original
+            log.warning(f"Smart Protocol: all alternatives failed for '{profile['name']}', reverting to {proto}")
+            strategy.connect(self.router, ri)
+            return {"success": False, "health": HEALTH_CONNECTING,
+                    "error": "Connection failed with all protocols"}
+
         except Exception as e:
             log.error(f"Failed to connect profile '{profile['name']}': {e}", exc_info=True)
             raise
+
+    def _smart_protocol_fallback(self, profile_id, current_proto):
+        """Try alternate protocols for a profile. Returns {health, protocol} or None."""
+        import time as _time
+
+        for proto, transport in self.SMART_PROTOCOL_CHAIN:
+            if proto == current_proto:
+                continue
+
+            # Check slot availability
+            store_data = ps.load()
+            existing = store_data.get("profiles", [])
+            if proto == PROTO_WIREGUARD:
+                count = len([p for p in existing if p["type"] == PROFILE_TYPE_VPN
+                             and p.get("router_info", {}).get("vpn_protocol") == PROTO_WIREGUARD
+                             and p["id"] != profile_id])
+                if count >= self.MAX_WG_GROUPS:
+                    continue
+            elif proto in (PROTO_WIREGUARD_TCP, PROTO_WIREGUARD_TLS):
+                count = len([p for p in existing if p["type"] == PROFILE_TYPE_VPN
+                             and (p.get("router_info", {}).get("vpn_protocol") or "").startswith("wireguard-")
+                             and p["id"] != profile_id])
+                if count >= self.MAX_PWG_GROUPS:
+                    continue
+            elif proto == PROTO_OPENVPN:
+                count = len([p for p in existing if p.get("router_info", {}).get("vpn_protocol") == PROTO_OPENVPN
+                             and p["id"] != profile_id])
+                if count >= self.MAX_OVPN_GROUPS:
+                    continue
+
+            log.info(f"Smart Protocol: trying {proto} for profile {profile_id}")
+            try:
+                result = self.change_protocol(
+                    profile_id, proto,
+                    ovpn_protocol=transport if proto == PROTO_OPENVPN else "udp",
+                )
+                if not result:
+                    continue
+
+                # Wait for new tunnel to establish
+                profile = ps.get_profile(profile_id)
+                ri = profile.get("router_info", {})
+                strategy = get_strategy(proto)
+
+                health = strategy.connect(self.router, ri)
+                deadline = _time.time() + self.SMART_CONNECT_TIMEOUT
+                while _time.time() < deadline:
+                    if health in (HEALTH_GREEN, HEALTH_AMBER):
+                        log.info(f"Smart Protocol: {proto} connected for profile {profile_id}")
+                        return {"health": health, "protocol": proto}
+                    _time.sleep(5)
+                    health = strategy.get_health(self.router, ri)
+
+                # Didn't connect — disconnect and try next
+                strategy.disconnect(self.router, ri)
+            except Exception as e:
+                log.warning(f"Smart Protocol: {proto} failed for profile {profile_id}: {e}")
+                continue
+
+        return None
 
     def disconnect_profile(self, profile_id):
         """Bring a VPN profile's tunnel down.

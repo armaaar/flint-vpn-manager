@@ -25,7 +25,7 @@ export const api = {
   updateProfile: (id, data) => request(`/api/profiles/${id}`, { method: 'PUT', body: data }),
   reorderProfiles: (profileIds) => request('/api/profiles/reorder', { method: 'PUT', body: { profile_ids: profileIds } }),
   deleteProfile: (id) => request(`/api/profiles/${id}`, { method: 'DELETE' }),
-  connectProfile: (id) => request(`/api/profiles/${id}/connect`, { method: 'POST' }),
+  connectProfile: (id, opts) => request(`/api/profiles/${id}/connect`, { method: 'POST', body: opts || {} }),
   disconnectProfile: (id) => request(`/api/profiles/${id}/disconnect`, { method: 'POST' }),
   setGuestProfile: (id) => request(`/api/profiles/${id}/guest`, { method: 'PUT' }),
   changeServer: (id, data) => request(`/api/profiles/${id}/server`, { method: 'PUT', body: data }),
@@ -55,8 +55,15 @@ export const api = {
   addToFavourites: (serverId) => request(`/api/settings/server-preferences/favourites/${encodeURIComponent(serverId)}`, { method: 'POST' }),
   removeFromFavourites: (serverId) => request(`/api/settings/server-preferences/favourites/${encodeURIComponent(serverId)}`, { method: 'DELETE' }),
 
+  // Ports
+  getAvailablePorts: () => request('/api/available-ports'),
+
   // Latency Probing
   probeLatency: (serverIds) => request('/api/probe-latency', { method: 'POST', body: { server_ids: serverIds } }),
+
+  // Location & Sessions
+  getLocation: () => request('/api/location'),
+  getSessions: () => request('/api/sessions'),
 
   // Refresh
   refresh: () => request('/api/refresh', { method: 'POST' }),
