@@ -375,6 +375,81 @@ def api_change_server(profile_id):
         return jsonify({"error": f"Failed to switch server: {e}"}), 500
 
 
+@app.route("/api/profiles/<profile_id>/type", methods=["PUT"])
+@require_unlocked
+def api_change_type(profile_id):
+    """Change the group type of a profile (VPN ↔ NoVPN ↔ NoInternet).
+
+    Body: {type, vpn_protocol?, server_id?, options?, kill_switch?,
+           server_scope?, ovpn_protocol?}
+    """
+    data = request.json or {}
+    new_type = data.get("type")
+    if not new_type:
+        return jsonify({"error": "type required"}), 400
+
+    try:
+        profile = _get_service().change_type(
+            profile_id, new_type,
+            vpn_protocol=data.get("vpn_protocol", "wireguard"),
+            server_id=data.get("server_id"),
+            options=data.get("options"),
+            kill_switch=data.get("kill_switch", True),
+            server_scope=data.get("server_scope"),
+            ovpn_protocol=data.get("ovpn_protocol", "udp"),
+        )
+        return jsonify(profile)
+    except NotFoundError:
+        return jsonify({"error": "Profile not found"}), 404
+    except LimitExceededError as e:
+        return jsonify({"error": str(e)}), 400
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except NotLoggedInError as e:
+        return jsonify({"error": str(e)}), 400
+    except (RuntimeError, ConflictError) as e:
+        return jsonify({"error": str(e)}), 409
+    except Exception as e:
+        log.error(f"Failed to change type: {e}", exc_info=True)
+        return jsonify({"error": f"Failed to change type: {e}"}), 500
+
+
+@app.route("/api/profiles/<profile_id>/protocol", methods=["PUT"])
+@require_unlocked
+def api_change_protocol(profile_id):
+    """Change the VPN protocol of a profile.
+
+    Body: {vpn_protocol, server_id?, options?, server_scope?, ovpn_protocol?}
+    """
+    data = request.json or {}
+    new_proto = data.get("vpn_protocol")
+    if not new_proto:
+        return jsonify({"error": "vpn_protocol required"}), 400
+
+    try:
+        profile = _get_service().change_protocol(
+            profile_id, new_proto,
+            server_id=data.get("server_id"),
+            options=data.get("options"),
+            server_scope=data.get("server_scope"),
+            ovpn_protocol=data.get("ovpn_protocol", "udp"),
+        )
+        return jsonify(profile)
+    except NotFoundError:
+        return jsonify({"error": "Profile not found"}), 404
+    except LimitExceededError as e:
+        return jsonify({"error": str(e)}), 400
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except (RuntimeError, ConflictError) as e:
+        return jsonify({"error": str(e)}), 409
+    except NotLoggedInError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log.error(f"Failed to change protocol: {e}", exc_info=True)
+        return jsonify({"error": f"Failed to change protocol: {e}"}), 500
+
+
 # ── Tunnel Control ────────────────────────────────────────────────────────────
 
 @app.route("/api/profiles/<profile_id>/connect", methods=["POST"])

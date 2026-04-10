@@ -637,15 +637,15 @@ class TestBuildProfileList:
         assert orphans[0]["name"] == "Unknown"
         assert orphans[0]["id"] == "fvpn_rule_9050"  # rule_name as fallback id
 
-    def test_get_profiles_includes_non_vpn_after_vpn(self, unlocked_client):
+    def test_get_profiles_respects_display_order(self, unlocked_client):
         c, app_mod = unlocked_client
         ps.save({
             **ps._EMPTY_STORE,
             "profiles": [
                 {"id": "novpn-1", "type": "no_vpn", "name": "Direct",
-                 "color": "#888", "icon": "🌐", "is_guest": False, "display_order": 1},
+                 "color": "#888", "icon": "🌐", "is_guest": False, "display_order": 0},
                 {"id": "vpn-1", "type": "vpn", "name": "VPN-A",
-                 "color": "#000", "icon": "🔒", "is_guest": False,
+                 "color": "#000", "icon": "🔒", "is_guest": False, "display_order": 1,
                  "router_info": {"rule_name": "fvpn_rule_9001",
                                  "peer_id": "9001", "vpn_protocol": "wireguard"}},
             ],
@@ -657,8 +657,8 @@ class TestBuildProfileList:
         )
         resp = c.get("/api/profiles")
         types = [p["type"] for p in resp.json]
-        # VPN must come before non-VPN
-        assert types == ["vpn", "no_vpn"]
+        # With unified ordering, display_order determines the order
+        assert types == ["no_vpn", "vpn"]
 
     def test_get_profiles_device_count_from_router(self, unlocked_client):
         c, app_mod = unlocked_client

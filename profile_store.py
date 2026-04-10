@@ -354,6 +354,10 @@ def create_profile(
             if v is not None:
                 profile[k] = v
 
+    # Assign display_order: append after all existing profiles
+    max_order = max((p.get("display_order", -1) for p in data["profiles"]), default=-1)
+    profile["display_order"] = max_order + 1
+
     data["profiles"].append(profile)
 
     if is_guest:

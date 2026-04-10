@@ -380,6 +380,9 @@ class ProtonAPI:
         server: LogicalServer,
         protocol: str = "udp",
         netshield: int = 0,
+        moderate_nat: bool = False,
+        nat_pmp: bool = False,
+        vpn_accelerator: bool = True,
     ) -> tuple[str, dict]:
         """Generate an OpenVPN .ovpn config for a server.
 
@@ -391,6 +394,9 @@ class ProtonAPI:
             server: LogicalServer to connect to
             protocol: "udp" or "tcp"
             netshield: 0=off, 1=malware, 2=malware+ads (encoded in username suffix)
+            moderate_nat: Enable moderate NAT (gaming)
+            nat_pmp: Enable NAT-PMP port forwarding
+            vpn_accelerator: Enable VPN Accelerator (split TCP)
 
         Returns:
             Tuple of (config_string, server_info_dict, username, password).
@@ -398,13 +404,18 @@ class ProtonAPI:
         physical = server.get_random_physical_server()
         username, password = self.get_openvpn_credentials()
 
-        # ProtonVPN encodes NetShield and other features in the username suffix
-        # +f1 = NetShield malware, +f2 = NetShield malware+ads
+        # ProtonVPN encodes features in the username suffix (same as official client).
+        # Suffixes: +f{level} NetShield, +nr moderate NAT, +pmp port forwarding,
+        # +nst disable VPN Accelerator (split TCP).
         suffix = ""
-        if netshield == 1:
-            suffix += "+f1"
-        elif netshield == 2:
-            suffix += "+f2"
+        if netshield:
+            suffix += f"+f{netshield}"
+        if moderate_nat:
+            suffix += "+nr"
+        if nat_pmp:
+            suffix += "+pmp"
+        if not vpn_accelerator:
+            suffix += "+nst"
 
         ovpn_username = username + suffix
 

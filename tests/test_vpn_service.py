@@ -174,11 +174,12 @@ class TestBuildProfileList:
         assert "_ghost" not in p
 
     @patch("vpn_service.ps.load")
-    def test_non_vpn_after_vpn_sorted_by_display_order(self, mock_load, service, mock_router):
-        """Non-VPN profiles come after VPN, sorted by display_order."""
+    def test_unified_display_order_sorts_all_profiles(self, mock_load, service, mock_router):
+        """All profiles are sorted by display_order regardless of type."""
         vpn = _make_local_vpn_profile(peer_id="9001", profile_id="vpn-1")
+        vpn["display_order"] = 1
         novpn_b = _make_non_vpn_profile(profile_id="novpn-b", name="B", display_order=2)
-        novpn_a = _make_non_vpn_profile(profile_id="novpn-a", name="A", display_order=1)
+        novpn_a = _make_non_vpn_profile(profile_id="novpn-a", name="A", display_order=0)
 
         mock_load.return_value = _store_data(profiles=[vpn, novpn_b, novpn_a])
         mock_router.get_flint_vpn_rules.return_value = [
@@ -188,8 +189,8 @@ class TestBuildProfileList:
         result = service.build_profile_list()
 
         assert len(result) == 3
-        assert result[0]["type"] == PROFILE_TYPE_VPN
-        assert result[1]["id"] == "novpn-a"  # display_order=1
+        assert result[0]["id"] == "novpn-a"  # display_order=0
+        assert result[1]["type"] == PROFILE_TYPE_VPN  # display_order=1
         assert result[2]["id"] == "novpn-b"  # display_order=2
 
     @patch("vpn_service.ps.load")

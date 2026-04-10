@@ -5,8 +5,7 @@
   import { dndzone } from 'svelte-dnd-action';
   import GroupCard from './GroupCard.svelte';
   import DeviceModal from './DeviceModal.svelte';
-  import CreateGroupModal from './CreateGroupModal.svelte';
-  import EditGroupModal from './EditGroupModal.svelte';
+  import GroupModal from './GroupModal.svelte';
   import ServerPicker from './ServerPicker.svelte';
   import SettingsModal from './SettingsModal.svelte';
   import LogsModal from './LogsModal.svelte';
@@ -235,8 +234,8 @@
 
 <!-- Modals -->
 <DeviceModal device={selectedDevice} on:close={() => selectedDevice = null} on:reload={reload} />
-<CreateGroupModal bind:visible={showCreate} onNeedServer={handleNeedServer} on:reload={reload} />
-<EditGroupModal bind:profile={editProfile} on:reload={reload} />
+<GroupModal bind:visible={showCreate} onNeedServer={handleNeedServer} on:reload={reload} />
+<GroupModal bind:profile={editProfile} on:reload={reload} />
 <ServerPicker bind:visible={showServerPicker} profileId={serverPickerProfileId} vpnProtocol={serverPickerProtocol} on:select={handleServerSelect} on:close={() => showServerPicker = false} />
 <SettingsModal bind:visible={showSettings} />
 <LogsModal bind:visible={showLogs} />

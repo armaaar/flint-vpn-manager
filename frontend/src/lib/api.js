@@ -29,6 +29,8 @@ export const api = {
   disconnectProfile: (id) => request(`/api/profiles/${id}/disconnect`, { method: 'POST' }),
   setGuestProfile: (id) => request(`/api/profiles/${id}/guest`, { method: 'PUT' }),
   changeServer: (id, data) => request(`/api/profiles/${id}/server`, { method: 'PUT', body: data }),
+  changeType: (id, data) => request(`/api/profiles/${id}/type`, { method: 'PUT', body: data }),
+  changeProtocol: (id, data) => request(`/api/profiles/${id}/protocol`, { method: 'PUT', body: data }),
   setProfileLanAccess: (id, data) => request(`/api/profiles/${id}/lan-access`, { method: 'PUT', body: data }),
 
   // Servers

@@ -271,6 +271,9 @@ class OpenVPNStrategy(TunnelStrategy):
             server,
             protocol=ovpn_proto,
             netshield=options.get("netshield", 0),
+            moderate_nat=options.get("moderate_nat", False),
+            nat_pmp=options.get("nat_pmp", False),
+            vpn_accelerator=options.get("vpn_accelerator", True),
         )
         router_info = router.upload_openvpn_config(
             profile_name=profile_name,
@@ -361,6 +364,9 @@ class OpenVPNStrategy(TunnelStrategy):
             server,
             protocol=ovpn_proto,
             netshield=options.get("netshield", 0),
+            moderate_nat=options.get("moderate_nat", False),
+            nat_pmp=options.get("nat_pmp", False),
+            vpn_accelerator=options.get("vpn_accelerator", True),
         )
         new_ri = router.upload_openvpn_config(
             profile_name=profile["name"],

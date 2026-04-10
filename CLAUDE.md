@@ -131,11 +131,11 @@ Fields with no router or Proton native source:
 ```
 
 Notes:
-- VPN profiles have **no** `name` field (read live from router) and **no** `display_order` (router section order).
+- VPN profiles have **no** `name` field (read live from router).
 - VPN profiles have **no** `status` or `kill_switch` fields (read live).
+- All profiles (VPN and non-VPN) use `display_order` for unified dashboard ordering. Groups can be freely interleaved regardless of type or protocol.
 - `device_assignments` only contains non-VPN assignments. VPN device→profile lookup goes through `router.get_device_assignments()` which parses `from_mac` lists.
 - Display name precedence for devices: `gl-client.alias` (router-canonical custom label) → DHCP hostname → MAC.
-- Non-VPN profiles always render after VPN profiles in the dashboard, sorted among themselves by `display_order`.
 
 ### Why some things stay local
 
@@ -151,8 +151,8 @@ Notes:
 
 ## Source-of-Truth Sync Mechanisms
 
-### `build_profile_list(router, store_data, proton)` — `app.py`
-Single function that produces the canonical profile list. Iterates `router.get_flint_vpn_rules()` first, merges in local UI metadata by stable `(vpn_protocol, peer_id|client_id)` key (so renamed sections still match), resolves server info live via `_resolve_server_live(proton, ...)`. Returns VPN profiles in router section order followed by non-VPN sorted by `display_order`. Detects:
+### `build_profile_list(router, store_data, proton)` — `vpn_service.py`
+Single function that produces the canonical profile list. Iterates `router.get_flint_vpn_rules()` first, merges in local UI metadata by stable `(vpn_protocol, peer_id|client_id)` key (so renamed sections still match), resolves server info live via `_resolve_server_live(proton, ...)`. Final output is sorted by `display_order` (unified ordering across all profile types — VPN and non-VPN can be freely interleaved). Detects:
 - **Ghost profiles**: local profile whose router rule was deleted out from under us → `_ghost: true`, `health: red`
 - **Orphan profiles**: router rule with no matching local metadata → `_orphan: true`
 - **Anonymous-section healing**: when GL.iNet UI replaces `fvpn_rule_9001` with `@rule[N]`, the matcher finds it by `peer_id`/`client_id` and `router.heal_anonymous_rule_section()` issues `uci rename` to restore the canonical name on the next read
@@ -231,13 +231,16 @@ Background thread. At a configured time of day (within a 2-minute window to tole
 ## Backend Modules
 
 ### `app.py` — Flask REST API + SSE
-Main server. All API endpoints, SSE stream, profile-list builder, device-list builder. LAN/NoInternet reconciliation delegated to `lan_sync.sync_lan_to_router`. Backup-to-router and auto-restore-on-unlock helpers.
+Main server. Thin routing layer that delegates to `VPNService`. All API endpoints, SSE stream. Backup-to-router and auto-restore-on-unlock helpers.
+
+### `vpn_service.py` — Business logic
+Core orchestrator. `VPNService` class owns `build_profile_list`, profile CRUD (`create_profile`, `update_profile`, `delete_profile`), `switch_server`, `change_protocol` (tear down + recreate with different protocol), `change_type` (VPN ↔ NoVPN ↔ NoInternet), `connect_profile`, `disconnect_profile`, `reorder_profiles` (unified `display_order` on all profiles + VPN `uci reorder`), device assignment, and LAN sync delegation. No Flask dependency.
 
 ### `lan_sync.py` — UCI-native LAN access execution layer
 Pure emitter `serialize_lan_state(store, device_ips, assignment_map)` produces a deterministic dict of desired UCI ipset + rule sections. `diff_state(live, desired)` computes a UCI batch + per-ipset add/remove ops. `sync_lan_to_router(router, ...)` orchestrates: reads live state via `router.fvpn_lan_full_state`, applies the diff via `router.fvpn_uci_apply` (membership-only ops skip the firewall reload). Replaces the legacy `router_api.generate_lan_rules` + the imperative `fvpn_lan` chain.
 
 ### `proton_api.py` — ProtonVPN wrapper
-Thin synchronous wrapper around `proton-vpn-api-core`. Login (with 2FA), server list, WG/OVPN config generation. WireGuard configs use **persistent-mode certificates** (365-day validity, `Mode: "persistent"` on `POST /vpn/v1/certificate`). Each VPN profile gets its own Ed25519 key pair registered as a named device in Proton's dashboard — no local agent required, the router is fully standalone after config upload. Key methods: `generate_wireguard_config()` (returns config + wg_key + cert_expiry), `refresh_wireguard_cert()` (renews without changing the key), `get_wireguard_x25519_key()` (derives WG key from stored Ed25519). Certificate auto-refresh happens on unlock for certs within 30 days of expiry.
+Thin synchronous wrapper around `proton-vpn-api-core`. Login (with 2FA), server list, WG/OVPN config generation. WireGuard configs use **persistent-mode certificates** (365-day validity, `Mode: "persistent"` on `POST /vpn/v1/certificate`). Each VPN profile gets its own Ed25519 key pair registered as a named device in Proton's dashboard — no local agent required, the router is fully standalone after config upload. Key methods: `generate_wireguard_config()` (returns config + wg_key + cert_expiry), `refresh_wireguard_cert()` (renews without changing the key), `get_wireguard_x25519_key()` (derives WG key from stored Ed25519). Certificate auto-refresh happens on unlock for certs within 30 days of expiry. All VPN options (NetShield, Moderate NAT, NAT-PMP, VPN Accelerator) work with both WireGuard (certificate features) and OpenVPN (username suffixes: `+f{level}`, `+nr`, `+pmp`, `+nst`).
 
 ### `router_api.py` — Router SSH management
 SSH-based API (Paramiko + key auth) for the Flint 2. Manages WG/OVPN configs via UCI, route policy rules, ipset membership, firewall rules, DHCP leases, gl-clients metadata. Helpers: `get_flint_vpn_rules`, `get_device_assignments`, `get_tunnel_health`, `get_kill_switch`, `get_profile_name`, `rename_profile`, `reorder_vpn_rules`, `heal_anonymous_rule_section`, `_from_mac_tokens` (for case-preserving del_list). FlintVPN UCI helpers: `fvpn_uci_apply`, `fvpn_ipset_membership`, `fvpn_lan_full_state`, `fvpn_lan_wipe_all`. Also `read_file`/`write_file` for the disaster-recovery backup file at `/etc/fvpn/profile_store.bak.json`, and `get_router_fingerprint` (br-lan MAC) for the restore-on-unlock fingerprint check.
@@ -273,9 +276,8 @@ Built with Svelte 5 + Vite. Source in `frontend/src/`, builds to `static/`.
 | `GroupCard.svelte` | Aircove-style card: gradient header, server info, connect/disconnect button, collapsible VPN options panel, device list (DnD) |
 | `DeviceRow.svelte` | Device in a group: icon, name, online dot, IP, speed, signal, private-MAC badge |
 | `DeviceModal.svelte` | Device settings: custom name, device type (synced to router gl-client), group assignment |
-| `CreateGroupModal.svelte` | New group: type selector, protocol cards (WG/OVPN UDP/OVPN TCP), server picker trigger |
-| `EditGroupModal.svelte` | Edit existing group: name, icon, color, guest toggle, **VPN Options section** (kill switch, NetShield, accelerator, NAT options), LAN access (3-state + exceptions per direction), delete |
-| `ServerPicker.svelte` | 3-level server browser: Country → City → Server. Filters, scope selector. **No VPN options** — those live in EditGroupModal |
+| `GroupModal.svelte` | Unified create/edit group modal. Same field order in both modes: type → protocol → VPN options → name → icon/color → guest → LAN access. Create mode opens ServerPicker for VPN groups. Edit mode handles protocol change, type change (VPN ↔ NoVPN ↔ NoInternet), and VPN option regeneration on Save. |
+| `ServerPicker.svelte` | 3-level server browser: Country → City → Server. Filters, scope selector. |
 | `LanPeerPicker.svelte` | Multi-select chip picker for LAN access exception lists. Searchable dropdown grouped into Groups + Devices. Inherited (group-source) entries are greyed out and non-removable in DeviceModal. |
 | `EmojiPicker.svelte` | Categorized emoji grid with search |
 | `ColorPicker.svelte` | Color selection for card accent |
@@ -300,12 +302,14 @@ POST /api/unlock                        → unlock with master password
 
 GET  /api/profiles                      → live merged profile list (router + local + Proton)
 POST /api/profiles                      → create group (VPN/NoVPN/NoInternet)
-PUT  /api/profiles/reorder              → split: VPN → uci reorder, non-VPN → local display_order
+PUT  /api/profiles/reorder              → unified display_order on all profiles + VPN uci reorder
 PUT  /api/profiles/:id                  → update metadata (name, color, icon, kill_switch)
 DELETE /api/profiles/:id                → delete group + router cleanup + LAN rebuild + NoInternet reconcile
 
 GET  /api/profiles/:id/servers          → ProtonVPN server list (filtered)
 PUT  /api/profiles/:id/server           → switch server (regenerate tunnel, carry over devices)
+PUT  /api/profiles/:id/protocol         → change VPN protocol (tear down + recreate tunnel)
+PUT  /api/profiles/:id/type             → change group type (VPN ↔ NoVPN ↔ NoInternet)
 POST /api/profiles/:id/connect          → bring tunnel up; returns live health
 POST /api/profiles/:id/disconnect       → bring tunnel down; returns live health
 PUT  /api/profiles/:id/guest            → set as guest group

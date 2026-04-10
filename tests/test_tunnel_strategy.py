@@ -299,6 +299,9 @@ class TestOpenVPNStrategy:
             self.server,
             protocol="tcp",
             netshield=2,
+            moderate_nat=False,
+            nat_pmp=False,
+            vpn_accelerator=True,
         )
 
         self.router.upload_openvpn_config.assert_called_once_with(
@@ -323,6 +326,9 @@ class TestOpenVPNStrategy:
             self.server,
             protocol="udp",
             netshield=0,
+            moderate_nat=False,
+            nat_pmp=False,
+            vpn_accelerator=True,
         )
 
     def test_delete(self):
@@ -392,6 +398,9 @@ class TestOpenVPNStrategy:
             self.server,
             protocol="tcp",
             netshield=2,
+            moderate_nat=False,
+            nat_pmp=False,
+            vpn_accelerator=True,
         )
 
         # 4. Uploaded new config

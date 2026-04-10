@@ -21,6 +21,8 @@ from consts import (
     HEALTH_RED,
     LAN_ALLOWED,
     PROFILE_TYPE_VPN,
+    PROFILE_TYPE_NO_VPN,
+    PROFILE_TYPE_NO_INTERNET,
     PROTO_OPENVPN,
     PROTO_WIREGUARD,
     PROTO_WIREGUARD_TCP,
@@ -283,6 +285,16 @@ class VPNService:
             "inbound_allow": list(lan.get("inbound_allow", [])),
         }
 
+    @staticmethod
+    def _local_display_order(store_data, profile_id, default=None):
+        """Look up display_order from the local store for any profile."""
+        if not profile_id:
+            return default
+        for p in store_data.get("profiles", []):
+            if p.get("id") == profile_id:
+                return p.get("display_order", default)
+        return default
+
     def _resolve_server_live(self, local_profile: dict) -> dict:
         """Resolve server info from Proton API by id with cache fallback.
 
@@ -477,9 +489,8 @@ class VPNService:
             ghost["device_count"] = 0
             vpn_profiles.append(ghost)
 
-        # Non-VPN profiles (local-only), sorted by display_order, always rendered after VPN
-        non_vpn = sorted(local_non_vpn, key=lambda p: p.get("display_order", 999))
-        for p in non_vpn:
+        # Non-VPN profiles (local-only)
+        for p in local_non_vpn:
             p = dict(p)  # don't mutate the original
             p.pop("status", None)
             p["device_count"] = sum(
@@ -488,6 +499,12 @@ class VPNService:
             )
             p["lan_access"] = self._normalize_lan_access(p.get("lan_access"))
             vpn_profiles.append(p)
+
+        # Unified sort: if any profile has display_order, sort the whole list by it.
+        # Profiles without display_order keep their current position (high sentinel).
+        if any(self._local_display_order(store_data, p.get("id")) is not None for p in vpn_profiles):
+            by_id = {pp["id"]: pp for pp in store_data.get("profiles", [])}
+            vpn_profiles.sort(key=lambda p: self._local_display_order(store_data, p.get("id"), default=999))
 
         return vpn_profiles
 
@@ -690,6 +707,167 @@ class VPNService:
         except Exception as e:
             log.warning(f"LAN sync after delete failed: {e}")
 
+    # ── Type Change ──────────────────────────────────────────────────────────
+
+    def change_type(self, profile_id: str, new_type: str,
+                    vpn_protocol: str = PROTO_WIREGUARD,
+                    server_id: str = None, options: dict = None,
+                    kill_switch: bool = True, server_scope: dict = None,
+                    ovpn_protocol: str = "udp"):
+        """Change a profile's group type (VPN ↔ NoVPN ↔ NoInternet).
+
+        Three cases:
+        - NoVPN ↔ NoInternet: metadata + LAN sync only.
+        - VPN → non-VPN: tear down tunnel, clear router fields.
+        - Non-VPN → VPN: create a tunnel (requires server_id + Proton login).
+
+        Returns the updated profile dict.
+        """
+        profile = ps.get_profile(profile_id)
+        if not profile:
+            raise NotFoundError("Profile not found")
+
+        old_type = profile["type"]
+        if old_type == new_type:
+            raise ValueError(f"Profile is already type '{new_type}'")
+        if new_type not in (PROFILE_TYPE_VPN, PROFILE_TYPE_NO_VPN, PROFILE_TYPE_NO_INTERNET):
+            raise ValueError(f"Invalid type: {new_type}")
+
+        # ── Case 1: non-VPN ↔ non-VPN ───────────────────────────────────
+        if old_type != PROFILE_TYPE_VPN and new_type != PROFILE_TYPE_VPN:
+            ps.update_profile(profile_id, type=new_type)
+            log.info(f"Changed type for '{profile['name']}' from {old_type} to {new_type}")
+            try:
+                self.sync_lan_to_router()
+            except Exception as e:
+                log.warning(f"LAN sync after type change failed: {e}")
+            return ps.get_profile(profile_id)
+
+        # ── Case 2: VPN → non-VPN ───────────────────────────────────────
+        if old_type == PROFILE_TYPE_VPN:
+            # Tear down tunnel
+            ri = profile.get("router_info") or {}
+            if ri:
+                proto = ri.get("vpn_protocol", PROTO_WIREGUARD)
+                try:
+                    strategy = get_strategy(proto)
+                    strategy.delete(self.router, ri)
+                except Exception as e:
+                    log.warning(f"change_type: tunnel teardown failed: {e}")
+
+            # Clear VPN-specific fields
+            ps.update_profile(profile_id,
+                type=new_type,
+                router_info=None,
+                server_id=None,
+                server=None,
+                options=None,
+                server_scope=None,
+                wg_key=None,
+                cert_expiry=None,
+            )
+            log.info(f"Changed type for '{profile['name']}' from VPN to {new_type}")
+            try:
+                self.sync_lan_to_router()
+            except Exception as e:
+                log.warning(f"LAN sync after type change failed: {e}")
+            return ps.get_profile(profile_id)
+
+        # ── Case 3: non-VPN → VPN ───────────────────────────────────────
+        if not server_id:
+            raise ValueError("server_id required when changing to VPN type")
+        if not self.proton.is_logged_in:
+            raise NotLoggedInError("Not logged into ProtonVPN")
+
+        is_proton_wg = vpn_protocol in (PROTO_WIREGUARD_TCP, PROTO_WIREGUARD_TLS)
+        wg_transport = {PROTO_WIREGUARD_TCP: "tcp", PROTO_WIREGUARD_TLS: "tls"}.get(vpn_protocol, "udp")
+
+        # Check limits
+        existing = ps.get_profiles()
+        if is_proton_wg:
+            count = len([p for p in existing
+                         if p["type"] == PROFILE_TYPE_VPN
+                         and p.get("router_info", {}).get("vpn_protocol", "").startswith("wireguard-")
+                         and p["id"] != profile_id])
+            if count >= self.MAX_PWG_GROUPS:
+                raise LimitExceededError(f"WireGuard TCP/TLS limit reached ({self.MAX_PWG_GROUPS})")
+        elif vpn_protocol == PROTO_WIREGUARD:
+            count = len([p for p in existing
+                         if p["type"] == PROFILE_TYPE_VPN
+                         and p.get("router_info", {}).get("vpn_protocol") == PROTO_WIREGUARD
+                         and p["id"] != profile_id])
+            if count >= self.MAX_WG_GROUPS:
+                raise LimitExceededError(f"WireGuard UDP limit reached ({self.MAX_WG_GROUPS})")
+        elif vpn_protocol == PROTO_OPENVPN:
+            count = len([p for p in existing
+                         if p.get("router_info", {}).get("vpn_protocol") == PROTO_OPENVPN
+                         and p["id"] != profile_id])
+            if count >= self.MAX_OVPN_GROUPS:
+                raise LimitExceededError(f"OpenVPN limit reached ({self.MAX_OVPN_GROUPS})")
+
+        # Create tunnel
+        server = self.proton.get_server_by_id(server_id)
+        opts = options or {}
+        opts["ovpn_protocol"] = ovpn_protocol
+
+        strategy = get_strategy(vpn_protocol)
+        try:
+            router_info, server_info, wg_key, cert_expiry = strategy.create(
+                self.router, self.proton, profile["name"], server, opts,
+                transport=wg_transport,
+            )
+        except Exception as e:
+            log.error(f"change_type: tunnel creation failed: {e}", exc_info=True)
+            raise RuntimeError(f"Failed to create tunnel: {e}") from e
+
+        # Migrate any device assignments from local store to router
+        store_data = ps.load()
+        local_assignments = store_data.get("device_assignments", {})
+        macs_to_move = [mac for mac, pid in local_assignments.items() if pid == profile_id]
+        for mac in macs_to_move:
+            try:
+                if is_proton_wg:
+                    ipset_name = router_info.get("ipset_name", f"src_mac_{router_info.get('tunnel_id', 0)}")
+                    self.router.exec(f"ipset create {ipset_name} hash:mac -exist")
+                    self.router.exec(f"ipset add {ipset_name} {mac} -exist")
+                else:
+                    self.router.set_device_vpn(mac, router_info["rule_name"])
+            except Exception as e:
+                log.warning(f"change_type: reassign {mac} failed: {e}")
+            # Remove from local assignments (VPN assignments are router-canonical)
+            del local_assignments[mac]
+        if macs_to_move:
+            ps.save(store_data)
+
+        # Update profile
+        update_kwargs = {
+            "type": PROFILE_TYPE_VPN,
+            "router_info": router_info,
+            "server_id": server_info.get("id", server_id),
+            "server": {k: server_info[k] for k in ("id", "endpoint", "physical_server_domain", "protocol") if server_info.get(k)},
+            "options": opts,
+            "server_scope": ps.normalize_server_scope(server_scope),
+        }
+        if wg_key:
+            update_kwargs["wg_key"] = wg_key
+        if cert_expiry:
+            update_kwargs["cert_expiry"] = cert_expiry
+        ps.update_profile(profile_id, **update_kwargs)
+
+        # Apply kill switch
+        if router_info and router_info.get("rule_name") and not is_proton_wg and not kill_switch:
+            try:
+                self.router.set_kill_switch(router_info["rule_name"], False)
+            except Exception as e:
+                log.warning(f"change_type: set kill_switch failed: {e}")
+
+        log.info(f"Changed type for '{profile['name']}' from {old_type} to VPN ({vpn_protocol})")
+        try:
+            self.sync_lan_to_router()
+        except Exception as e:
+            log.warning(f"LAN sync after type change failed: {e}")
+        return ps.get_profile(profile_id)
+
     # ── Server Switch ────────────────────────────────────────────────────────
 
     def switch_server(self, profile_id: str, server_id: str, options: dict = None,
@@ -774,6 +952,161 @@ class VPNService:
         finally:
             lock.release()
 
+    # ── Protocol Change ─────────────────────────────────────────────────────
+
+    def change_protocol(self, profile_id: str, new_vpn_protocol: str,
+                        server_id: str = None, options: dict = None,
+                        server_scope: dict = None, ovpn_protocol: str = "udp"):
+        """Change a VPN profile's protocol (e.g. WireGuard → OpenVPN).
+
+        Tears down the old tunnel, creates a new one with the new protocol,
+        and re-assigns all devices. Preserves name, color, icon, LAN access,
+        and other local metadata.
+
+        Raises:
+            NotFoundError: If the profile is not found.
+            ValueError: If the profile is not VPN or the protocol is unchanged.
+            LimitExceededError: If the new protocol's group limit is exceeded.
+            RuntimeError: If tunnel creation fails.
+        """
+        # Per-profile lock to prevent concurrent operations
+        if profile_id not in self._switch_locks:
+            self._switch_locks[profile_id] = threading.Lock()
+        lock = self._switch_locks[profile_id]
+
+        if not lock.acquire(blocking=False):
+            raise RuntimeError("Another operation is in progress for this profile")
+
+        try:
+            profile = ps.get_profile(profile_id)
+            if not profile:
+                raise NotFoundError("Profile not found")
+            if profile["type"] != PROFILE_TYPE_VPN:
+                raise ValueError("Not a VPN profile")
+
+            old_ri = profile.get("router_info", {}) or {}
+            old_proto = old_ri.get("vpn_protocol", PROTO_WIREGUARD)
+
+            # Normalize wireguard-tcp/tls: the base protocol for limit checks
+            is_new_proton_wg = new_vpn_protocol in (PROTO_WIREGUARD_TCP, PROTO_WIREGUARD_TLS)
+            is_old_proton_wg = old_proto.startswith("wireguard-")
+            wg_transport = {PROTO_WIREGUARD_TCP: "tcp", PROTO_WIREGUARD_TLS: "tls"}.get(new_vpn_protocol, "udp")
+
+            if new_vpn_protocol == old_proto:
+                raise ValueError("Protocol is already " + old_proto)
+
+            # Check limits for the new protocol (don't count current profile)
+            existing = ps.get_profiles()
+            if is_new_proton_wg:
+                count = len([p for p in existing
+                             if p["type"] == PROFILE_TYPE_VPN
+                             and p.get("router_info", {}).get("vpn_protocol", "").startswith("wireguard-")
+                             and p["id"] != profile_id])
+                if count >= self.MAX_PWG_GROUPS:
+                    raise LimitExceededError(f"WireGuard TCP/TLS limit reached ({self.MAX_PWG_GROUPS})")
+            elif new_vpn_protocol == PROTO_WIREGUARD:
+                count = len([p for p in existing
+                             if p["type"] == PROFILE_TYPE_VPN
+                             and p.get("router_info", {}).get("vpn_protocol") == PROTO_WIREGUARD
+                             and p["id"] != profile_id])
+                if count >= self.MAX_WG_GROUPS:
+                    raise LimitExceededError(f"WireGuard UDP limit reached ({self.MAX_WG_GROUPS})")
+            elif new_vpn_protocol == PROTO_OPENVPN:
+                count = len([p for p in existing
+                             if p.get("router_info", {}).get("vpn_protocol") == PROTO_OPENVPN
+                             and p["id"] != profile_id])
+                if count >= self.MAX_OVPN_GROUPS:
+                    raise LimitExceededError(f"OpenVPN limit reached ({self.MAX_OVPN_GROUPS})")
+
+            # 1. Capture assigned devices before teardown
+            assigned_macs = []
+            if is_old_proton_wg:
+                ipset_name = old_ri.get("ipset_name", f"src_mac_{old_ri.get('tunnel_id', 0)}")
+                try:
+                    members = self.router.exec(
+                        f"ipset list {ipset_name} 2>/dev/null | awk 'p{{print}} /^Members:/{{p=1}}'"
+                    ).strip()
+                    assigned_macs = [m.strip().lower() for m in members.splitlines() if m.strip()]
+                except Exception as e:
+                    log.warning(f"change_protocol: failed to read ipset {ipset_name}: {e}")
+            elif old_ri.get("rule_name"):
+                try:
+                    assigned_macs = [t.lower() for t in self.router.from_mac_tokens(old_ri["rule_name"])]
+                except Exception as e:
+                    log.warning(f"change_protocol: failed to read from_mac: {e}")
+
+            # 2. Tear down old tunnel
+            old_strategy = get_strategy(old_proto)
+            try:
+                old_strategy.delete(self.router, old_ri)
+            except Exception as e:
+                log.warning(f"change_protocol: old tunnel teardown failed: {e}")
+
+            # 3. Resolve server — use provided server_id or keep the current one
+            effective_server_id = server_id or profile.get("server_id") or (profile.get("server") or {}).get("id")
+            if not effective_server_id:
+                raise ValueError("No server_id available for new tunnel")
+            if not self.proton.is_logged_in:
+                raise NotLoggedInError("Not logged into ProtonVPN")
+            server = self.proton.get_server_by_id(effective_server_id)
+            opts = options or profile.get("options", {})
+            opts["ovpn_protocol"] = ovpn_protocol
+
+            # 4. Create new tunnel with new protocol
+            new_strategy = get_strategy(new_vpn_protocol)
+            try:
+                new_ri, server_info, wg_key, cert_expiry = new_strategy.create(
+                    self.router, self.proton, profile["name"], server, opts,
+                    transport=wg_transport,
+                )
+            except Exception as e:
+                log.error(f"change_protocol: new tunnel creation failed: {e}", exc_info=True)
+                raise RuntimeError(f"Failed to create new tunnel: {e}") from e
+
+            # 5. Re-assign devices to the new tunnel
+            for mac in assigned_macs:
+                try:
+                    if is_new_proton_wg:
+                        new_ipset = new_ri.get("ipset_name", f"src_mac_{new_ri.get('tunnel_id', 0)}")
+                        self.router.exec(f"ipset create {new_ipset} hash:mac -exist")
+                        self.router.exec(f"ipset add {new_ipset} {mac} -exist")
+                    else:
+                        self.router.set_device_vpn(mac, new_ri["rule_name"])
+                except Exception as e:
+                    log.warning(f"change_protocol: reassign {mac} failed: {e}")
+
+            # 6. Update local profile store
+            update_kwargs = {
+                "router_info": new_ri,
+                "server_id": server_info.get("id", effective_server_id),
+                "server": {k: server_info[k] for k in ("id", "endpoint", "physical_server_domain", "protocol") if server_info.get(k)},
+                "options": opts,
+            }
+            if server_scope is not None:
+                update_kwargs["server_scope"] = ps.normalize_server_scope(server_scope)
+            if wg_key:
+                update_kwargs["wg_key"] = wg_key
+            if cert_expiry:
+                update_kwargs["cert_expiry"] = cert_expiry
+            # Clear WG key fields when switching away from WireGuard
+            if not new_vpn_protocol.startswith("wireguard") and profile.get("wg_key"):
+                update_kwargs["wg_key"] = None
+                update_kwargs["cert_expiry"] = None
+            ps.update_profile(profile_id, **update_kwargs)
+
+            log.info(f"Changed protocol for '{profile['name']}' from {old_proto} to {new_vpn_protocol}")
+
+            # 7. Sync LAN rules
+            try:
+                self.sync_lan_to_router()
+            except Exception as e:
+                log.warning(f"LAN sync after protocol change failed: {e}")
+
+            return ps.get_profile(profile_id)
+
+        finally:
+            lock.release()
+
     # ── Tunnel Control ───────────────────────────────────────────────────────
 
     def connect_profile(self, profile_id):
@@ -839,44 +1172,38 @@ class VPNService:
     def reorder_profiles(self, profile_ids):
         """Reorder profiles.
 
-        VPN profile order is router-canonical -- ``uci reorder`` is applied
-        to route_policy sections. Non-VPN profiles have no router section;
-        their order is stored locally as ``display_order``.
+        Sets ``display_order`` on ALL profiles (VPN and non-VPN alike) so the
+        dashboard can freely interleave them. VPN profiles also get their
+        relative order synced to the router via ``uci reorder`` (so routing
+        priority stays consistent with the visual order).
         """
         if not profile_ids:
             raise ValueError("profile_ids required")
 
         store_data = ps.load()
-        # Index local profiles by id
         by_id = {p["id"]: p for p in store_data.get("profiles", [])}
 
-        # Split VPN vs non-VPN, preserving the requested order within each group
+        # 1. Set display_order on ALL profiles in the requested order
         vpn_rule_names = []
-        non_vpn_ids = []
-        for pid in profile_ids:
+        for i, pid in enumerate(profile_ids):
             p = by_id.get(pid)
             if not p:
                 continue
+            p["display_order"] = i
+            # Collect VPN rule names (in the requested order) for router sync
             if p.get("type") == PROFILE_TYPE_VPN:
                 rn = (p.get("router_info") or {}).get("rule_name")
                 if rn:
                     vpn_rule_names.append(rn)
-            else:
-                non_vpn_ids.append(pid)
 
-        # 1. Apply VPN order to router (source of truth for VPN profile order)
+        ps.save(store_data)
+
+        # 2. Sync VPN relative order to router (for routing priority)
         if vpn_rule_names:
             try:
                 self.router.reorder_vpn_rules(vpn_rule_names)
             except Exception as e:
                 log.warning(f"reorder_vpn_rules failed: {e}")
-
-        # 2. Apply non-VPN order to local store via display_order ints
-        for i, pid in enumerate(non_vpn_ids):
-            p = by_id.get(pid)
-            if p:
-                p["display_order"] = i
-        ps.save(store_data)
 
     # ── Guest Profile ────────────────────────────────────────────────────────
 
