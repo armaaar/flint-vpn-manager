@@ -518,12 +518,11 @@ def api_change_protocol(profile_id):
 def api_connect(profile_id):
     """Bring a VPN profile's tunnel up.
 
-    Body (optional): {smart_protocol: true} to enable automatic protocol fallback.
+    Smart Protocol retry (if enabled in profile options) is handled in the
+    background by the SSE tick — this endpoint always returns immediately.
     """
-    data = request.get_json(silent=True) or {}
-    smart = data.get("smart_protocol", False)
     try:
-        result = _get_service().connect_profile(profile_id, smart_protocol=smart)
+        result = _get_service().connect_profile(profile_id)
         return jsonify(result)
     except NotFoundError:
         return jsonify({"error": "VPN profile not found"}), 404
@@ -762,6 +761,12 @@ def api_stream():
                     if p.get("name"):
                         profile_names[pid] = p["name"]
 
+                # Smart Protocol: check pending retries and switch protocols
+                try:
+                    service.tick_smart_protocol()
+                except Exception:
+                    pass
+
                 # Sync LAN rules if device IPs changed
                 if tracker and tracker.lan_rules_stale:
                     try:
@@ -774,12 +779,20 @@ def api_stream():
                 service.invalidate_device_cache()
                 all_devices = service.get_devices_cached()
 
+                # Smart Protocol retry status for the frontend
+                smart_status = {}
+                try:
+                    smart_status = service.get_smart_protocol_status()
+                except Exception:
+                    pass
+
                 event_data = {
                     "tunnel_health": tunnel_health,
                     "kill_switch": kill_switch_state,
                     "profile_names": profile_names,
                     "devices": all_devices,
                     "device_count": len(all_devices),
+                    "smart_protocol_status": smart_status,
                     "timestamp": time.time(),
                 }
                 yield f"data: {json.dumps(event_data)}\n\n"

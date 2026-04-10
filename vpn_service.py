@@ -267,6 +267,9 @@ class VPNService:
         self._switch_locks = {}
         self._device_cache = {"data": None, "ts": 0.0}
         self._DEVICE_CACHE_TTL = 5
+        # Smart Protocol: in-memory state for pending retries.
+        # {profile_id: {started_at, chain, attempt_idx, original_proto}}
+        self._smart_pending = {}
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -1109,9 +1112,12 @@ class VPNService:
 
     # ── Tunnel Control ───────────────────────────────────────────────────────
 
-    # Smart Protocol fallback order: try alternate protocols when connection fails.
-    # Each entry is (protocol_str, transport_hint). Only protocols with available
-    # slots are attempted.
+    # ── Smart Protocol ──────────────────────────────────────────────────────
+    #
+    # Non-blocking protocol fallback. connect_profile() returns immediately;
+    # tick_smart_protocol() is called every SSE tick (10s) to monitor pending
+    # retries and switch protocols when a tunnel doesn't establish.
+
     SMART_PROTOCOL_CHAIN = [
         (PROTO_WIREGUARD, "udp"),
         (PROTO_OPENVPN, "udp"),
@@ -1120,18 +1126,17 @@ class VPNService:
         (PROTO_WIREGUARD_TLS, "tls"),
     ]
 
-    SMART_CONNECT_TIMEOUT = 45  # seconds to wait before trying next protocol
+    SMART_CONNECT_TIMEOUT = 45  # seconds before trying next protocol
 
-    def connect_profile(self, profile_id, smart_protocol=False):
-        """Bring a VPN profile's tunnel up.
+    def connect_profile(self, profile_id):
+        """Bring a VPN profile's tunnel up. Returns immediately.
 
-        Args:
-            profile_id: Profile UUID.
-            smart_protocol: If True and the connection doesn't establish within
-                SMART_CONNECT_TIMEOUT seconds, automatically try alternate
-                protocols until one connects.
+        If the profile has ``smart_protocol`` enabled in its options, registers
+        it for background monitoring. The SSE tick calls
+        ``tick_smart_protocol()`` every 10s to check health and switch
+        protocols if the tunnel doesn't establish.
 
-        Returns dict with success, health, and optionally protocol_changed.
+        Returns dict with success and health.
 
         Raises:
             NotFoundError: If the profile is not found or not VPN.
@@ -1153,102 +1158,162 @@ class VPNService:
             health = strategy.connect(self.router, ri)
             log.info(f"Profile '{profile['name']}' connect issued (health={health})")
 
-            if not smart_protocol:
-                return {"success": True, "health": health}
+            # Register for smart protocol monitoring if enabled
+            opts = profile.get("options") or {}
+            if opts.get("smart_protocol") and profile_id not in self._smart_pending:
+                self._smart_register(profile_id, proto)
 
-            # Smart Protocol: wait and check if connection establishes
-            import time as _time
-            if health in (HEALTH_GREEN, HEALTH_AMBER):
-                return {"success": True, "health": health}
-
-            deadline = _time.time() + self.SMART_CONNECT_TIMEOUT
-            while _time.time() < deadline:
-                _time.sleep(5)
-                health = strategy.get_health(self.router, ri)
-                if health in (HEALTH_GREEN, HEALTH_AMBER):
-                    return {"success": True, "health": health}
-
-            # Connection didn't establish — try alternate protocols
-            log.info(f"Smart Protocol: '{profile['name']}' failed with {proto}, trying alternatives")
-            strategy.disconnect(self.router, ri)
-
-            attempted = self._smart_protocol_fallback(profile_id, proto)
-            if attempted:
-                return {"success": True, "health": attempted["health"],
-                        "protocol_changed": attempted["protocol"]}
-
-            # All protocols failed — reconnect with original
-            log.warning(f"Smart Protocol: all alternatives failed for '{profile['name']}', reverting to {proto}")
-            strategy.connect(self.router, ri)
-            return {"success": False, "health": HEALTH_CONNECTING,
-                    "error": "Connection failed with all protocols"}
-
+            return {"success": True, "health": health}
         except Exception as e:
             log.error(f"Failed to connect profile '{profile['name']}': {e}", exc_info=True)
             raise
 
-    def _smart_protocol_fallback(self, profile_id, current_proto):
-        """Try alternate protocols for a profile. Returns {health, protocol} or None."""
-        import time as _time
+    def _smart_register(self, profile_id, current_proto):
+        """Register a profile for smart protocol monitoring."""
+        chain = [
+            (p, t) for p, t in self.SMART_PROTOCOL_CHAIN
+            if p != current_proto
+        ]
+        self._smart_pending[profile_id] = {
+            "started_at": time.time(),
+            "chain": chain,
+            "attempt_idx": -1,  # -1 = still on original protocol
+            "original_proto": current_proto,
+        }
 
-        for proto, transport in self.SMART_PROTOCOL_CHAIN:
-            if proto == current_proto:
+    def _smart_cancel(self, profile_id):
+        """Cancel smart protocol monitoring for a profile."""
+        self._smart_pending.pop(profile_id, None)
+
+    def _smart_has_slot(self, profile_id, proto):
+        """Check if there's an available slot for a protocol."""
+        existing = ps.get_profiles()
+        if proto == PROTO_WIREGUARD:
+            count = len([p for p in existing
+                         if p["type"] == PROFILE_TYPE_VPN
+                         and p.get("router_info", {}).get("vpn_protocol") == PROTO_WIREGUARD
+                         and p["id"] != profile_id])
+            return count < self.MAX_WG_GROUPS
+        if proto in (PROTO_WIREGUARD_TCP, PROTO_WIREGUARD_TLS):
+            count = len([p for p in existing
+                         if p["type"] == PROFILE_TYPE_VPN
+                         and (p.get("router_info", {}).get("vpn_protocol") or "").startswith("wireguard-")
+                         and p["id"] != profile_id])
+            return count < self.MAX_PWG_GROUPS
+        if proto == PROTO_OPENVPN:
+            count = len([p for p in existing
+                         if p.get("router_info", {}).get("vpn_protocol") == PROTO_OPENVPN
+                         and p["id"] != profile_id])
+            return count < self.MAX_OVPN_GROUPS
+        return False
+
+    def tick_smart_protocol(self):
+        """Called every SSE tick (~10s). Check pending smart protocol retries.
+
+        For each pending profile:
+        - If connected (green/amber): done, remove from pending.
+        - If still connecting and timeout not reached: wait.
+        - If timeout reached: disconnect, switch to next protocol, connect.
+        - If all protocols exhausted: remove from pending, log warning.
+        """
+        for profile_id in list(self._smart_pending):
+            state = self._smart_pending[profile_id]
+            profile = ps.get_profile(profile_id)
+            if not profile or profile.get("type") != PROFILE_TYPE_VPN:
+                self._smart_cancel(profile_id)
                 continue
 
-            # Check slot availability
-            store_data = ps.load()
-            existing = store_data.get("profiles", [])
-            if proto == PROTO_WIREGUARD:
-                count = len([p for p in existing if p["type"] == PROFILE_TYPE_VPN
-                             and p.get("router_info", {}).get("vpn_protocol") == PROTO_WIREGUARD
-                             and p["id"] != profile_id])
-                if count >= self.MAX_WG_GROUPS:
-                    continue
-            elif proto in (PROTO_WIREGUARD_TCP, PROTO_WIREGUARD_TLS):
-                count = len([p for p in existing if p["type"] == PROFILE_TYPE_VPN
-                             and (p.get("router_info", {}).get("vpn_protocol") or "").startswith("wireguard-")
-                             and p["id"] != profile_id])
-                if count >= self.MAX_PWG_GROUPS:
-                    continue
-            elif proto == PROTO_OPENVPN:
-                count = len([p for p in existing if p.get("router_info", {}).get("vpn_protocol") == PROTO_OPENVPN
-                             and p["id"] != profile_id])
-                if count >= self.MAX_OVPN_GROUPS:
-                    continue
+            ri = profile.get("router_info", {})
+            if not ri.get("rule_name"):
+                self._smart_cancel(profile_id)
+                continue
 
-            log.info(f"Smart Protocol: trying {proto} for profile {profile_id}")
+            proto = ri.get("vpn_protocol", PROTO_WIREGUARD)
             try:
-                result = self.change_protocol(
-                    profile_id, proto,
-                    ovpn_protocol=transport if proto == PROTO_OPENVPN else "udp",
-                )
-                if not result:
-                    continue
-
-                # Wait for new tunnel to establish
-                profile = ps.get_profile(profile_id)
-                ri = profile.get("router_info", {})
                 strategy = get_strategy(proto)
+                health = strategy.get_health(self.router, ri)
+            except Exception:
+                continue  # SSH error — retry next tick
 
-                health = strategy.connect(self.router, ri)
-                deadline = _time.time() + self.SMART_CONNECT_TIMEOUT
-                while _time.time() < deadline:
-                    if health in (HEALTH_GREEN, HEALTH_AMBER):
-                        log.info(f"Smart Protocol: {proto} connected for profile {profile_id}")
-                        return {"health": health, "protocol": proto}
-                    _time.sleep(5)
-                    health = strategy.get_health(self.router, ri)
-
-                # Didn't connect — disconnect and try next
-                strategy.disconnect(self.router, ri)
-            except Exception as e:
-                log.warning(f"Smart Protocol: {proto} failed for profile {profile_id}: {e}")
+            if health in ("green", "amber"):
+                log.info(f"Smart Protocol: {profile_id} connected on {proto}")
+                self._smart_cancel(profile_id)
                 continue
 
-        return None
+            elapsed = time.time() - state["started_at"]
+            if elapsed < self.SMART_CONNECT_TIMEOUT:
+                continue  # Still waiting for current protocol
+
+            # Timeout — try next protocol in chain
+            state["attempt_idx"] += 1
+            idx = state["attempt_idx"]
+
+            # Skip protocols without available slots
+            while idx < len(state["chain"]):
+                next_proto, _ = state["chain"][idx]
+                if self._smart_has_slot(profile_id, next_proto):
+                    break
+                idx += 1
+                state["attempt_idx"] = idx
+
+            if idx >= len(state["chain"]):
+                log.warning(f"Smart Protocol: all protocols exhausted for {profile_id}")
+                self._smart_cancel(profile_id)
+                continue
+
+            next_proto, next_transport = state["chain"][idx]
+            log.info(f"Smart Protocol: switching {profile_id} from {proto} to {next_proto}")
+
+            try:
+                # Disconnect current tunnel
+                strategy.disconnect(self.router, ri)
+
+                # Switch protocol (tear down + recreate)
+                self.change_protocol(
+                    profile_id, next_proto,
+                    ovpn_protocol=next_transport if next_proto == PROTO_OPENVPN else "udp",
+                )
+
+                # Connect with new protocol
+                profile = ps.get_profile(profile_id)
+                new_ri = profile.get("router_info", {})
+                new_strategy = get_strategy(next_proto)
+                new_strategy.connect(self.router, new_ri)
+
+                # Reset timer for the new protocol attempt
+                state["started_at"] = time.time()
+            except Exception as e:
+                log.warning(f"Smart Protocol: {next_proto} failed for {profile_id}: {e}")
+                state["started_at"] = time.time()  # Reset timer, will try next on next tick
+
+    def get_smart_protocol_status(self):
+        """Return smart protocol retry status for SSE streaming.
+
+        Returns:
+            Dict of {profile_id: {attempting, attempt, total, elapsed}}.
+        """
+        result = {}
+        for pid, state in self._smart_pending.items():
+            idx = state["attempt_idx"]
+            chain = state["chain"]
+            if idx < 0:
+                attempting = state["original_proto"]
+            elif idx < len(chain):
+                attempting = chain[idx][0]
+            else:
+                attempting = None
+            result[pid] = {
+                "attempting": attempting,
+                "attempt": max(idx + 2, 1),  # +1 for original, +1 for 0-index
+                "total": len(chain) + 1,
+                "elapsed": int(time.time() - state["started_at"]),
+            }
+        return result
 
     def disconnect_profile(self, profile_id):
         """Bring a VPN profile's tunnel down.
+
+        Also cancels any pending smart protocol retry for this profile.
 
         Returns dict with success and health.
 
@@ -1256,6 +1321,8 @@ class VPNService:
             NotFoundError: If the profile is not found or not VPN.
             ValueError: If no tunnel is configured.
         """
+        self._smart_cancel(profile_id)
+
         profile = ps.get_profile(profile_id)
         if not profile or profile.get("type") != PROFILE_TYPE_VPN:
             raise NotFoundError("VPN profile not found")

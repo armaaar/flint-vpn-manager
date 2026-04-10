@@ -1,5 +1,5 @@
 <script>
-  import { devices, profiles, showToast, movingDevices } from '../stores/app.js';
+  import { devices, profiles, showToast, movingDevices, smartProtocolStatus } from '../stores/app.js';
   import { api } from '../api.js';
   import { isOnline, deviceIcon } from '../device-utils.js';
   import { countryFlagUrl } from '../country.js';
@@ -77,6 +77,7 @@
   $: headerGradient = buildGradient(profile);
   $: statusBorderColor = getStatusBorderColor(profile);
   $: isTransitioning = connState === 'transitioning';
+  $: smartStatus = $smartProtocolStatus[profile.id] || null;
 
   function derivedConnState(p) {
     if (p.type !== 'vpn') return p.type;
@@ -160,7 +161,7 @@
       if (p) p.health = 'connecting';
       return [...list];
     });
-    const res = await api.connectProfile(profile.id, { smart_protocol: !!profile.options?.smart_protocol });
+    const res = await api.connectProfile(profile.id);
     if (res.error) {
       showToast(res.error, true);
       // Roll back to disconnected on error
@@ -219,7 +220,11 @@
           <span class="badge-guest">GUEST</span>
         {/if}
         <div class="group-status-label">
-          {statusLabel}
+          {#if smartStatus}
+            Trying {smartStatus.attempting || '...'} ({smartStatus.attempt}/{smartStatus.total})
+          {:else}
+            {statusLabel}
+          {/if}
           <span class="conn-type">
             {#if profile.type === 'no_vpn'}Direct
             {:else if profile.type === 'no_internet'}LAN Only

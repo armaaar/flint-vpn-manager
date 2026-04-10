@@ -7,6 +7,7 @@ export const devices = writable([]);
 export const protonLoggedIn = writable(false);
 export const toastMessage = writable(null); // { text, error }
 export const movingDevices = writable(new Set()); // MACs of devices being reassigned
+export const smartProtocolStatus = writable({}); // {profile_id: {attempting, attempt, total, elapsed}}
 
 // SSE connection
 let sseSource = null;
@@ -45,6 +46,9 @@ export function startSSE() {
       }
       if (data.devices) {
         devices.set(data.devices);
+      }
+      if (data.smart_protocol_status !== undefined) {
+        smartProtocolStatus.set(data.smart_protocol_status);
       }
     } catch {}
   };
