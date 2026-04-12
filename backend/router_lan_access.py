@@ -82,13 +82,18 @@ class RouterLanAccess:
                 continue
             net_name = fields.get("network", "")
             disabled = fields.get("disabled", "0") == "1"
+            device_name = fields.get("device", "")
             wifi_ifaces.setdefault(net_name, []).append({
                 "section": section,
+                "device": device_name,
                 "ssid": fields.get("ssid", ""),
                 "ifname": fields.get("ifname", ""),
-                "band": _band_from_device(fields.get("device", ""), wireless),
+                "band": _band_from_device(device_name, wireless),
                 "isolate": fields.get("isolate", "0") == "1",
                 "disabled": disabled,
+                "encryption": fields.get("encryption", ""),
+                "hidden": fields.get("hidden", "0") == "1",
+                "password": fields.get("key", ""),
             })
 
         # Get device counts per subnet
@@ -108,9 +113,29 @@ class RouterLanAccess:
 
             ssids = [
                 {"name": w["ssid"], "iface": w["ifname"], "band": w["band"],
-                 "section": w["section"]}
+                 "section": w["section"], "device": w["device"],
+                 "encryption": w["encryption"],
+                 "hidden": w["hidden"], "password": w["password"],
+                 "disabled": w["disabled"]}
                 for w in ifaces
             ]
+
+            # Radio settings (per-band, shared across all SSIDs on same radio)
+            radios = {}
+            for w in ifaces:
+                dev = w.get("device", "")
+                if dev and dev not in radios:
+                    radio = wireless.get(dev, {})
+                    radios[dev] = {
+                        "device": dev,
+                        "band": w["band"],
+                        "channel": radio.get("channel", "auto"),
+                        "txpower": radio.get("txpower", "100"),
+                        "htmode": radio.get("htmode", ""),
+                        "hwmode": radio.get("hwmode", ""),
+                        "random_bssid": radio.get("random_bssid", "0") == "1",
+                        "country": radio.get("country", ""),
+                    }
             isolation = any(w["isolate"] for w in ifaces)
             enabled = not info.get("disabled", False) and any(not w["disabled"] for w in ifaces)
             # Wired-only network (no wifi ifaces) is always "enabled"
@@ -297,6 +322,177 @@ class RouterLanAccess:
                 "uci set firewall.fvpn_lan_access.reload='1'; "
                 "uci commit firewall"
             )
+
+
+    # ── Network CRUD ───────────────────────────────────────────────
+
+    _DAT_PATHS = (
+        "/etc/wireless/mediatek/mt7986-ax6000.dbdc.b0.dat",
+        "/etc/wireless/mediatek/mt7986-ax6000.dbdc.b1.dat",
+    )
+
+    def enable_network(self, wifi_sections: list[str], net_section: str, enabled: bool) -> None:
+        """Enable or disable a network (wireless + network interface)."""
+        val = "0" if enabled else "1"
+        cmds = []
+        for s in wifi_sections:
+            if not _SAFE_NAME_RE.match(s):
+                raise ValueError(f"Invalid section: {s!r}")
+            cmds.append(f"uci set wireless.{s}.disabled='{val}'")
+        if net_section and _SAFE_NAME_RE.match(net_section):
+            cmds.append(f"uci set network.{net_section}.disabled='{val}'")
+        cmds.extend(["uci commit wireless", "uci commit network", "wifi reload 2>/dev/null; true"])
+        self._ssh.exec(" ; ".join(cmds))
+
+    def update_network_wireless(self, wifi_section: str, settings: dict) -> None:
+        """Update wireless settings for one wifi-iface section."""
+        if not _SAFE_NAME_RE.match(wifi_section):
+            raise ValueError(f"Invalid section: {wifi_section!r}")
+        allowed = {"ssid", "key", "encryption", "hidden", "isolate", "disabled"}
+        cmds = []
+        for key, val in settings.items():
+            if key not in allowed:
+                continue
+            if key in ("ssid", "key") and not val:
+                continue
+            if key in ("hidden", "isolate", "disabled"):
+                val = "1" if val else "0"
+            cmds.append(f"uci set wireless.{wifi_section}.{key}='{val}'")
+        if not cmds:
+            return
+        cmds.extend(["uci commit wireless", "wifi reload 2>/dev/null; true"])
+        self._ssh.exec(" ; ".join(cmds))
+
+    def create_network(self, zone_id: str, ssid: str, password: str,
+                       subnet_ip: str, isolation: bool = True) -> None:
+        """Create a new WiFi network with full infrastructure."""
+        if not _SAFE_NAME_RE.match(zone_id):
+            raise ValueError(f"Invalid zone ID: {zone_id!r}")
+        if not _SAFE_IP_RE.match(subnet_ip):
+            raise ValueError(f"Invalid subnet IP: {subnet_ip!r}")
+
+        # Increase BssidNum in .dat files
+        bssid_num = self._get_bssid_num()
+        new_num = bssid_num + 1
+        for path in self._DAT_PATHS:
+            self._ssh.exec(
+                f"sed -i 's/^BssidNum={bssid_num}/BssidNum={new_num}/' {path}"
+            )
+
+        iface_2g = f"ra{bssid_num}"
+        iface_5g = f"rax{bssid_num}"
+        iso = "1" if isolation else "0"
+
+        # Build UCI batch
+        lines = [
+            # Wireless 2.4G
+            f"set wireless.fvpn_{zone_id}_2g=wifi-iface",
+            f"set wireless.fvpn_{zone_id}_2g.device='mt798611'",
+            f"set wireless.fvpn_{zone_id}_2g.network='fvpn_{zone_id}'",
+            f"set wireless.fvpn_{zone_id}_2g.mode='ap'",
+            f"set wireless.fvpn_{zone_id}_2g.ifname='{iface_2g}'",
+            f"set wireless.fvpn_{zone_id}_2g.ssid='{ssid}'",
+            f"set wireless.fvpn_{zone_id}_2g.encryption='psk2'",
+            f"set wireless.fvpn_{zone_id}_2g.key='{password}'",
+            f"set wireless.fvpn_{zone_id}_2g.isolate='{iso}'",
+            f"set wireless.fvpn_{zone_id}_2g.disabled='0'",
+            # Wireless 5G
+            f"set wireless.fvpn_{zone_id}_5g=wifi-iface",
+            f"set wireless.fvpn_{zone_id}_5g.device='mt798612'",
+            f"set wireless.fvpn_{zone_id}_5g.network='fvpn_{zone_id}'",
+            f"set wireless.fvpn_{zone_id}_5g.mode='ap'",
+            f"set wireless.fvpn_{zone_id}_5g.ifname='{iface_5g}'",
+            f"set wireless.fvpn_{zone_id}_5g.ssid='{ssid}-5G'",
+            f"set wireless.fvpn_{zone_id}_5g.encryption='psk2'",
+            f"set wireless.fvpn_{zone_id}_5g.key='{password}'",
+            f"set wireless.fvpn_{zone_id}_5g.isolate='{iso}'",
+            f"set wireless.fvpn_{zone_id}_5g.disabled='0'",
+            # Network interface
+            f"set network.fvpn_{zone_id}=interface",
+            f"set network.fvpn_{zone_id}.proto='static'",
+            f"set network.fvpn_{zone_id}.type='bridge'",
+            f"set network.fvpn_{zone_id}.ipaddr='{subnet_ip}'",
+            f"set network.fvpn_{zone_id}.netmask='255.255.255.0'",
+            f"set network.fvpn_{zone_id}.force_link='1'",
+            f"set network.fvpn_{zone_id}.bridge_empty='1'",
+            # Firewall zone
+            f"set firewall.fvpn_{zone_id}_zone=zone",
+            f"set firewall.fvpn_{zone_id}_zone.name='fvpn_{zone_id}'",
+            f"set firewall.fvpn_{zone_id}_zone.network='fvpn_{zone_id}'",
+            f"set firewall.fvpn_{zone_id}_zone.input='REJECT'",
+            f"set firewall.fvpn_{zone_id}_zone.output='ACCEPT'",
+            f"set firewall.fvpn_{zone_id}_zone.forward='REJECT'",
+            # Allow DHCP + DNS from new zone
+            f"set firewall.fvpn_{zone_id}_dhcp=rule",
+            f"set firewall.fvpn_{zone_id}_dhcp.name='Allow-DHCP-fvpn_{zone_id}'",
+            f"set firewall.fvpn_{zone_id}_dhcp.src='fvpn_{zone_id}'",
+            f"set firewall.fvpn_{zone_id}_dhcp.proto='udp'",
+            f"set firewall.fvpn_{zone_id}_dhcp.dest_port='67-68'",
+            f"set firewall.fvpn_{zone_id}_dhcp.target='ACCEPT'",
+            f"set firewall.fvpn_{zone_id}_dns=rule",
+            f"set firewall.fvpn_{zone_id}_dns.name='Allow-DNS-fvpn_{zone_id}'",
+            f"set firewall.fvpn_{zone_id}_dns.src='fvpn_{zone_id}'",
+            f"set firewall.fvpn_{zone_id}_dns.proto='tcpudp'",
+            f"set firewall.fvpn_{zone_id}_dns.dest_port='53'",
+            f"set firewall.fvpn_{zone_id}_dns.target='ACCEPT'",
+            # WAN forwarding
+            f"set firewall.fvpn_{zone_id}_wan=forwarding",
+            f"set firewall.fvpn_{zone_id}_wan.src='fvpn_{zone_id}'",
+            f"set firewall.fvpn_{zone_id}_wan.dest='wan'",
+            # DHCP
+            f"set dhcp.fvpn_{zone_id}=dhcp",
+            f"set dhcp.fvpn_{zone_id}.interface='fvpn_{zone_id}'",
+            f"set dhcp.fvpn_{zone_id}.start='100'",
+            f"set dhcp.fvpn_{zone_id}.limit='150'",
+            f"set dhcp.fvpn_{zone_id}.leasetime='12h'",
+        ]
+        batch = "\n".join(lines) + "\n"
+        self._ssh.write_file("/tmp/fvpn_uci_batch.txt", batch)
+        self._ssh.exec(
+            "uci batch < /tmp/fvpn_uci_batch.txt && "
+            "uci commit wireless && uci commit network && "
+            "uci commit firewall && uci commit dhcp && "
+            "rm -f /tmp/fvpn_uci_batch.txt && "
+            "wifi reload 2>/dev/null && "
+            "/etc/init.d/firewall reload >/dev/null 2>&1 && "
+            "/etc/init.d/dnsmasq reload >/dev/null 2>&1; true"
+        )
+
+    def delete_network(self, zone_id: str) -> None:
+        """Delete a FlintVPN-created network and all its UCI sections."""
+        if zone_id in ("lan", "guest"):
+            raise ValueError(f"Cannot delete built-in network: {zone_id}")
+        if not _SAFE_NAME_RE.match(zone_id):
+            raise ValueError(f"Invalid zone ID: {zone_id!r}")
+
+        prefix = f"fvpn_{zone_id}"
+        # Find and delete all matching sections across configs
+        configs = ["wireless", "network", "firewall", "dhcp"]
+        cmds = []
+        for config in configs:
+            raw = self._ssh.exec(f"uci show {config} 2>/dev/null || true")
+            sections = RouterAPI._parse_uci_show(raw, config)
+            for section in sections:
+                if section.startswith(prefix):
+                    cmds.append(f"uci -q delete {config}.{section}")
+        if not cmds:
+            return
+        cmds.extend([
+            "uci commit wireless", "uci commit network",
+            "uci commit firewall", "uci commit dhcp",
+            "wifi reload 2>/dev/null",
+            "/etc/init.d/firewall reload >/dev/null 2>&1",
+            "/etc/init.d/dnsmasq reload >/dev/null 2>&1; true",
+        ])
+        self._ssh.exec(" ; ".join(cmds))
+
+    def _get_bssid_num(self) -> int:
+        """Read current BssidNum from the 5G .dat file."""
+        raw = self._ssh.exec(f"grep BssidNum {self._DAT_PATHS[1]} 2>/dev/null || echo 'BssidNum=2'")
+        for line in raw.strip().splitlines():
+            if line.startswith("BssidNum="):
+                return int(line.split("=")[1])
+        return 2
 
 
 def _band_from_device(device_name: str, wireless: dict) -> str:

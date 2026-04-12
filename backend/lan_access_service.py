@@ -6,6 +6,7 @@ Separate from VPNService because LAN access and VPN routing are orthogonal.
 
 import ipaddress
 import logging
+import re
 import uuid
 
 import secrets_manager as sm
@@ -107,6 +108,85 @@ class LanAccessService:
         sm.update_config(lan_access=la)
 
         return {"success": True, "rules": rules}
+
+    # ── Network CRUD ────────────────────────────────────────────────
+
+    def create_network(self, data: dict) -> dict:
+        """Create a new WiFi network with full infrastructure."""
+        name = data.get("name", "").strip()
+        password = data.get("password", "").strip()
+        isolation = data.get("isolation", True)
+        if not name:
+            raise ValueError("Network name is required")
+        if not password or len(password) < 8:
+            raise ValueError("Password must be at least 8 characters")
+
+        zone_id = re.sub(r'[^a-z0-9]', '_', name.lower())[:12]
+        subnet_ip = self._pick_subnet()
+        self.router.lan_access.create_network(zone_id, name, password, subnet_ip, isolation)
+        log.info(f"Created network '{name}' (zone=fvpn_{zone_id}, subnet={subnet_ip}/24)")
+        return {"success": True, "zone_id": f"fvpn_{zone_id}"}
+
+    def update_network(self, zone_id: str, data: dict) -> dict:
+        """Update wireless settings for a network."""
+        networks = self.router.lan_access.get_networks()
+        target = next((n for n in networks if n["id"] == zone_id), None)
+        if not target:
+            raise ValueError(f"Network '{zone_id}' not found")
+
+        # Handle enable/disable
+        if "enabled" in data:
+            sections = [s["section"] for s in target.get("ssids", []) if s.get("section")]
+            net_section = zone_id if zone_id.startswith("fvpn_") else ""
+            if not net_section:
+                net_section = "guest" if zone_id == "guest" else ""
+            self.router.lan_access.enable_network(sections, net_section, data["enabled"])
+
+        # Handle per-SSID wireless settings
+        for ssid_update in data.get("ssids", []):
+            section = ssid_update.get("section", "")
+            if not section:
+                continue
+            settings = {}
+            for key in ("ssid", "key", "encryption", "hidden", "isolate", "disabled"):
+                if key in ssid_update:
+                    settings[key] = ssid_update[key]
+            if settings:
+                self.router.lan_access.update_network_wireless(section, settings)
+
+        log.info(f"Updated network '{zone_id}'")
+        return {"success": True}
+
+    def delete_network(self, zone_id: str) -> dict:
+        """Delete a FlintVPN-created network."""
+        self.router.lan_access.delete_network(zone_id)
+        # Clean config.json rules/exceptions referencing this zone
+        config = sm.get_config()
+        la = config.get("lan_access", {})
+        la["rules"] = [r for r in la.get("rules", [])
+                       if r.get("src_zone") != zone_id and r.get("dest_zone") != zone_id]
+        la["exceptions"] = [e for e in la.get("exceptions", [])
+                            if zone_id not in e.get("label", "")]
+        sm.update_config(lan_access=la)
+        log.info(f"Deleted network '{zone_id}'")
+        return {"success": True}
+
+    def _pick_subnet(self) -> str:
+        """Pick next available 192.168.{N}.1 subnet."""
+        networks = self.router.lan_access.get_networks()
+        used = set()
+        for n in networks:
+            subnet = n.get("subnet", "")
+            if subnet:
+                try:
+                    net = ipaddress.IPv4Network(subnet, strict=False)
+                    used.add(int(net.network_address.packed[2]))
+                except ValueError:
+                    pass
+        for i in range(10, 255):
+            if i not in used:
+                return f"192.168.{i}.1"
+        raise ValueError("No available subnets")
 
     # ── Isolation ─────────────────────────────────────────────────────
 

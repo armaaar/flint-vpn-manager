@@ -18,7 +18,7 @@
   let selectedDevice = null;
   let showCreate = false;
   let editProfile = null;
-  let dashboardView = 'dashboard'; // 'dashboard' | 'settings' | 'lan-access'
+  let dashboardView = 'dashboard'; // 'dashboard' | 'settings' | 'networks'
   let settingsTab = '';  // passed to SettingsPage from hash
   let showLogs = false;
   let showServerPicker = false;
@@ -39,8 +39,8 @@
     if (hash.startsWith('settings')) {
       dashboardView = 'settings';
       settingsTab = hash.split('/')[1] || '';
-    } else if (hash === 'lan-access') {
-      dashboardView = 'lan-access';
+    } else if (hash === 'networks') {
+      dashboardView = 'networks';
       settingsTab = '';
     } else {
       dashboardView = 'dashboard';
@@ -51,13 +51,14 @@
   function navigateTo(view, tab = '') {
     if (view === 'settings') {
       window.location.hash = tab ? `settings/${tab}` : 'settings';
-    } else if (view === 'lan-access') {
-      window.location.hash = 'lan-access';
+    } else if (view === 'networks') {
+      window.location.hash = 'networks';
     } else {
       window.location.hash = '';
     }
     dashboardView = view;
     settingsTab = tab;
+    selectedDevice = null;
   }
 
   function onHashChange() { readHash(); }
@@ -201,7 +202,7 @@
     </div>
     <div class="sidebar-nav">
       <a href="#" class:active={dashboardView === 'dashboard'} on:click|preventDefault={() => navigateTo('dashboard')}><span class="nav-icon">☰</span> Dashboard</a>
-      <a href="#lan-access" class:active={dashboardView === 'lan-access'} on:click|preventDefault={() => navigateTo('lan-access')}><span class="nav-icon">🔗</span> LAN Access</a>
+      <a href="#networks" class:active={dashboardView === 'networks'} on:click|preventDefault={() => navigateTo('networks')}><span class="nav-icon">🔗</span> Networks</a>
       <a href="#settings" class:active={dashboardView === 'settings'} on:click|preventDefault={() => navigateTo('settings')}><span class="nav-icon">⚙</span> Settings</a>
       <a href="#" on:click|preventDefault={() => showLogs = true}><span class="nav-icon">📋</span> Logs</a>
     </div>
@@ -236,7 +237,7 @@
   <div class="content">
     {#if dashboardView === 'settings'}
       <SettingsPage initialTab={settingsTab} on:back={() => navigateTo('dashboard')} on:tabchange={(e) => navigateTo('settings', e.detail)} />
-    {:else if dashboardView === 'lan-access'}
+    {:else if dashboardView === 'networks'}
       <LanAccessPage on:back={() => navigateTo('dashboard')} />
     {:else}
     <div class="content-header">
@@ -316,7 +317,7 @@
 <style>
   .add-group-card { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); width: 300px; flex: 0 0 300px; padding: 24px; }
   .add-group-btn { display: flex; align-items: center; justify-content: center; gap: 8px; padding: 14px; border: 2px dashed var(--border2); border-radius: var(--radius-sm); color: var(--accent); font-size: .95rem; font-weight: 600; cursor: pointer; transition: var(--transition); background: transparent; width: 100%; }
-  .add-group-btn:hover { border-color: var(--accent); background: rgba(0,180,216,.05); }
+  .add-group-btn:hover { border-color: var(--accent); background: var(--accent-bg); }
   .add-group-hint { color: var(--fg3); font-size: .8rem; text-align: center; margin-top: 8px; }
 
   .unassigned-section { margin-top: 24px; background: var(--surface); border-radius: var(--radius); padding: 16px 20px; }
@@ -334,7 +335,7 @@
   .badge-random { font-size: .65rem; padding: 2px 6px; border-radius: 3px; font-weight: 600; background: rgba(243,156,18,.12); color: var(--amber); }
 
   .location-info { display: flex; flex-direction: column; gap: 1px; }
-  .location-ip { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: .82rem; color: var(--fg); font-weight: 500; }
+  .location-ip { font-family: var(--font-mono); font-size: .82rem; color: var(--fg); font-weight: 500; }
   .location-detail { font-size: .7rem; color: var(--fg3); }
 
   .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .6s linear infinite; }

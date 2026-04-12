@@ -22,7 +22,7 @@ from typing import Callable, Optional
 
 from consts import VALID_PROFILE_TYPES as VALID_TYPES
 
-DATA_DIR = Path(__file__).parent
+DATA_DIR = Path(__file__).parent.parent
 STORE_FILE = DATA_DIR / "profile_store.json"
 _MAC_RE = re.compile(r'^([0-9a-f]{2}:){5}[0-9a-f]{2}$', re.IGNORECASE)
 

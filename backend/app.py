@@ -31,11 +31,13 @@ from vpn_service import (
     ROUTER_BACKUP_PATH, BACKUP_FORMAT_VERSION,
 )
 
-app = Flask(__name__, static_folder="static", static_url_path="")
+import pathlib as _pathlib
+_PROJECT_ROOT = _pathlib.Path(__file__).resolve().parent.parent
+app = Flask(__name__, static_folder=str(_PROJECT_ROOT / "static"), static_url_path="")
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
-LOG_DIR = Path(__file__).parent / "logs"
+LOG_DIR = Path(__file__).parent.parent / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
 # Separate log files by purpose
@@ -653,6 +655,33 @@ def api_get_lan_networks():
     return jsonify(_get_lan_service().get_lan_overview())
 
 
+@app.route("/api/lan-access/networks", methods=["POST"])
+@require_unlocked
+def api_create_lan_network():
+    try:
+        return jsonify(_get_lan_service().create_network(request.json))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/lan-access/networks/<zone_id>", methods=["PUT"])
+@require_unlocked
+def api_update_lan_network(zone_id):
+    try:
+        return jsonify(_get_lan_service().update_network(zone_id, request.json))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/lan-access/networks/<zone_id>", methods=["DELETE"])
+@require_unlocked
+def api_delete_lan_network(zone_id):
+    try:
+        return jsonify(_get_lan_service().delete_network(zone_id))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
 @app.route("/api/lan-access/networks/<zone_id>/devices", methods=["GET"])
 @require_unlocked
 def api_get_lan_network_devices(zone_id):
@@ -1241,7 +1270,7 @@ def api_change_master_password():
 @app.route("/")
 def index():
     """Serve the main dashboard."""
-    return send_from_directory("static", "index.html")
+    return send_from_directory(str(_PROJECT_ROOT / "static"), "index.html")
 
 
 # ── Startup ───────────────────────────────────────────────────────────────────

@@ -95,6 +95,45 @@ def _default_device(mac: str, profile_id=None) -> dict:
     }
 
 
+def _build_ip_to_network_map(router) -> dict:
+    """Build {ip_string: network_label} from LAN access networks.
+
+    Best-effort — returns empty dict on failure.
+    """
+    import ipaddress
+    try:
+        networks = router.lan_access.get_networks()
+    except Exception:
+        return {}
+    subnets = []
+    for n in networks:
+        subnet_str = n.get("subnet", "")
+        label = " / ".join(s["name"] for s in n.get("ssids", []) if s.get("name")) or n.get("zone", "")
+        if subnet_str:
+            try:
+                subnets.append((ipaddress.IPv4Network(subnet_str, strict=False), label))
+            except ValueError:
+                pass
+    result = {}
+    try:
+        leases = router.get_dhcp_leases()
+        for lease in leases:
+            ip_str = lease.get("ip", "")
+            if not ip_str:
+                continue
+            try:
+                ip = ipaddress.IPv4Address(ip_str)
+                for net, label in subnets:
+                    if ip in net:
+                        result[ip_str] = label
+                        break
+            except ValueError:
+                continue
+    except Exception:
+        pass
+    return result
+
+
 # ── Standalone backup / restore functions ────────────────────────────────────
 
 
@@ -1723,11 +1762,14 @@ class VPNService:
             if mac not in devices:
                 devices[mac] = _default_device(mac, pid)
 
-        # Display name precedence and effective LAN access
+        # Resolve device IP → network name
+        network_map = _build_ip_to_network_map(self.router)
+
         out = []
         for mac, d in sorted(devices.items()):
             d["display_name"] = d.get("label") or d.get("hostname") or mac
             d["last_seen"] = None  # legacy field, no longer tracked
+            d["network"] = network_map.get(d.get("ip", ""), "")
             out.append(d)
         return out
 

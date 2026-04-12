@@ -15,7 +15,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
-DATA_DIR = Path(__file__).parent
+DATA_DIR = Path(__file__).parent.parent
 SECRETS_FILE = DATA_DIR / "secrets.enc"
 CONFIG_FILE = DATA_DIR / "config.json"
 

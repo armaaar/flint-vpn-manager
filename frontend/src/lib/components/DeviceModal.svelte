@@ -69,6 +69,9 @@
             Offline ({timeAgo(device.last_seen)})
           {/if}
         </span>
+        {#if device.network}
+          <span class="info-label">Network</span><span>{device.network}</span>
+        {/if}
         {#if device.iface}
           <span class="info-label">Interface</span><span>{device.iface}</span>
         {/if}

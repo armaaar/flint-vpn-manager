@@ -86,7 +86,7 @@
   }
   .color-btn:hover { border-color: var(--accent); }
   .color-preview { width: 20px; height: 20px; border-radius: 4px; flex-shrink: 0; }
-  .color-hex { font-size: .8rem; color: var(--fg2); font-family: monospace; }
+  .color-hex { font-size: .8rem; color: var(--fg2); font-family: var(--font-mono); }
 
   .color-dropdown {
     position: fixed; width: 214px;

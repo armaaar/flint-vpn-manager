@@ -45,7 +45,7 @@ A local web dashboard for managing ProtonVPN WireGuard and OpenVPN profiles on a
 ```bash
 # Backend
 source venv/bin/activate
-python app.py                    # Flask on http://localhost:5000
+python backend/app.py            # Flask on http://localhost:5000
 
 # Frontend dev (hot reload on :5173, proxies API to :5000)
 cd frontend && npm run dev
@@ -63,7 +63,7 @@ cd frontend && npx vitest run                           # Frontend tests
 ```
 Surface Go 2 (this machine)          GL.iNet Flint 2 Router
 ┌──────────────────────────┐         ┌─────────────────────────┐
-│  Flask (app.py :5000)    │──SSH──▶│  OpenWrt + GL.iNet FW   │
+│  Flask (backend/ :5000)  │──SSH──▶│  OpenWrt + GL.iNet FW   │
 │  Svelte (static/)        │         │  WireGuard / OpenVPN    │
 │  ProtonVPN API (keyring) │         │  route_policy + ipset   │
 │  profile_store.json      │         │  vpn-client service     │
@@ -115,7 +115,7 @@ Key rules:
 | **AP Isolation** | Per-SSID `wireless.*.isolate` flag. When enabled, WiFi clients on the same SSID cannot communicate directly (packets go through the router). Toggled via `router_lan_access.set_wifi_isolation()`. |
 | **Device Exception** | An iptables ACCEPT rule in `forwarding_rule` chain allowing a specific device (by IP) to communicate across blocked networks. Persisted in `config.json` under `lan_access.exceptions`, re-applied on unlock. |
 
-## Backend Modules
+## Backend Modules (`backend/`)
 
 ### `app.py` — Flask REST API + SSE
 Main server. Thin routing layer that delegates to `VPNService`. All API endpoints, SSE stream. Backup-to-router and auto-restore-on-unlock helpers.
@@ -167,6 +167,14 @@ Strategy pattern for tunnel create/delete/connect/disconnect/switch across the t
 
 ### `cli.py` — Click-based terminal interface
 Wraps the same backend. Commands: setup, unlock, status, server browse, router status/devices/tunnels, profile CRUD, device assignment, settings.
+
+## Design System
+
+See [DESIGN.md](DESIGN.md) for the Sentry-inspired reference and [docs/design-tokens.md](docs/design-tokens.md) for the full token catalog. Rules:
+
+- **Always consult DESIGN.md before creating or modifying UI components**
+- **Never hardcode colors, fonts, shadows, or radii in component `<style>` blocks** — use `var(--token-name)` from `frontend/src/app.css` `:root`
+- Buttons use uppercase text with `letter-spacing: 0.2px`
 
 ## Frontend (Svelte + Vite)
 
@@ -329,8 +337,8 @@ source venv/bin/activate && python -m pytest tests/ --tb=short
 cd frontend && export NVM_DIR="$HOME/.nvm" && . "$NVM_DIR/nvm.sh" && npm run build
 
 # Restart server (KEEP secrets.enc and config.json — never delete them)
-pkill -f "python app.py"; sleep 1
-source venv/bin/activate && nohup python app.py > /tmp/flintvpn.log 2>&1 &
+pkill -f "python backend/app.py"; sleep 1
+source venv/bin/activate && nohup python backend/app.py > /tmp/flintvpn.log 2>&1 &
 ```
 
 ### SSH to router

@@ -1,36 +1,102 @@
+/* ═══════════════════════════════════════════════════════
+   DESIGN TOKENS — Sentry-inspired (muted purple variant)
+   Change these to reskin the entire app.
+   ═══════════════════════════════════════════════════════ */
 :root {
-  --bg: #0e1525; --bg2: #141c2e; --bg3: #1a2540;
-  --surface: #1c2a42; --surface2: #223050;
-  --fg: #e8eaf0; --fg2: #8a94a8; --fg3: #5a6478;
-  --accent: #00b4d8; --accent2: #0096c7;
-  --green: #2ecc71; --green2: #27ae60; --green-bg: rgba(46,204,113,.12);
-  --amber: #f39c12; --amber-bg: rgba(243,156,18,.12);
-  --red: #e74c3c; --red-bg: rgba(231,76,60,.12);
-  --border: #283348; --border2: #344060;
-  --radius: 16px; --radius-sm: 10px; --radius-xs: 6px;
-  --shadow: 0 4px 16px rgba(0,0,0,.25);
-  --shadow-lg: 0 8px 32px rgba(0,0,0,.35);
+  /* ── Fonts ── */
+  --font-ui: 'Rubik', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: Monaco, Menlo, 'Ubuntu Mono', ui-monospace, monospace;
+
+  /* ── Backgrounds ── */
+  --bg: #16131e;
+  --bg2: #12101a;
+  --bg3: #1e1a28;
+
+  /* ── Surfaces (cards, panels) ── */
+  --surface: #211d2b;
+  --surface2: #2a2636;
+
+  /* ── Text ── */
+  --fg: #e8e6ef;
+  --fg2: #a9a4b8;
+  --fg3: #6b6580;
+
+  /* ── Brand / Interactive ── */
+  --accent: #7b6fce;
+  --accent2: #5a4fa8;
+  --accent-bg: rgba(123,111,206,.12);
+
+  /* ── Sentry accents ── */
+  --lime: #c2ef4e;
+  --coral: #ffb287;
+  --pink: #fa7faa;
+
+  /* ── Semantic ── */
+  --green: #2ecc71;
+  --green2: #27ae60;
+  --green-bg: rgba(46,204,113,.12);
+  --amber: #f39c12;
+  --amber-bg: rgba(243,156,18,.12);
+  --red: #e74c3c;
+  --red-bg: rgba(231,76,60,.12);
+
+  /* ── Borders ── */
+  --border: #2a2636;
+  --border2: #383345;
+
+  /* ── Radius ── */
+  --radius: 12px;
+  --radius-sm: 8px;
+  --radius-xs: 6px;
+
+  /* ── Shadows (purple-tinted) ── */
+  --shadow: 0 4px 16px rgba(10,8,16,.4);
+  --shadow-lg: 0 10px 15px -3px rgba(0,0,0,.15), 0 4px 6px rgba(10,8,16,.3);
+
+  /* ── Buttons ── */
+  --btn-primary-bg: #79628c;
+  --btn-primary-border: #584674;
+  --btn-inset: rgba(0,0,0,.1) 0 1px 3px 0 inset;
+  --btn-hover-shadow: rgba(0,0,0,.18) 0 .5rem 1.5rem;
+
+  /* ── Focus ring ── */
+  --focus-ring: 0 0 0 3px rgba(123,111,206,.2);
+
+  /* ── Glass / overlay ── */
+  --glass-bg: rgba(255,255,255,.18);
+  --glass-hover: rgba(54,22,107,.14);
+  --glass-blur: blur(12px) saturate(150%);
+  --overlay-bg: rgba(12,10,18,.75);
+
+  /* ── Transition ── */
   --transition: .2s ease;
+
+  /* ── Status gradients ── */
   --grad-connected: linear-gradient(135deg, #1a5c3a 0%, #2ecc71 50%, #a8e063 100%);
   --grad-reconnecting: linear-gradient(135deg, #5c4a1a 0%, #f39c12 50%, #f1c40f 100%);
-  --grad-disconnected: linear-gradient(135deg, #2a2a2a 0%, #444 50%, #5a5a5a 100%);
-  --grad-novpn: linear-gradient(135deg, #1a3050 0%, #2980b9 50%, #6dd5fa 100%);
-  --grad-nointernet: linear-gradient(135deg, #2a1a1a 0%, #555 50%, #777 100%);
+  --grad-disconnected: linear-gradient(135deg, #1a1822 0%, #2a2636 50%, #383345 100%);
+  --grad-novpn: linear-gradient(135deg, #181828 0%, #5a4fa8 50%, #8b80c4 100%);
+  --grad-nointernet: linear-gradient(135deg, #12101a 0%, #2a2636 50%, #383345 100%);
 }
 
+
+/* ═══════════════════════════════════════════════════════
+   GLOBAL STYLES — reference tokens above, not raw values
+   ═══════════════════════════════════════════════════════ */
+
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--fg); min-height: 100vh; line-height: 1.5; }
+body { font-family: var(--font-ui); background: var(--bg); color: var(--fg); min-height: 100vh; line-height: 1.5; }
 ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: transparent; } ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
 
-button { cursor: pointer; border: none; border-radius: var(--radius-xs); padding: 10px 20px; font-size: .875rem; font-weight: 500; transition: var(--transition); font-family: inherit; }
+button { cursor: pointer; border: none; border-radius: var(--radius-xs); padding: 10px 20px; font-size: .875rem; font-weight: 500; transition: var(--transition); font-family: inherit; text-transform: uppercase; letter-spacing: 0.2px; }
 button:hover { filter: brightness(1.1); }
 input, select { background: var(--bg); color: var(--fg); border: 1.5px solid var(--border); border-radius: var(--radius-xs); padding: 10px 14px; font-size: .875rem; width: 100%; font-family: inherit; transition: var(--transition); }
-input:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(0,180,216,.15); }
+input:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: var(--focus-ring); }
 
-.btn-primary { background: var(--accent); color: #fff; } .btn-primary:hover { background: var(--accent2); }
+.btn-primary { background: var(--btn-primary-bg); color: #fff; border: 1px solid var(--btn-primary-border); box-shadow: var(--btn-inset); } .btn-primary:hover { box-shadow: var(--btn-hover-shadow); filter: none; }
 button:disabled { opacity: 0.5; cursor: not-allowed; filter: none; }
-.btn-danger { background: var(--red); color: #fff; }
-.btn-outline { background: transparent; color: var(--fg); border: 1.5px solid var(--border2); }
+.btn-danger { background: var(--red); color: #fff; box-shadow: var(--btn-inset); }
+.btn-outline { background: transparent; color: var(--fg2); border: 1.5px solid var(--border2); }
 .btn-outline:hover { border-color: var(--accent); color: var(--accent); }
 .btn-sm { padding: 6px 12px; font-size: .8rem; }
 .btn-lg { padding: 14px 0; font-size: 1rem; width: 100%; border-radius: var(--radius-sm); font-weight: 600; }
@@ -62,7 +128,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; filter: none; }
 
 .groups-container { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; padding-bottom: 16px; }
 
-.modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.55); backdrop-filter: blur(4px); z-index: 200; align-items: center; justify-content: center; }
+.modal-overlay { display: none; position: fixed; inset: 0; background: var(--overlay-bg); backdrop-filter: var(--glass-blur); z-index: 200; align-items: center; justify-content: center; }
 .modal-overlay.active { display: flex; }
 .modal { background: var(--bg2); border-radius: var(--radius); width: 95%; max-width: 560px; max-height: 85vh; overflow-y: auto; box-shadow: var(--shadow-lg); border: 1px solid var(--border); }
 .modal-header { display: flex; justify-content: space-between; align-items: center; padding: 18px 24px; border-bottom: 1px solid var(--border); }

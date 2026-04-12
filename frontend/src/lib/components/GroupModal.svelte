@@ -604,7 +604,7 @@
   .protocol-cards { display: flex; gap: 10px; }
   .protocol-card { flex: 1; padding: 12px; border: 2px solid var(--border); border-radius: var(--radius-xs); background: var(--bg); cursor: pointer; text-align: left; transition: var(--transition); }
   .protocol-card:hover { border-color: var(--fg3); }
-  .protocol-card.selected { border-color: var(--accent); background: rgba(0,180,216,.08); }
+  .protocol-card.selected { border-color: var(--accent); background: var(--accent-bg); }
   .proto-name { font-size: .9rem; font-weight: 600; margin-bottom: 4px; color: var(--fg); }
   .proto-desc { font-size: .75rem; color: var(--fg2); line-height: 1.4; }
   .proto-slots { font-size: .7rem; color: var(--fg3); margin-top: 6px; }

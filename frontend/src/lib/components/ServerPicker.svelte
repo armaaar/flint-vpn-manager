@@ -706,7 +706,7 @@
   }
   .dropdown-item:last-child { border-bottom: none; }
   .dropdown-item:hover { background: var(--bg3); }
-  .dropdown-item.selected { background: rgba(0,180,216,.12); }
+  .dropdown-item.selected { background: var(--accent-bg); }
 
   .item-main { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .item-meta { font-size: .7rem; color: var(--fg3); flex-shrink: 0; }
@@ -726,7 +726,7 @@
      dimmer, with a leading bolt to echo the "Fastest" iconography. */
   .score-pct {
     font-size: .68rem; color: var(--fg3);
-    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-family: var(--font-mono);
     min-width: 38px; text-align: right; flex-shrink: 0;
   }
   .score-pct::before { content: "⚡ "; opacity: .55; }
@@ -756,7 +756,7 @@
   /* Latency badges on server items */
   .latency-badge {
     font-size: .65rem; padding: 1px 5px; border-radius: 3px;
-    font-weight: 600; flex-shrink: 0; font-family: ui-monospace, monospace;
+    font-weight: 600; flex-shrink: 0; font-family: var(--font-mono);
   }
   .latency-badge.good { background: rgba(46, 204, 113, .15); color: #2ecc71; }
   .latency-badge.warn { background: rgba(243, 156, 18, .15); color: #f39c12; }

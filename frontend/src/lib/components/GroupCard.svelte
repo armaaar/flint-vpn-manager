@@ -394,8 +394,8 @@
   .group-header-actions { display: flex; gap: 4px; align-items: center; }
   .drag-handle { color: rgba(255,255,255,.4); cursor: grab; font-size: 1.1rem; padding: 4px; user-select: none; }
   .drag-handle:hover { color: rgba(255,255,255,.7); }
-  .group-settings-btn { background: rgba(255,255,255,.2); border: none; color: #fff; width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 1rem; cursor: pointer; }
-  .group-settings-btn:hover { background: rgba(255,255,255,.35); }
+  .group-settings-btn { background: rgba(255,255,255,.15); border: none; color: #fff; width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 1rem; cursor: pointer; backdrop-filter: var(--glass-blur); }
+  .group-settings-btn:hover { background: rgba(255,255,255,.3); }
   .group-status-label { font-size: .8rem; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: rgba(255,255,255,.85); margin-top: 6px; display: flex; align-items: center; gap: 6px; }
   .conn-type { font-size: .6rem; padding: 2px 6px; border-radius: 3px; background: rgba(255,255,255,.2); color: rgba(255,255,255,.7); font-weight: 500; letter-spacing: .03em; }
   .group-server { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
@@ -405,7 +405,7 @@
   :global(.flag-img) { width: 20px; height: 15px; vertical-align: middle; border-radius: 2px; object-fit: cover; }
   .proto-tag { font-size: .6rem; padding: 1px 5px; border-radius: 3px; font-weight: 700; vertical-align: middle; margin-left: 4px; }
   .proto-tag.wg { background: rgba(46,204,113,.2); color: #2ecc71; }
-  .proto-tag.ovpn { background: rgba(0,180,216,.2); color: #00b4d8; }
+  .proto-tag.ovpn { background: var(--accent-bg); color: var(--accent); }
   .group-connect-area { margin-top: 14px; }
 
   .vpn-options-toggle {
@@ -420,7 +420,7 @@
     font-size: .68rem; font-weight: 600; letter-spacing: .03em;
   }
   .opt-pill.ks-on { background: rgba(46,204,113,.18); color: #2ecc71; }
-  .opt-pill.ns-on { background: rgba(0,180,216,.18); color: #00b4d8; }
+  .opt-pill.ns-on { background: var(--accent-bg); color: var(--accent); }
   .opt-pill.ns-active { background: rgba(46,204,113,.2); color: #2ecc71; font-weight: 600; }
   .opt-pill.sp-on { background: rgba(243,156,18,.18); color: #f39c12; }
   .opt-pill.ab-on { background: rgba(231,76,60,.18); color: #e74c3c; }
@@ -441,10 +441,11 @@
   .device-drop-zone { min-height: 40px; }
   .no-devices { padding: 16px; text-align: center; color: var(--fg3); font-size: .85rem; }
 
-  :global(.btn-connect) { background: #fff; color: #1a5c3a; font-weight: 700; padding: 14px 0; font-size: 1rem; width: 100%; border-radius: var(--radius-sm); border: none; cursor: pointer; }
-  :global(.btn-disconnect) { background: rgba(255,255,255,.2); color: #fff; border: 2px solid rgba(255,255,255,.4); font-weight: 700; padding: 14px 0; font-size: 1rem; width: 100%; border-radius: var(--radius-sm); cursor: pointer; backdrop-filter: blur(4px); }
-  :global(.btn-disconnect:hover) { background: rgba(255,255,255,.3); }
-  :global(.btn-transition) { background: rgba(255,255,255,.15); color: rgba(255,255,255,.8); font-weight: 600; padding: 14px 0; font-size: 1rem; width: 100%; border-radius: var(--radius-sm); border: none; cursor: wait; display: flex; align-items: center; justify-content: center; gap: 8px; }
+  :global(.btn-connect) { background: #fff; color: var(--bg); font-weight: 700; padding: 14px 0; font-size: 1rem; width: 100%; border-radius: var(--radius-sm); border: none; cursor: pointer; text-transform: uppercase; letter-spacing: .2px; }
+  :global(.btn-connect:hover) { background: var(--accent); color: #fff; }
+  :global(.btn-disconnect) { background: var(--glass-bg); color: #fff; border: none; font-weight: 700; padding: 14px 0; font-size: 1rem; width: 100%; border-radius: var(--radius-sm); cursor: pointer; backdrop-filter: var(--glass-blur); box-shadow: var(--shadow); text-transform: uppercase; letter-spacing: .2px; }
+  :global(.btn-disconnect:hover) { background: var(--glass-hover); }
+  :global(.btn-transition) { background: rgba(255,255,255,.15); color: rgba(255,255,255,.8); font-weight: 600; padding: 14px 0; font-size: 1rem; width: 100%; border-radius: var(--radius-sm); border: none; cursor: wait; display: flex; align-items: center; justify-content: center; gap: 8px; backdrop-filter: var(--glass-blur); text-transform: uppercase; letter-spacing: .2px; }
   .btn-spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,.3); border-top-color: #fff; border-radius: 50%; animation: spin .6s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
 

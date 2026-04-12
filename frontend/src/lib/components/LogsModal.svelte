@@ -106,7 +106,7 @@
   .log-size { font-size: .65rem; opacity: .7; }
   .log-actions { margin-left: auto; display: flex; gap: 4px; }
   .log-info-bar { font-size: .75rem; color: var(--fg3); margin-bottom: 6px; }
-  .log-content { background: #0a0e18; border: 1px solid var(--border); border-radius: var(--radius-xs); padding: 10px; font-family: 'Consolas', 'Monaco', 'Courier New', monospace; font-size: .78rem; line-height: 1.6; max-height: 400px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
+  .log-content { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-xs); padding: 10px; font-family: var(--font-mono); font-size: .78rem; line-height: 1.6; max-height: 400px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }
   .log-line { padding: 1px 0; }
   .log-error { color: var(--red); }
   .log-warn { color: var(--amber); }
