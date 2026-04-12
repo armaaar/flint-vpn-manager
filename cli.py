@@ -247,8 +247,9 @@ def reset_local_state(yes, keep_router):
     if not keep_router:
         try:
             router = get_router_api()
-            router.fvpn_lan_wipe_all()
-            click.echo("Wiped all fvpn_* router state (UCI sections + ipsets)")
+            import noint_sync
+            noint_sync.wipe_noint(router)
+            click.echo("Wiped NoInternet router state (UCI sections + ipsets)")
         except Exception as e:
             click.echo(f"Warning: router wipe failed: {e}")
 

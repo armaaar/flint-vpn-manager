@@ -447,9 +447,6 @@ class TestTunnelStatusOpenVPN:
         assert health == "red"
 
 
-# LAN access tests moved to test_lan_sync.py for the new UCI execution layer.
-
-
 # ── Unit Tests: ID Range Non-Overlap ─────────────────────────────────────────
 
 class TestIdRanges:

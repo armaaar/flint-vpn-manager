@@ -242,6 +242,13 @@ class RouterAPI:
             self._devices_facade = RouterDevices(self, self.policy)
         return self._devices_facade
 
+    @property
+    def adblock(self):
+        if not hasattr(self, "_adblock_facade"):
+            from router_adblock import RouterAdblock
+            self._adblock_facade = RouterAdblock(self)
+        return self._adblock_facade
+
     # ── Delegates: Devices ───────────────────────────────────────────────
 
     def get_dhcp_leases(self) -> list[dict]:
@@ -1213,10 +1220,5 @@ start_service() {
     def fvpn_ipset_destroy(self, set_name: str) -> None:
         return self.firewall.fvpn_ipset_destroy(set_name)
 
-    def fvpn_lan_full_state(self) -> dict:
-        return self.firewall.fvpn_lan_full_state()
-
-    def fvpn_lan_wipe_all(self) -> None:
-        return self.firewall.fvpn_lan_wipe_all()
 
 

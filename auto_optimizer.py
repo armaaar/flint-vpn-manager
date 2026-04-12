@@ -51,6 +51,7 @@ class AutoOptimizer:
         self._stop_event = threading.Event()
         self._last_run_date: Optional[str] = None
         self._last_cert_check_date: Optional[str] = None
+        self._last_blocklist_check_date: Optional[str] = None
         # profile_id → datetime of last successful auto-switch.
         self._last_switch_at: Dict[str, datetime] = {}
 
@@ -78,6 +79,10 @@ class AutoOptimizer:
                 pass
             try:
                 self.check_and_refresh_certs()
+            except Exception:
+                pass
+            try:
+                self.check_and_update_blocklist()
             except Exception:
                 pass
             self._stop_event.wait(self.poll_interval)
@@ -311,6 +316,76 @@ class AutoOptimizer:
 
         except Exception as e:
             log.error(f"Cert renewal: failed: {e}")
+
+
+    # ── DNS ad-block blocklist updates ─────────────────────────────────────
+
+    def check_and_update_blocklist(self):
+        """Once per day, download all selected blocklists and upload to router.
+
+        Runs independently of auto-optimize. Only acts if blocklist sources
+        are configured.
+        """
+        now = datetime.now()
+        current_date = now.strftime("%Y-%m-%d")
+
+        if self._last_blocklist_check_date == current_date:
+            return  # Already checked today
+
+        self._last_blocklist_check_date = current_date
+
+        config = sm.get_config()
+        adblock = config.get("adblock", {})
+        sources = adblock.get("blocklist_sources", [])
+        if not sources:
+            return
+
+        try:
+            import requests as http_requests
+            from consts import BLOCKLIST_PRESETS
+
+            all_domains = set()
+            for source in sources:
+                url = BLOCKLIST_PRESETS.get(source, {}).get("url", source)
+                try:
+                    resp = http_requests.get(url, timeout=120)
+                    resp.raise_for_status()
+                    for line in resp.text.splitlines():
+                        line = line.strip()
+                        if not line or line.startswith("#"):
+                            continue
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            domain = parts[1].lower()
+                            if domain and domain != "localhost":
+                                all_domains.add(domain)
+                        elif len(parts) == 1 and "." in parts[0]:
+                            all_domains.add(parts[0].lower())
+                except Exception as e:
+                    log.warning(f"Blocklist: failed to download {url}: {e}")
+
+            if not all_domains:
+                return
+
+            sorted_domains = sorted(all_domains)
+            content = "# FlintVPN merged blocklist\n"
+            content += f"# Sources: {', '.join(sources)}\n"
+            content += f"# Domains: {len(sorted_domains)}\n\n"
+            for d in sorted_domains:
+                content += f"0.0.0.0 {d}\n"
+
+            router = self.get_router()
+            if not router:
+                return
+
+            router.adblock.upload_blocklist(content)
+            adblock["last_updated"] = now.isoformat()
+            adblock["domain_count"] = len(sorted_domains)
+            sm.update_config(adblock=adblock)
+            log.info(f"Blocklist auto-update: {len(sorted_domains)} domains from {len(sources)} source(s)")
+
+        except Exception as e:
+            log.warning(f"Blocklist auto-update failed: {e}")
 
 
 def get_optimizer() -> Optional[AutoOptimizer]:

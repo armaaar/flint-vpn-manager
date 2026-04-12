@@ -7,7 +7,7 @@
   import DeviceModal from './DeviceModal.svelte';
   import GroupModal from './GroupModal.svelte';
   import ServerPicker from './ServerPicker.svelte';
-  import SettingsModal from './SettingsModal.svelte';
+  import SettingsPage from './SettingsPage.svelte';
   import LogsModal from './LogsModal.svelte';
 
   let refreshing = false;
@@ -17,14 +17,15 @@
   let selectedDevice = null;
   let showCreate = false;
   let editProfile = null;
-  let showSettings = false;
+  let dashboardView = 'dashboard'; // 'dashboard' | 'settings'
+  let settingsTab = '';  // passed to SettingsPage from hash
   let showLogs = false;
   let showServerPicker = false;
   let serverPickerProfileId = null;
   let serverPickerCallback = null;
   let serverPickerProtocol = 'wireguard';
 
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { TRIGGERS, SOURCES } from 'svelte-dnd-action';
   const MAC_RE = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i;
 
@@ -32,10 +33,39 @@
   let groupItems = [];
   $: groupItems = $profiles.map(p => ({ ...p }));
 
+  function readHash() {
+    const hash = window.location.hash.replace('#', '');
+    if (hash.startsWith('settings')) {
+      dashboardView = 'settings';
+      settingsTab = hash.split('/')[1] || '';
+    } else {
+      dashboardView = 'dashboard';
+      settingsTab = '';
+    }
+  }
+
+  function navigateTo(view, tab = '') {
+    if (view === 'settings') {
+      window.location.hash = tab ? `settings/${tab}` : 'settings';
+    } else {
+      window.location.hash = '';
+    }
+    dashboardView = view;
+    settingsTab = tab;
+  }
+
+  function onHashChange() { readHash(); }
+
   onMount(async () => {
+    readHash();
+    window.addEventListener('hashchange', onHashChange);
     await reload();
     initialLoading = false;
     loadLocation();
+  });
+
+  onDestroy(() => {
+    if (typeof window !== 'undefined') window.removeEventListener('hashchange', onHashChange);
   });
 
   let locationError = false;
@@ -164,8 +194,8 @@
       FlintVPN
     </div>
     <div class="sidebar-nav">
-      <a href="#" class="active"><span class="nav-icon">☰</span> Dashboard</a>
-      <a href="#" on:click|preventDefault={() => showSettings = true}><span class="nav-icon">⚙</span> Settings</a>
+      <a href="#" class:active={dashboardView === 'dashboard'} on:click|preventDefault={() => navigateTo('dashboard')}><span class="nav-icon">☰</span> Dashboard</a>
+      <a href="#settings" class:active={dashboardView === 'settings'} on:click|preventDefault={() => navigateTo('settings')}><span class="nav-icon">⚙</span> Settings</a>
       <a href="#" on:click|preventDefault={() => showLogs = true}><span class="nav-icon">📋</span> Logs</a>
     </div>
     <div class="sidebar-bottom">
@@ -197,6 +227,9 @@
 
   <!-- Main content -->
   <div class="content">
+    {#if dashboardView === 'settings'}
+      <SettingsPage initialTab={settingsTab} on:back={() => navigateTo('dashboard')} on:tabchange={(e) => navigateTo('settings', e.detail)} />
+    {:else}
     <div class="content-header">
       <h2>Dashboard</h2>
       <div class="header-actions">
@@ -260,6 +293,7 @@
         <div class="unassigned-empty">Drop devices here to unassign them</div>
       {/if}
     </div>
+    {/if}
   </div>
 </div>
 
@@ -268,7 +302,6 @@
 <GroupModal bind:visible={showCreate} onNeedServer={handleNeedServer} on:reload={reload} />
 <GroupModal bind:profile={editProfile} on:reload={reload} />
 <ServerPicker bind:visible={showServerPicker} profileId={serverPickerProfileId} vpnProtocol={serverPickerProtocol} on:select={handleServerSelect} on:close={() => showServerPicker = false} />
-<SettingsModal bind:visible={showSettings} />
 <LogsModal bind:visible={showLogs} />
 
 <style>

@@ -284,6 +284,7 @@
             ⛨ {connState === 'connected' ? netshieldLabel : 'NS' + profile.options.netshield}
           </span>
         {/if}
+        {#if profile.adblock}<span class="opt-pill ab-on" title="DNS Ad Blocker">🚫 Ads</span>{/if}
         {#if profile.options?.smart_protocol}<span class="opt-pill sp-on" title="Smart Protocol">⚡ SP</span>{/if}
         {#if profile.server_scope?.features?.tor}<span class="opt-pill tor-on" title="Tor routing">🧅</span>{/if}
       </span>
@@ -323,6 +324,12 @@
             <span class="opt-value">{profile.options.custom_dns}</span>
           </div>
         {/if}
+        {#if profile.adblock}
+          <div class="opt-row">
+            <span class="opt-label">DNS Ad Blocker</span>
+            <span class="opt-value">On</span>
+          </div>
+        {/if}
         {#if profile.options?.smart_protocol}
           <div class="opt-row">
             <span class="opt-label">Smart Protocol</span>
@@ -351,6 +358,12 @@
         {/if}
       </div>
     {/if}
+  {/if}
+
+  {#if profile.type !== 'vpn' && profile.type !== 'no_internet' && profile.adblock}
+    <div class="adblock-indicator">
+      <span class="opt-pill ab-on" title="DNS Ad Blocker">🚫 Ads</span>
+    </div>
   {/if}
 
   <div class="group-devices">
@@ -410,6 +423,8 @@
   .opt-pill.ns-on { background: rgba(0,180,216,.18); color: #00b4d8; }
   .opt-pill.ns-active { background: rgba(46,204,113,.2); color: #2ecc71; font-weight: 600; }
   .opt-pill.sp-on { background: rgba(243,156,18,.18); color: #f39c12; }
+  .opt-pill.ab-on { background: rgba(231,76,60,.18); color: #e74c3c; }
+  .adblock-indicator { padding: 4px 12px 0; }
   .opt-pill.tor-on { background: rgba(155,89,182,.18); color: #9b59b6; }
   .caret { color: var(--fg3); font-size: .7rem; }
   .vpn-options {

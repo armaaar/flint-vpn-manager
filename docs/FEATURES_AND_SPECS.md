@@ -31,10 +31,10 @@ Route assigned devices through a ProtonVPN tunnel.
 - **Auto-optimizer** — background thread that, at a configured time of day, switches eligible groups (scope ≠ "server") to servers with better Proton scores. Uses a 20% relative improvement threshold and 6-hour per-profile cooldown to prevent flapping. When VPN options change (NetShield, Moderate NAT, NAT-PMP, VPN Accelerator), the WireGuard persistent certificate is automatically refreshed before generating the new config (these features are baked into the cert at registration time).
 
 ### No VPN groups
-Devices use the LAN's normal default route (no VPN). Useful for putting trusted devices on direct internet while keeping LAN isolation rules.
+Devices use the LAN's normal default route (no VPN). Useful for grouping trusted devices on direct internet.
 
 ### No Internet groups
-Devices have LAN access but no WAN. Implemented as `firewall.fvpn_noinet_<mac>_*` iptables rules per assigned device. Multiple NoInternet groups can coexist (e.g. "Quarantine" + "Printers Only") — they're distinguished by local profile_id, not by router state.
+Devices have LAN access but no WAN. Implemented via the `fvpn_noint_ips` ipset + `fvpn_noint_block` firewall rule, managed by `noint_sync.py`. Multiple NoInternet groups can coexist (e.g. "Quarantine" + "Printers Only") -- they're distinguished by local profile_id, not by router state.
 
 ---
 
@@ -51,33 +51,6 @@ Devices have LAN access but no WAN. Implemented as `firewall.fvpn_noinet_<mac>_*
 
 ---
 
-## LAN Access Control
-
-Granular firewall rules controlling device-to-device LAN traffic. Independent of VPN routing — applies whether or not the group's tunnel is up.
-
-- **Three states per direction**:
-  - `allowed` — no restriction
-  - `group_only` — can only talk to other devices in the same group
-  - `blocked` — no LAN access at all
-- **Per-group settings** — `outbound` and `inbound` configured in the EditGroup modal
-- **Per-device overrides** — individual devices can override group settings (set in DeviceModal). Overrides are partial — you can override just one direction, or just add an exception, without touching the others.
-- **Exception lists (allow lists)** — each direction (`outbound`/`inbound`) accepts a list of "always-allowed" peers that pierce a `group_only`/`blocked` posture for specific peers without weakening it for everyone else. Entries can be:
-  - **A specific device** (MAC string) — survives the device moving between groups, but breaks if the device uses a randomized MAC that changes on reconnect
-  - **A whole group** (profile ID) — auto-tracks the group's current membership at rule-build time, so devices joining/leaving the referenced group take effect on the next rebuild without re-editing the exception
-- **Common patterns enabled by exceptions**:
-  - *"Locked-down group, except this one peer can reach in"* — `inbound: group_only` + `inbound_allow: [<that peer's MAC>]`
-  - *"Outbound only to Group X, nothing else"* — `outbound: blocked` + `outbound_allow: [<group X's profile id>]`
-  - *"Outbound to my own group AND Group X"* — `outbound: group_only` + `outbound_allow: [<group X's profile id>]`
-- **Inheritance** — at the device-override layer, exception lists **merge additively** with the group's (`group ∪ device`). State fields still *replace* the group's. In the DeviceModal, group-inherited exceptions appear greyed out and are removed by editing the group, not the device.
-- **Direction is one-way** — `inbound_allow` opens inbound only; the reverse direction is unaffected. (If you want symmetric access, also add the corresponding `outbound_allow` on the other side, or rely on the other group already being open in that direction.)
-- **No subtraction (v1)** — there's no way to express *"all of Group X except this one member"*. Forward-compatible with adding deny lists later if a real case appears.
-- **Profile-deletion cleanup** — deleting a group automatically strips its profile ID from every other group's and device override's allow lists.
-- **Implementation** — UCI-native `config ipset` and `config rule` sections in `/etc/config/firewall`, managed by `fw3`. Per-group ipsets: `fvpn_lan_{short_id}_ips` (IP membership), `fvpn_extra_{short_id}_{dir}_ips` (exception IPs). Per-device overrides: `fvpn_devovr_{mac}_{dir}_ips`. Global NoInternet: `fvpn_noint_ips`. Device-override rules are emitted before group rules in UCI section order so they take precedence in the iptables chain.
-- **Live IP source** — device IPs come from `router.get_dhcp_leases()` at rule-build time, not from any local cache. Allow-list peers with no resolvable DHCP IP are silently skipped.
-- **Triggers** — rules are rebuilt on session unlock, profile create/delete, device assignment change, LAN setting change, and when the device tracker detects an IP change for a restricted device
-
----
-
 ## Live Status Sync
 
 Server-Sent Events (`/api/stream`) push every 10 seconds:
@@ -91,7 +64,7 @@ Server-Sent Events (`/api/stream`) push every 10 seconds:
 The SSE loop also runs side effects each tick:
 - `tracker.poll_once()` — detect new devices
 - `service.tick_smart_protocol()` — monitor and switch protocols for Smart Protocol retries
-- `service.sync_lan_to_router()` — reconcile firewall rules when device IPs change
+- `service.sync_noint_to_router()` — reconcile NoInternet firewall rules when device IPs change
 
 The SSE endpoint returns 401 when the session is locked (prevents resource leaks from unauthenticated EventSource connections).
 
@@ -154,9 +127,6 @@ PUT    /api/profiles/:id/guest          → set as guest group
 GET    /api/devices                     → live device list (5s in-memory TTL)
 PUT    /api/devices/:mac/profile        → assign device to a profile
 PUT    /api/devices/:mac/label          → set custom name + device class
-PUT    /api/profiles/:id/lan-access     → set group LAN policy + exception lists
-PUT    /api/devices/:mac/lan-access     → set per-device LAN override + exception lists
-
 POST   /api/refresh                     → trigger device tracker poll + server score refresh
 POST   /api/probe-latency              → TCP latency probe from router {server_ids:[]} → {latencies:{id:ms}}
 GET    /api/stream                      → SSE: live state push (10s tick)
@@ -204,7 +174,7 @@ GET    /                                → serve Svelte frontend
 |------|----------|-----------|
 | `secrets.enc` | Encrypted Proton + router credentials. **Never delete.** | Via app only |
 | `config.json` | Router IP, master password salt, auto-optimize schedule, alternative routing toggle, server blacklist/favourites. **Never delete.** | Via SettingsModal |
-| `profile_store.json` | UI metadata for profiles, non-VPN device assignments, LAN overrides. Slim by design (see `CLAUDE.md` source-of-truth section) | Via app only |
+| `profile_store.json` | UI metadata for profiles, non-VPN device assignments. Slim by design (see `CLAUDE.md` source-of-truth section) | Via app only |
 | `logs/app.log`, `error.log`, `access.log` | Application logs | Cleared via LogsModal |
 | `static/` | Compiled Svelte frontend (Vite output) | Rebuilt by `cd frontend && npm run build` |
 

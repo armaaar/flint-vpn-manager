@@ -3,7 +3,6 @@
   import { profiles, showToast } from '../stores/app.js';
   import EmojiPicker from './EmojiPicker.svelte';
   import ColorPicker from './ColorPicker.svelte';
-  import LanPeerPicker from './LanPeerPicker.svelte';
   import HelpTooltip from './HelpTooltip.svelte';
   import { createEventDispatcher } from 'svelte';
 
@@ -39,9 +38,7 @@
   let portOverride = '';  // '' = default, or specific port number
   let customDns = '';     // '' = Proton DNS, or custom DNS IP
   let smartProtocol = false;
-  let lanOutbound = 'allowed', lanInbound = 'allowed';
-  let lanOutboundAllow = [];
-  let lanInboundAllow = [];
+  let adblock = false;
   let error = '';
   let saving = false, deleting = false;
 
@@ -65,14 +62,6 @@
   );
 
   // ── Helpers ───────────────────────────────────────────────────────────
-  const MAC_RE = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i;
-  function rawListToEntries(raw) {
-    return (raw || []).map(v => ({ value: v, type: MAC_RE.test(v) ? 'mac' : 'profile' }));
-  }
-  function entriesToRawList(entries) {
-    return (entries || []).map(e => e.value);
-  }
-
   // ── Protocol slot counts (exclude current profile in edit mode) ──────
   $: wgCount = $profiles.filter(p => p.type === 'vpn' && p.router_info?.vpn_protocol === 'wireguard' && p.id !== liveProfile?.id).length;
   $: pwgCount = $profiles.filter(p => p.type === 'vpn' && (p.router_info?.vpn_protocol || '').startsWith('wireguard-') && p.id !== liveProfile?.id).length;
@@ -98,10 +87,6 @@
     icon = liveProfile.icon;
     color = liveProfile.color;
     isGuest = liveProfile.is_guest || false;
-    lanOutbound = liveProfile.lan_access?.outbound || 'allowed';
-    lanInbound = liveProfile.lan_access?.inbound || 'allowed';
-    lanOutboundAllow = rawListToEntries(liveProfile.lan_access?.outbound_allow);
-    lanInboundAllow = rawListToEntries(liveProfile.lan_access?.inbound_allow);
     killSwitch = liveProfile.kill_switch === true;
     const opts = liveProfile.options || {};
     netshield = String(opts.netshield ?? '0');
@@ -111,6 +96,7 @@
     portOverride = opts.port ? String(opts.port) : '';
     customDns = opts.custom_dns || '';
     smartProtocol = !!opts.smart_protocol;
+    adblock = !!liveProfile.adblock;
     initialOptions = { killSwitch, netshield, accelerator, moderateNat, natPmp, portOverride, customDns, smartProtocol };
     // Protocol
     const curProto = liveProfile.router_info?.vpn_protocol || 'wireguard';
@@ -129,8 +115,7 @@
     vpnProtocol = 'wireguard'; wgTcpTransport = 'tcp'; ovpnProtocol = 'udp';
     killSwitch = true; netshield = '2'; accelerator = true; moderateNat = false; natPmp = false;
     portOverride = ''; customDns = ''; smartProtocol = false;
-    lanOutbound = 'allowed'; lanInbound = 'allowed';
-    lanOutboundAllow = []; lanInboundAllow = [];
+    adblock = false;
     error = '';
   }
 
@@ -140,12 +125,6 @@
       icon = icons[type] || '🔒';
     }
     error = '';
-  }
-
-  function applyPreset(preset) {
-    if (preset === 'open') { lanOutbound = 'allowed'; lanInbound = 'allowed'; }
-    else if (preset === 'isolated') { lanOutbound = 'group_only'; lanInbound = 'group_only'; }
-    else if (preset === 'locked') { lanOutbound = 'blocked'; lanInbound = 'blocked'; }
   }
 
   // ── Submit ────────────────────────────────────────────────────────────
@@ -183,10 +162,8 @@
       visible = false;
       if (onNeedServer) {
         const savedState = {
-          lanOut: lanOutbound, lanIn: lanInbound,
-          outAllow: entriesToRawList(lanOutboundAllow),
-          inAllow: entriesToRawList(lanInboundAllow),
           opts: buildVpnOptions(), ks: killSwitch,
+          adblock,
         };
         onNeedServer(async (serverId, _options, scope) => {
           const body = {
@@ -196,17 +173,10 @@
             ovpn_protocol: ovpnProtocol,
             server_scope: scope,
             kill_switch: savedState.ks,
+            adblock: savedState.adblock,
           };
           const res = await api.createProfile(body);
           if (res.error) { showToast(res.error, true); return; }
-          const hasLan = savedState.lanOut !== 'allowed' || savedState.lanIn !== 'allowed'
-            || savedState.outAllow.length || savedState.inAllow.length;
-          if (hasLan) {
-            await api.setProfileLanAccess(res.id, {
-              outbound: savedState.lanOut, inbound: savedState.lanIn,
-              outbound_allow: savedState.outAllow, inbound_allow: savedState.inAllow,
-            });
-          }
           showToast(`Created ${icon} ${name}`);
           dispatch('reload');
         }, vpnProtocol);
@@ -215,17 +185,8 @@
     }
 
     // Non-VPN create
-    const res = await api.createProfile({ name, type, color, icon, is_guest: isGuest });
+    const res = await api.createProfile({ name, type, color, icon, is_guest: isGuest, adblock });
     if (res.error) { error = res.error; return; }
-    const outAllow = entriesToRawList(lanOutboundAllow);
-    const inAllow = entriesToRawList(lanInboundAllow);
-    const hasLan = lanOutbound !== 'allowed' || lanInbound !== 'allowed' || outAllow.length || inAllow.length;
-    if (hasLan) {
-      await api.setProfileLanAccess(res.id, {
-        outbound: lanOutbound, inbound: lanInbound,
-        outbound_allow: outAllow, inbound_allow: inAllow,
-      });
-    }
     visible = false;
     showToast(`Created ${icon} ${name}`);
     dispatch('reload');
@@ -240,9 +201,7 @@
       if (onNeedServer) {
         const savedState = {
           profileId: liveProfile.id, ks: killSwitch, opts: buildVpnOptions(),
-          lanOut: lanOutbound, lanIn: lanInbound,
-          outAllow: entriesToRawList(lanOutboundAllow),
-          inAllow: entriesToRawList(lanInboundAllow),
+          adblock,
         };
         onNeedServer(async (serverId, _options, scope) => {
           const res = await api.changeType(savedState.profileId, {
@@ -255,15 +214,6 @@
             ovpn_protocol: ovpnProtocol,
           });
           if (res?.error) { showToast(res.error, true); return; }
-          // Apply LAN access after type change
-          const hasLan = savedState.lanOut !== 'allowed' || savedState.lanIn !== 'allowed'
-            || savedState.outAllow.length || savedState.inAllow.length;
-          if (hasLan) {
-            await api.setProfileLanAccess(savedState.profileId, {
-              outbound: savedState.lanOut, inbound: savedState.lanIn,
-              outbound_allow: savedState.outAllow, inbound_allow: savedState.inAllow,
-            });
-          }
           showToast('Changed to VPN group');
           dispatch('reload');
         }, vpnProtocol);
@@ -281,21 +231,14 @@
       }
 
       // 2. Metadata
-      const update = { name, icon, color };
+      const update = { name, icon, color, adblock };
       if (type === 'vpn' && !typeChanged && killSwitch !== initialOptions.killSwitch) {
         update.kill_switch = killSwitch;
       }
       await api.updateProfile(liveProfile.id, update);
       if (isGuest) await api.setGuestProfile(liveProfile.id);
 
-      // 3. LAN access
-      await api.setProfileLanAccess(liveProfile.id, {
-        outbound: lanOutbound, inbound: lanInbound,
-        outbound_allow: entriesToRawList(lanOutboundAllow),
-        inbound_allow: entriesToRawList(lanInboundAllow),
-      });
-
-      // 4. Protocol change (VPN → VPN, different protocol)
+      // 3. Protocol change (VPN → VPN, different protocol)
       if (type === 'vpn' && !typeChanged && protocolChanged) {
         showToast('Switching protocol…');
         const res = await api.changeProtocol(liveProfile.id, {
@@ -450,6 +393,18 @@
         </div>
       </details>
 
+      <!-- Smart Protocol -->
+      <div class="option-item smart-protocol-row">
+        <input type="checkbox" id="gm-smart" bind:checked={smartProtocol}>
+        <label for="gm-smart">
+          Smart Protocol
+          <span class="opt-hint">— auto-fallback: WG → WG TCP → Stealth → OpenVPN</span>
+        </label>
+        <HelpTooltip title="Smart Protocol">
+          <p>When enabled, if the tunnel doesn't connect within 45 seconds, FlintVPN automatically tries alternate protocols until one works. WireGuard variants are tried first (faster), then OpenVPN as a last resort.</p>
+        </HelpTooltip>
+      </div>
+
       <!-- VPN Options -->
       <div class="vpn-options-section">
         <div class="section-header"><span class="section-title">VPN Options</span></div>
@@ -548,20 +503,24 @@
             <div class="opt-warning">Custom DNS overrides NetShield. DNS-level ad/tracker blocking won't work with a custom resolver.</div>
           {/if}
         </div>
-        <div class="option-item">
-          <input type="checkbox" id="gm-smart" bind:checked={smartProtocol}>
-          <label for="gm-smart">
-            Smart Protocol
-            <span class="opt-hint">— auto-try other protocols if connection fails</span>
-          </label>
-          <HelpTooltip title="Smart Protocol">
-            <p>When enabled, if the tunnel doesn't connect within 45 seconds, FlintVPN automatically tries alternate protocols (WireGuard, OpenVPN, WG TCP/TLS) until one works.</p>
-          </HelpTooltip>
-        </div>
         {#if mode === 'edit' && optionsChanged && !protocolChanged}
           <div class="opt-warning">Changing VPN options will regenerate the tunnel and briefly disconnect.</div>
         {/if}
       </div>
+      {/if}
+
+      <!-- DNS Ad Blocker (VPN + NoVPN, not NoInternet) -->
+      {#if type !== 'no_internet'}
+        <div class="option-item" style="margin-top:12px">
+          <input type="checkbox" id="gm-adblock" bind:checked={adblock}>
+          <label for="gm-adblock">
+            DNS Ad Blocker
+            <span class="opt-hint">— block ads & trackers via local DNS blocklist</span>
+          </label>
+          <HelpTooltip title="DNS Ad Blocker">
+            <p>Routes DNS through a local blocklist on the router. Blocks known ad, tracker, and malware domains before they load. Works alongside NetShield for VPN groups.</p>
+          </HelpTooltip>
+        </div>
       {/if}
 
       <!-- Name -->
@@ -587,48 +546,6 @@
         <input type="checkbox" id="gm-guest" bind:checked={isGuest}>
         <label for="gm-guest">Set as Guest group</label>
         <span class="tooltip-trigger" title="New devices joining the network will be automatically assigned to this group.">?</span>
-      </div>
-
-      <!-- LAN Access -->
-      <div class="lan-section">
-        <div class="section-header">
-          <span class="section-title">LAN Access</span>
-          <div class="lan-presets">
-            <button type="button" class="preset-btn" class:active={lanOutbound === 'allowed' && lanInbound === 'allowed'}
-                    on:click={() => applyPreset('open')} title="Full LAN access">Open</button>
-            <button type="button" class="preset-btn" class:active={lanOutbound === 'group_only' && lanInbound === 'group_only'}
-                    on:click={() => applyPreset('isolated')} title="Devices only talk within this group">Isolated</button>
-            <button type="button" class="preset-btn" class:active={lanOutbound === 'blocked' && lanInbound === 'blocked'}
-                    on:click={() => applyPreset('locked')} title="No LAN access, internet only">Locked Down</button>
-          </div>
-        </div>
-        <div class="lan-controls">
-          <div class="lan-control">
-            <label for="gm-lan-out">Outbound</label>
-            <select id="gm-lan-out" bind:value={lanOutbound}>
-              <option value="allowed">Allowed</option>
-              <option value="group_only">Group Only</option>
-              <option value="blocked">Blocked</option>
-            </select>
-            {#if lanOutbound !== 'allowed'}
-              <div class="exc-label">Exceptions (always allowed):</div>
-              <LanPeerPicker bind:value={lanOutboundAllow} excludeProfileId={liveProfile?.id} />
-            {/if}
-          </div>
-          <div class="lan-control">
-            <label for="gm-lan-in">Inbound</label>
-            <select id="gm-lan-in" bind:value={lanInbound}>
-              <option value="allowed">Allowed</option>
-              <option value="group_only">Group Only</option>
-              <option value="blocked">Blocked</option>
-            </select>
-            {#if lanInbound !== 'allowed'}
-              <div class="exc-label">Exceptions (always allowed):</div>
-              <LanPeerPicker bind:value={lanInboundAllow} excludeProfileId={liveProfile?.id} />
-            {/if}
-          </div>
-        </div>
-        <div class="lan-hint">Controls whether devices in this group can communicate with devices in other groups on the local network.</div>
       </div>
 
       <!-- Delete (edit only) -->
@@ -663,6 +580,8 @@
   .limit-error { font-size: .82rem; color: var(--red); background: var(--red-bg); padding: 8px 10px; border-radius: var(--radius-xs); margin-top: 6px; }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
 
+  .smart-protocol-row { margin-top: 8px; margin-bottom: 4px; padding: 10px; background: var(--bg); border-radius: var(--radius-xs); border: 1px solid var(--border); }
+
   .vpn-options-section { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); }
   .vpn-options-section .form-group { margin-bottom: 8px; }
   .opt-warning { margin-top: 8px; padding: 8px 10px; background: rgba(243,156,18,.15); border-radius: var(--radius-xs); font-size: .75rem; color: #f39c12; line-height: 1.4; }
@@ -684,17 +603,4 @@
   .help-content ul { margin: 0 0 0 16px; padding: 0; }
   .help-content li { margin-bottom: 3px; }
 
-  .lan-section { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); }
-  .section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
-  .section-title { font-size: .9rem; font-weight: 600; color: var(--fg); }
-  .lan-presets { display: flex; gap: 4px; }
-  .preset-btn { padding: 4px 10px; font-size: .7rem; border-radius: var(--radius-xs); border: 1px solid var(--border2); background: var(--bg3); color: var(--fg2); cursor: pointer; font-weight: 500; transition: var(--transition); }
-  .preset-btn:hover { border-color: var(--accent); color: var(--accent); }
-  .preset-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
-  .lan-controls { display: flex; gap: 12px; }
-  .lan-control { flex: 1; }
-  .lan-control label { display: block; font-size: .75rem; color: var(--fg3); margin-bottom: 4px; text-transform: uppercase; letter-spacing: .05em; }
-  .lan-control select { width: 100%; padding: 8px; background: var(--bg3); border: 1px solid var(--border2); border-radius: var(--radius-xs); color: var(--fg); font-size: .85rem; }
-  .lan-hint { font-size: .75rem; color: var(--fg3); margin-top: 8px; line-height: 1.4; }
-  .exc-label { font-size: .68rem; color: var(--fg3); margin-top: 8px; text-transform: uppercase; letter-spacing: .04em; }
 </style>

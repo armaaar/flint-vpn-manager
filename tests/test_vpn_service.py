@@ -16,7 +16,6 @@ import pytest
 from consts import (
     HEALTH_GREEN,
     HEALTH_RED,
-    LAN_ALLOWED,
     PROFILE_TYPE_NO_INTERNET,
     PROFILE_TYPE_NO_VPN,
     PROFILE_TYPE_VPN,
@@ -98,7 +97,6 @@ def _make_local_vpn_profile(peer_id="9001", profile_id="vpn-1", name="TestVPN",
         "server": {"id": "server-1", "endpoint": "1.2.3.4"},
         "server_scope": {},
         "options": {},
-        "lan_access": {},
     }
 
 
@@ -126,16 +124,14 @@ def _make_non_vpn_profile(profile_id="novpn-1", name="Direct",
         "icon": "\U0001f30d",
         "is_guest": False,
         "display_order": display_order,
-        "lan_access": {},
     }
 
 
-def _store_data(profiles=None, device_assignments=None, device_lan_overrides=None):
+def _store_data(profiles=None, device_assignments=None):
     """Build a minimal profile_store data dict."""
     return {
         "profiles": profiles or [],
         "device_assignments": device_assignments or {},
-        "device_lan_overrides": device_lan_overrides or {},
     }
 
 
@@ -338,24 +334,24 @@ class TestCreateProfile:
 class TestDeleteProfile:
     """Tests for VPNService.delete_profile."""
 
-    @patch("vpn_service.lan_sync.sync_lan_to_router")
+    @patch("vpn_service.noint_sync.sync_noint_to_router")
     @patch("vpn_service.ps.delete_profile")
     @patch("vpn_service.ps.get_profile")
-    def test_delete_non_vpn(self, mock_get, mock_delete, mock_lan_sync, service):
+    def test_delete_non_vpn(self, mock_get, mock_delete, mock_noint_sync, service):
         """Deleting a non-VPN profile doesn't call strategy.delete."""
         mock_get.return_value = _make_non_vpn_profile(profile_id="novpn-1")
 
         service.delete_profile("novpn-1")
 
         mock_delete.assert_called_once_with("novpn-1")
-        mock_lan_sync.assert_called_once()
+        mock_noint_sync.assert_called_once()
 
-    @patch("vpn_service.lan_sync.sync_lan_to_router")
+    @patch("vpn_service.noint_sync.sync_noint_to_router")
     @patch("vpn_service.ps.delete_profile")
     @patch("vpn_service.ps.get_profile")
     @patch("vpn_service.get_strategy")
     def test_delete_vpn(self, mock_get_strategy, mock_get, mock_delete,
-                        mock_lan_sync, service):
+                        mock_noint_sync, service):
         """Deleting a VPN profile calls strategy.delete."""
         mock_get.return_value = _make_local_vpn_profile(profile_id="vpn-1")
         mock_strategy = MagicMock()
@@ -365,7 +361,7 @@ class TestDeleteProfile:
 
         mock_strategy.delete.assert_called_once()
         mock_delete.assert_called_once_with("vpn-1")
-        mock_lan_sync.assert_called_once()
+        mock_noint_sync.assert_called_once()
 
     @patch("vpn_service.ps.get_profile")
     def test_delete_nonexistent(self, mock_get, service):
@@ -466,16 +462,11 @@ class TestSwitchServer:
 class TestDevices:
     """Tests for device list building and caching."""
 
-    @patch("vpn_service.ps.get_effective_lan_access")
     @patch("vpn_service.ps.load")
-    def test_build_devices_live_merges_sources(self, mock_load, mock_eff_lan,
+    def test_build_devices_live_merges_sources(self, mock_load,
                                                service, mock_router):
         """build_devices_live merges DHCP leases with gl-clients data."""
         mock_load.return_value = _store_data()
-        mock_eff_lan.return_value = {
-            "outbound": LAN_ALLOWED, "inbound": LAN_ALLOWED,
-            "inherited": True, "outbound_allow": [], "inbound_allow": [],
-        }
         mock_router.get_dhcp_leases.return_value = [
             {"mac": "AA:BB:CC:DD:EE:01", "ip": "192.168.8.100", "hostname": "phone"},
         ]
@@ -500,15 +491,10 @@ class TestDevices:
         assert d["router_online"] is True
         assert d["display_name"] == "My Phone"  # label takes precedence
 
-    @patch("vpn_service.ps.get_effective_lan_access")
     @patch("vpn_service.ps.load")
-    def test_device_cache_ttl(self, mock_load, mock_eff_lan, service, mock_router):
+    def test_device_cache_ttl(self, mock_load, service, mock_router):
         """Second call within TTL returns cached data without rebuilding."""
         mock_load.return_value = _store_data()
-        mock_eff_lan.return_value = {
-            "outbound": LAN_ALLOWED, "inbound": LAN_ALLOWED,
-            "inherited": True, "outbound_allow": [], "inbound_allow": [],
-        }
         mock_router.get_dhcp_leases.return_value = [
             {"mac": "AA:BB:CC:DD:EE:01", "ip": "192.168.8.100", "hostname": "phone"},
         ]
@@ -521,15 +507,10 @@ class TestDevices:
         assert mock_router.get_dhcp_leases.call_count == 1
         assert first is second
 
-    @patch("vpn_service.ps.get_effective_lan_access")
     @patch("vpn_service.ps.load")
-    def test_invalidate_device_cache(self, mock_load, mock_eff_lan, service, mock_router):
+    def test_invalidate_device_cache(self, mock_load, service, mock_router):
         """invalidate_device_cache forces a rebuild on next call."""
         mock_load.return_value = _store_data()
-        mock_eff_lan.return_value = {
-            "outbound": LAN_ALLOWED, "inbound": LAN_ALLOWED,
-            "inherited": True, "outbound_allow": [], "inbound_allow": [],
-        }
         mock_router.get_dhcp_leases.return_value = [
             {"mac": "AA:BB:CC:DD:EE:01", "ip": "192.168.8.100", "hostname": "phone"},
         ]
@@ -549,12 +530,12 @@ class TestDevices:
 class TestAssignDevice:
     """Tests for VPNService.assign_device."""
 
-    @patch("vpn_service.lan_sync.sync_lan_to_router")
+    @patch("vpn_service.noint_sync.sync_noint_to_router")
     @patch("vpn_service.ps.get_profile")
     @patch("vpn_service.ps.load")
     @patch("vpn_service.ps.validate_mac")
     def test_assign_to_vpn(self, mock_validate, mock_load, mock_get_profile,
-                           mock_lan_sync, service, mock_router):
+                           mock_noint_sync, service, mock_router):
         """Assigning to VPN profile calls router.remove_device_from_all_vpn + set_device_vpn."""
         mock_validate.return_value = "aa:bb:cc:dd:ee:01"
         mock_load.return_value = _store_data()
@@ -566,15 +547,15 @@ class TestAssignDevice:
         mock_router.set_device_vpn.assert_called_once_with(
             "aa:bb:cc:dd:ee:01", "fvpn_rule_9001",
         )
-        mock_lan_sync.assert_called_once()
+        mock_noint_sync.assert_called_once()
 
-    @patch("vpn_service.lan_sync.sync_lan_to_router")
+    @patch("vpn_service.noint_sync.sync_noint_to_router")
     @patch("vpn_service.ps.assign_device")
     @patch("vpn_service.ps.get_profile")
     @patch("vpn_service.ps.load")
     @patch("vpn_service.ps.validate_mac")
     def test_assign_to_non_vpn(self, mock_validate, mock_load, mock_get_profile,
-                               mock_assign, mock_lan_sync, service, mock_router):
+                               mock_assign, mock_noint_sync, service, mock_router):
         """Assigning to non-VPN profile calls ps.assign_device."""
         mock_validate.return_value = "aa:bb:cc:dd:ee:01"
         mock_load.return_value = _store_data()
@@ -585,13 +566,13 @@ class TestAssignDevice:
         mock_assign.assert_called_once_with("aa:bb:cc:dd:ee:01", "novpn-1")
         mock_router.set_device_vpn.assert_not_called()
 
-    @patch("vpn_service.lan_sync.sync_lan_to_router")
+    @patch("vpn_service.noint_sync.sync_noint_to_router")
     @patch("vpn_service.ps.assign_device")
     @patch("vpn_service.ps.get_profile")
     @patch("vpn_service.ps.load")
     @patch("vpn_service.ps.validate_mac")
     def test_unassign_sticky_none(self, mock_validate, mock_load, mock_get_profile,
-                                  mock_assign, mock_lan_sync, service, mock_router):
+                                  mock_assign, mock_noint_sync, service, mock_router):
         """Unassigning (profile_id=None) writes sticky-None via ps.assign_device."""
         mock_validate.return_value = "aa:bb:cc:dd:ee:01"
         mock_load.return_value = _store_data()
@@ -620,29 +601,29 @@ class TestAssignDevice:
 # ── TestSyncLanToRouter ────────────────────────────────────────────────────
 
 
-class TestSyncLanToRouter:
-    """Tests for VPNService.sync_lan_to_router."""
+class TestSyncNointToRouter:
+    """Tests for VPNService.sync_noint_to_router."""
 
-    @patch("vpn_service.lan_sync.sync_lan_to_router")
+    @patch("vpn_service.noint_sync.sync_noint_to_router")
     @patch("vpn_service.ps.load")
-    def test_delegates_to_lan_sync(self, mock_load, mock_sync, service, mock_router):
-        """sync_lan_to_router delegates to lan_sync.sync_lan_to_router."""
+    def test_delegates_to_noint_sync(self, mock_load, mock_sync, service, mock_router):
+        """sync_noint_to_router delegates to noint_sync.sync_noint_to_router."""
         mock_load.return_value = _store_data()
         mock_sync.return_value = {"applied": True, "uci_lines": 5, "membership_ops": 2, "reload": False}
 
-        service.sync_lan_to_router()
+        service.sync_noint_to_router()
 
         mock_sync.assert_called_once_with(mock_router, store=mock_load.return_value)
 
-    @patch("vpn_service.lan_sync.sync_lan_to_router")
+    @patch("vpn_service.noint_sync.sync_noint_to_router")
     @patch("vpn_service.ps.load")
     def test_sync_failure_does_not_propagate(self, mock_load, mock_sync, service):
-        """LAN sync failures are logged but don't raise."""
+        """Noint sync failures are logged but don't raise."""
         mock_load.return_value = _store_data()
         mock_sync.side_effect = Exception("SSH down")
 
         # Should not raise
-        service.sync_lan_to_router()
+        service.sync_noint_to_router()
 
 
 # ── TestBackupRestore ──────────────────────────────────────────────────────

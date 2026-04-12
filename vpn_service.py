@@ -16,10 +16,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import profile_store as ps
-import lan_sync
+import noint_sync
 from consts import (
     HEALTH_RED,
-    LAN_ALLOWED,
     PROFILE_TYPE_VPN,
     PROFILE_TYPE_NO_VPN,
     PROFILE_TYPE_NO_INTERNET,
@@ -274,21 +273,6 @@ class VPNService:
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
-    def _normalize_lan_access(self, lan):
-        """Always return a dict with all four LAN access fields present.
-
-        Used when surfacing profile data to the API so the frontend can rely
-        on a stable shape (state + allow lists) regardless of when the
-        profile was created.
-        """
-        lan = lan or {}
-        return {
-            "outbound": lan.get("outbound", LAN_ALLOWED),
-            "inbound": lan.get("inbound", LAN_ALLOWED),
-            "outbound_allow": list(lan.get("outbound_allow", [])),
-            "inbound_allow": list(lan.get("inbound_allow", [])),
-        }
-
     @staticmethod
     def _local_display_order(store_data, profile_id, default=None):
         """Look up display_order from the local store for any profile."""
@@ -438,7 +422,7 @@ class VPNService:
                 "server": self._resolve_server_live(local),
                 "server_scope": ps.normalize_server_scope(local.get("server_scope")),
                 "options": local.get("options", {}),
-                "lan_access": self._normalize_lan_access(local.get("lan_access")),
+                "adblock": local.get("adblock", False),
                 "router_info": ri,
                 "device_count": 0,  # filled below
             }
@@ -476,7 +460,6 @@ class VPNService:
                     p["server"] = self._resolve_server_live(local)
                 except Exception:
                     pass
-            p["lan_access"] = self._normalize_lan_access(p.get("lan_access"))
             p["device_count"] = 0
             vpn_profiles.append(p)
 
@@ -489,7 +472,6 @@ class VPNService:
             ghost["kill_switch"] = False
             ghost["_ghost"] = True
             ghost.pop("status", None)
-            ghost["lan_access"] = self._normalize_lan_access(ghost.get("lan_access"))
             ghost["device_count"] = 0
             vpn_profiles.append(ghost)
 
@@ -501,7 +483,6 @@ class VPNService:
                 1 for mac, pid in store_data.get("device_assignments", {}).items()
                 if pid == p["id"]
             )
-            p["lan_access"] = self._normalize_lan_access(p.get("lan_access"))
             vpn_profiles.append(p)
 
         # Unified sort: if any profile has display_order, sort the whole list by it.
@@ -517,7 +498,7 @@ class VPNService:
     def create_profile(self, name, profile_type, vpn_protocol=PROTO_WIREGUARD,
                        server_id=None, options=None, color="#3498db",
                        icon="\U0001f512", is_guest=False, kill_switch=True,
-                       server_scope=None, ovpn_protocol="udp"):
+                       server_scope=None, ovpn_protocol="udp", adblock=False):
         """Create a new profile (VPN, NoVPN, or NoInternet).
 
         For VPN profiles: generates the tunnel config via the appropriate
@@ -603,6 +584,7 @@ class VPNService:
             options=options,
             router_info=router_info,
             server_scope=ps.normalize_server_scope(server_scope),
+            adblock=adblock,
             **extra_fields,
         )
 
@@ -622,6 +604,10 @@ class VPNService:
                 pass
 
         log.info(f"Created profile '{profile['name']}' (type={profile['type']}, id={profile['id']})")
+
+        if adblock:
+            self.sync_adblock_to_router()
+
         return profile
 
     def update_profile(self, profile_id, **data):
@@ -677,6 +663,9 @@ class VPNService:
         elif is_pwg:
             profile["kill_switch"] = True  # Always on
 
+        if "adblock" in data:
+            self.sync_adblock_to_router()
+
         return profile
 
     def delete_profile(self, profile_id):
@@ -719,9 +708,11 @@ class VPNService:
         # NoInternet reconciliation in a single pass via the new UCI execution
         # layer (membership + structural diff against live router state).
         try:
-            self.sync_lan_to_router()
+            self.sync_noint_to_router()
         except Exception as e:
             log.warning(f"LAN sync after delete failed: {e}")
+
+        self.sync_adblock_to_router()
 
     # ── Type Change ──────────────────────────────────────────────────────────
 
@@ -756,7 +747,7 @@ class VPNService:
             ps.update_profile(profile_id, type=new_type)
             log.info(f"Changed type for '{profile['name']}' from {old_type} to {new_type}")
             try:
-                self.sync_lan_to_router()
+                self.sync_noint_to_router()
             except Exception as e:
                 log.warning(f"LAN sync after type change failed: {e}")
             return ps.get_profile(profile_id)
@@ -793,7 +784,7 @@ class VPNService:
             )
             log.info(f"Changed type for '{profile['name']}' from VPN to {new_type}")
             try:
-                self.sync_lan_to_router()
+                self.sync_noint_to_router()
             except Exception as e:
                 log.warning(f"LAN sync after type change failed: {e}")
             return ps.get_profile(profile_id)
@@ -888,9 +879,10 @@ class VPNService:
 
         log.info(f"Changed type for '{profile['name']}' from {old_type} to VPN ({vpn_protocol})")
         try:
-            self.sync_lan_to_router()
+            self.sync_noint_to_router()
         except Exception as e:
             log.warning(f"LAN sync after type change failed: {e}")
+        self.sync_adblock_to_router()
         return ps.get_profile(profile_id)
 
     # ── Server Switch ────────────────────────────────────────────────────────
@@ -1140,7 +1132,7 @@ class VPNService:
 
             # 7. Sync LAN rules
             try:
-                self.sync_lan_to_router()
+                self.sync_noint_to_router()
             except Exception as e:
                 log.warning(f"LAN sync after protocol change failed: {e}")
 
@@ -1157,12 +1149,15 @@ class VPNService:
     # tick_smart_protocol() is called every SSE tick (10s) to monitor pending
     # retries and switch protocols when a tunnel doesn't establish.
 
+    # Smart Protocol fallback order: WireGuard variants first (faster, same
+    # cert/key, zero-flicker switch), then progressively harder-to-block
+    # protocols, ending with OpenVPN (requires full teardown + recreate).
     SMART_PROTOCOL_CHAIN = [
         (PROTO_WIREGUARD, "udp"),
-        (PROTO_OPENVPN, "udp"),
-        (PROTO_OPENVPN, "tcp"),
         (PROTO_WIREGUARD_TCP, "tcp"),
         (PROTO_WIREGUARD_TLS, "tls"),
+        (PROTO_OPENVPN, "udp"),
+        (PROTO_OPENVPN, "tcp"),
     ]
 
     SMART_CONNECT_TIMEOUT = 45  # seconds before trying next protocol
@@ -1468,6 +1463,38 @@ class VPNService:
             except Exception as e:
                 log.warning(f"reorder_vpn_rules failed: {e}")
 
+    # ── DNS Ad Block Sync ───────────────────────────────────────────────────
+
+    def sync_adblock_to_router(self):
+        """Sync DNS ad-block ipset + iptables rules to the router.
+
+        Collects all MACs from adblock-enabled groups and rebuilds the
+        fvpn_adblock_macs ipset. If no groups have adblock, cleans up.
+        """
+        try:
+            store_data = ps.load()
+            assignments = self._resolve_device_assignments(store_data)
+
+            # Build {profile_id: profile} for quick lookup
+            profiles_by_id = {
+                p["id"]: p for p in store_data.get("profiles", [])
+            }
+
+            # Collect MACs where the assigned profile has adblock=True
+            adblock_macs = set()
+            for mac, pid in assignments.items():
+                p = profiles_by_id.get(pid)
+                if p and p.get("adblock") and p.get("type") != PROFILE_TYPE_NO_INTERNET:
+                    adblock_macs.add(mac.lower())
+
+            if not adblock_macs:
+                self.router.adblock.cleanup_adblock()
+            else:
+                self.router.adblock.ensure_adblock_dnsmasq()
+                self.router.adblock.sync_adblock_rules(adblock_macs)
+        except Exception as e:
+            log.warning(f"Adblock sync failed: {e}")
+
     # ── Guest Profile ────────────────────────────────────────────────────────
 
     def set_guest_profile(self, profile_id):
@@ -1621,12 +1648,6 @@ class VPNService:
         out = []
         for mac, d in sorted(devices.items()):
             d["display_name"] = d.get("label") or d.get("hostname") or mac
-            eff = ps.get_effective_lan_access(mac, store_data)
-            d["lan_outbound"] = eff["outbound"]
-            d["lan_inbound"] = eff["inbound"]
-            d["lan_inherited"] = eff["inherited"]
-            d["lan_outbound_allow"] = eff.get("outbound_allow", [])
-            d["lan_inbound_allow"] = eff.get("inbound_allow", [])
             d["last_seen"] = None  # legacy field, no longer tracked
             out.append(d)
         return out
@@ -1709,9 +1730,11 @@ class VPNService:
         # Single sync handles both LAN access (per-group ipsets) and NoInternet
         # (the global fvpn_noint_ips ipset).
         try:
-            self.sync_lan_to_router()
+            self.sync_noint_to_router()
         except Exception as e:
             log.warning(f"LAN sync after assignment failed: {e}")
+
+        self.sync_adblock_to_router()
 
         # Invalidate the device cache so the next /api/devices call sees the new assignment
         self.invalidate_device_cache()
@@ -1750,74 +1773,21 @@ class VPNService:
 
     # ── LAN Access Control ───────────────────────────────────────────────────
 
-    def set_profile_lan_access(self, profile_id, outbound, inbound,
-                               outbound_allow=None, inbound_allow=None):
-        """Set LAN access rules for a profile.
+    # ── NoInternet Sync ────────────────────────────────────────────────────
 
-        Raises:
-            NotFoundError: If the profile is not found.
-            ValueError: If the LAN access values are invalid.
-        """
-        result = ps.set_profile_lan_access(
-            profile_id, outbound, inbound,
-            outbound_allow=outbound_allow or [],
-            inbound_allow=inbound_allow or [],
-        )
+    def sync_noint_to_router(self):
+        """Reconcile the NoInternet ipset on the router with local intent.
 
-        if not result:
-            raise NotFoundError("Profile not found")
-
-        try:
-            self.sync_lan_to_router()
-        except Exception as e:
-            log.warning(f"LAN sync failed: {e}")
-
-        log.info(f"LAN access for profile '{result['name']}': out={outbound}, in={inbound}")
-        return result
-
-    def set_device_lan_override(self, mac, outbound=None, inbound=None,
-                                outbound_allow=None, inbound_allow=None):
-        """Set per-device LAN access override.
-
-        null values mean inherit from group.
-
-        Raises:
-            ValueError: If the LAN access values are invalid.
-        """
-        ps.set_device_lan_override(
-            mac, outbound, inbound,
-            outbound_allow=outbound_allow or [],
-            inbound_allow=inbound_allow or [],
-        )
-
-        try:
-            self.sync_lan_to_router()
-        except Exception as e:
-            log.warning(f"LAN sync failed: {e}")
-
-        log.info(f"LAN override for {mac}: out={outbound}, in={inbound}")
-
-    # ── LAN Sync ─────────────────────────────────────────────────────────────
-
-    def sync_lan_to_router(self):
-        """Reconcile router LAN execution state with local intent.
-
-        Delegates to ``lan_sync.sync_lan_to_router`` which:
-          - Reads live DHCP leases for device IPs
-          - Reads router VPN device assignments from from_mac
-          - Computes desired UCI ipset/rule sections from local intent
-          - Diffs against current router state
-          - Applies via uci batch (+ firewall reload if structural changes)
-
+        Delegates to ``noint_sync.sync_noint_to_router``.
         Best-effort: any exception is logged but doesn't propagate.
         """
         try:
-            result = lan_sync.sync_lan_to_router(self.router, store=ps.load())
+            result = noint_sync.sync_noint_to_router(self.router, store=ps.load())
             if result.get("applied"):
                 log.info(
-                    f"LAN sync applied: uci_lines={result.get('uci_lines', 0)}, "
-                    f"membership_ops={result.get('membership_ops', 0)}, "
+                    f"NoInternet sync applied: adds={result.get('adds', 0)}, "
+                    f"removes={result.get('removes', 0)}, "
                     f"reload={result.get('reload', False)}"
                 )
         except Exception as e:
-            log.warning(f"LAN sync failed: {e}")
+            log.warning(f"NoInternet sync failed: {e}")

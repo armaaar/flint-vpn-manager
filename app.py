@@ -12,6 +12,7 @@ import functools
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -19,10 +20,7 @@ from flask import Flask, request, jsonify, Response, send_from_directory
 
 import secrets_manager as sm
 import profile_store as ps
-from consts import (
-    LAN_ALLOWED,
-    PROFILE_TYPE_VPN,
-)
+from consts import PROFILE_TYPE_VPN
 from proton_api import ProtonAPI
 from router_api import RouterAPI
 from device_tracker import start_tracker, stop_tracker, get_tracker
@@ -202,9 +200,9 @@ def api_unlock():
         # Reconcile router LAN execution layer (UCI ipsets + rules) with the
         # restored / local intent.
         try:
-            _service.sync_lan_to_router()
+            _service.sync_noint_to_router()
         except Exception as e:
-            log.warning(f"LAN sync on unlock failed: {e}")
+            log.warning(f"NoInternet sync on unlock failed: {e}")
 
         # Start auto-optimizer
         try:
@@ -280,6 +278,7 @@ def api_create_profile():
             kill_switch=data.get("kill_switch", True),
             server_scope=data.get("server_scope"),
             ovpn_protocol=data.get("ovpn_protocol", "udp"),
+            adblock=data.get("adblock", False),
         )
         return jsonify(profile), 201
     except LimitExceededError as e:
@@ -630,61 +629,6 @@ def api_assign_device(mac):
         return jsonify({"error": str(e)}), 400
 
 
-# ── LAN Access Control ────────────────────────────────────────────────────────
-
-@app.route("/api/profiles/<profile_id>/lan-access", methods=["PUT"])
-@require_unlocked
-def api_set_profile_lan_access(profile_id):
-    """Set LAN access rules for a profile.
-
-    Body: {"outbound": "allowed"|"group_only"|"blocked",
-           "inbound": "allowed"|"group_only"|"blocked"}
-    """
-    data = request.json
-    outbound = data.get("outbound", LAN_ALLOWED)
-    inbound = data.get("inbound", LAN_ALLOWED)
-    outbound_allow = data.get("outbound_allow", [])
-    inbound_allow = data.get("inbound_allow", [])
-
-    try:
-        result = _get_service().set_profile_lan_access(
-            profile_id, outbound, inbound,
-            outbound_allow=outbound_allow,
-            inbound_allow=inbound_allow,
-        )
-        return jsonify({"success": True, "lan_access": result.get("lan_access")})
-    except NotFoundError:
-        return jsonify({"error": "Profile not found"}), 404
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-
-
-@app.route("/api/devices/<mac>/lan-access", methods=["PUT"])
-@require_unlocked
-def api_set_device_lan_access(mac):
-    """Set per-device LAN access override.
-
-    Body: {"outbound": "allowed"|"group_only"|"blocked"|null,
-           "inbound": "allowed"|"group_only"|"blocked"|null}
-    null values mean inherit from group.
-    """
-    data = request.json
-    outbound = data.get("outbound")
-    inbound = data.get("inbound")
-    outbound_allow = data.get("outbound_allow", [])
-    inbound_allow = data.get("inbound_allow", [])
-
-    try:
-        _get_service().set_device_lan_override(
-            mac, outbound, inbound,
-            outbound_allow=outbound_allow,
-            inbound_allow=inbound_allow,
-        )
-        return jsonify({"success": True})
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-
-
 # ── Refresh ───────────────────────────────────────────────────────────────────
 
 @app.route("/api/refresh", methods=["POST"])
@@ -705,6 +649,12 @@ def api_refresh():
                 proton.refresh_server_loads()
     except Exception as e:
         log.warning(f"Server refresh on manual poll failed: {e}")
+
+    # Re-sync adblock ipset (picks up device assignment changes)
+    try:
+        _get_service().sync_adblock_to_router()
+    except Exception as e:
+        log.warning(f"Adblock sync on refresh failed: {e}")
 
     return jsonify({"success": True})
 
@@ -792,10 +742,10 @@ def api_stream():
                     pass
 
                 # Sync LAN rules if device IPs changed
-                if tracker and tracker.lan_rules_stale:
+                if tracker and tracker.noint_stale:
                     try:
-                        service.sync_lan_to_router()
-                        tracker.lan_rules_stale = False
+                        service.sync_noint_to_router()
+                        tracker.noint_stale = False
                     except Exception:
                         pass
 
@@ -1001,6 +951,165 @@ def api_remove_from_favourites(server_id):
     favourites = [s for s in config.get("server_favourites", []) if s != server_id]
     sm.update_config(server_favourites=favourites)
     return jsonify({"success": True})
+
+
+@app.route("/api/settings/adblock", methods=["GET"])
+@require_unlocked
+def api_get_adblock_settings():
+    """Return adblock configuration + available presets."""
+    from consts import BLOCKLIST_PRESETS
+    config = sm.get_config()
+    adblock = config.get("adblock", {})
+    # Migrate legacy single-URL to sources list
+    if "blocklist_url" in adblock and "blocklist_sources" not in adblock:
+        adblock["blocklist_sources"] = [adblock.pop("blocklist_url")] if adblock["blocklist_url"] else []
+        sm.update_config(adblock=adblock)
+    return jsonify({**adblock, "presets": BLOCKLIST_PRESETS})
+
+
+@app.route("/api/settings/adblock", methods=["PUT"])
+@require_unlocked
+def api_update_adblock_settings():
+    """Update adblock configuration (blocklist_sources)."""
+    data = request.json
+    config = sm.get_config()
+    adblock = config.get("adblock", {})
+    if "blocklist_sources" in data:
+        adblock["blocklist_sources"] = data["blocklist_sources"]
+    adblock.pop("blocklist_url", None)  # Remove legacy field
+    sm.update_config(adblock=adblock)
+    return jsonify(adblock)
+
+
+@app.route("/api/settings/adblock/update-now", methods=["POST"])
+@require_unlocked
+def api_update_blocklist_now():
+    """Download all selected blocklists, merge, deduplicate, upload to router."""
+    content, count, failed = _download_and_merge_blocklists()
+    if content is None and not failed:
+        return jsonify({"error": "No blocklist sources configured"}), 400
+    if content is None and failed:
+        return jsonify({"error": f"All sources failed to download: {', '.join(failed)}"}), 502
+    try:
+        _get_service().router.adblock.upload_blocklist(content)
+        config = sm.get_config()
+        adblock = config.get("adblock", {})
+        adblock["last_updated"] = datetime.now(timezone.utc).isoformat()
+        adblock["domain_count"] = count
+        sm.update_config(adblock=adblock)
+        result = {"success": True, "entries": count, "last_updated": adblock["last_updated"]}
+        if failed:
+            result["failed_sources"] = failed
+        return jsonify(result)
+    except Exception as e:
+        log.error(f"Blocklist update failed: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/settings/adblock/domains", methods=["GET"])
+@require_unlocked
+def api_get_blocked_domains():
+    """Return paginated list of blocked domains with optional search.
+
+    All parsing is done on the router via awk/grep to avoid pulling
+    140K+ lines over SSH.
+    """
+    search = request.args.get("search", "").strip().lower()
+    page = int(request.args.get("page", 1))
+    limit = min(int(request.args.get("limit", 100)), 500)
+
+    try:
+        from consts import ADBLOCK_HOSTS_PATH
+        router = _get_service().router
+
+        # Extract just the domain column, skip comments/localhost, sort unique
+        base_cmd = (
+            f"awk '!/^#/ && NF>=2 && $2!=\"localhost\" {{print $2}}' {ADBLOCK_HOSTS_PATH} "
+            f"2>/dev/null | sort -u"
+        )
+
+        if search:
+            # Filter + count + paginate all on router
+            filter_cmd = f"{base_cmd} | grep -i '{search}'"
+            total_str = router.exec(f"{filter_cmd} | wc -l", timeout=15).strip()
+            total = int(total_str) if total_str.isdigit() else 0
+            start = (page - 1) * limit
+            raw = router.exec(
+                f"{filter_cmd} | tail -n +{start + 1} | head -n {limit}",
+                timeout=15,
+            ).strip()
+        else:
+            # Count + paginate on router
+            total_str = router.exec(f"{base_cmd} | wc -l", timeout=15).strip()
+            total = int(total_str) if total_str.isdigit() else 0
+            start = (page - 1) * limit
+            raw = router.exec(
+                f"{base_cmd} | tail -n +{start + 1} | head -n {limit}",
+                timeout=15,
+            ).strip()
+
+        page_domains = [d for d in raw.splitlines() if d.strip()] if raw else []
+
+        return jsonify({
+            "domains": page_domains,
+            "total": total,
+            "page": page,
+            "limit": limit,
+            "has_more": start + limit < total,
+        })
+    except Exception as e:
+        log.error(f"Failed to read blocked domains: {e}")
+        return jsonify({"domains": [], "total": 0, "page": 1, "has_more": False})
+
+
+def _download_and_merge_blocklists():
+    """Download all selected blocklists, merge and deduplicate.
+
+    Returns (hosts_content, domain_count, failed_sources) or (None, 0, []) if no sources.
+    """
+    import requests as http_requests
+    from consts import BLOCKLIST_PRESETS
+
+    config = sm.get_config()
+    adblock = config.get("adblock", {})
+    sources = adblock.get("blocklist_sources", [])
+    if not sources:
+        return None, 0, []
+
+    all_domains = set()
+    failed = []
+    for source in sources:
+        url = BLOCKLIST_PRESETS.get(source, {}).get("url", source)
+        try:
+            resp = http_requests.get(url, timeout=120)
+            resp.raise_for_status()
+            for line in resp.text.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split()
+                if len(parts) >= 2:
+                    domain = parts[1].lower()
+                    if domain and domain != "localhost":
+                        all_domains.add(domain)
+                elif len(parts) == 1 and "." in parts[0]:
+                    all_domains.add(parts[0].lower())
+            log.info(f"Blocklist: downloaded {url} — running total {len(all_domains)} domains")
+        except Exception as e:
+            log.warning(f"Blocklist: failed to download {url}: {e}")
+            failed.append(source)
+
+    if not all_domains:
+        return None, 0, failed
+
+    sorted_domains = sorted(all_domains)
+    content = "# FlintVPN merged blocklist\n"
+    content += f"# Sources: {', '.join(sources)}\n"
+    content += f"# Domains: {len(sorted_domains)}\n\n"
+    for d in sorted_domains:
+        content += f"0.0.0.0 {d}\n"
+
+    return content, len(sorted_domains), failed
 
 
 @app.route("/api/settings/credentials", methods=["PUT"])

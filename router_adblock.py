@@ -1,0 +1,244 @@
+"""Router adblock facade — second dnsmasq instance + ipset + iptables REDIRECT.
+
+Manages a blocking dnsmasq on port 5353 with community blocklists.
+Devices in adblock-enabled groups have their DNS redirected via iptables
+from port 53 to 5353. The blocking dnsmasq forwards non-blocked queries
+to the main dnsmasq on 127.0.0.1:53.
+
+Delegates SSH execution to the RouterAPI instance passed as ``ssh``.
+"""
+
+import logging
+
+from consts import (
+    ADBLOCK_CHAIN,
+    ADBLOCK_CONF_PATH,
+    ADBLOCK_HOSTS_PATH,
+    ADBLOCK_INIT_SCRIPT,
+    ADBLOCK_IPSET,
+    ADBLOCK_MACS_FILE,
+    ADBLOCK_PORT,
+    ADBLOCK_RULES_SCRIPT,
+)
+
+log = logging.getLogger("flintvpn")
+
+
+DNSMASQ_ADBLOCK_CONF = f"""\
+# FlintVPN — blocking dnsmasq for DNS ad filtering
+port={ADBLOCK_PORT}
+listen-address=0.0.0.0
+no-dhcp-interface=
+no-resolv
+no-hosts
+addn-hosts={ADBLOCK_HOSTS_PATH}
+server=127.0.0.1#53
+cache-size=1000
+log-facility=/dev/null
+"""
+
+INIT_SCRIPT = f"""\
+#!/bin/sh /etc/rc.common
+START=99
+STOP=10
+USE_PROCD=1
+
+start_service() {{
+    [ -f "{ADBLOCK_CONF_PATH}" ] || return
+    procd_open_instance "dnsmasq-adblock"
+    procd_set_param command /usr/sbin/dnsmasq -C "{ADBLOCK_CONF_PATH}" -k
+    procd_set_param stdout 0
+    procd_set_param stderr 0
+    procd_set_param respawn
+    procd_close_instance
+}}
+"""
+
+
+class RouterAdblock:
+    """Facade for DNS ad-blocking infrastructure on the GL.iNet Flint 2."""
+
+    def __init__(self, ssh):
+        self._ssh = ssh
+
+    # ── Blocking dnsmasq lifecycle ──────────────────────────────────────
+
+    def ensure_adblock_dnsmasq(self) -> None:
+        """Ensure the blocking dnsmasq instance is running on the correct port.
+
+        Always writes config and init script (cheap, ensures correctness
+        after port changes or router replacement). Only restarts the
+        process if it's not already listening on the right port.
+        """
+        # Ensure blocklist file exists (empty is fine — graceful degradation)
+        self._ssh.exec(f"touch {ADBLOCK_HOSTS_PATH}")
+
+        # Always write config + init script (idempotent, ensures correct port)
+        self._ssh.write_file(ADBLOCK_CONF_PATH, DNSMASQ_ADBLOCK_CONF)
+        self._ssh.write_file(ADBLOCK_INIT_SCRIPT, INIT_SCRIPT)
+        self._ssh.exec(
+            f"chmod +x {ADBLOCK_INIT_SCRIPT} && "
+            f"{ADBLOCK_INIT_SCRIPT} enable 2>/dev/null; true"
+        )
+
+        # Check if already listening on the correct port
+        listening = self._ssh.exec(
+            f"netstat -tlnup 2>/dev/null | grep ':{ADBLOCK_PORT} ' || true"
+        ).strip()
+        if listening:
+            return
+
+        log.info("Starting blocking dnsmasq on port %d", ADBLOCK_PORT)
+
+        # Stop any stale instance, then start fresh
+        self._ssh.exec(f"{ADBLOCK_INIT_SCRIPT} stop 2>/dev/null; true")
+        self._ssh.exec(f"{ADBLOCK_INIT_SCRIPT} start 2>/dev/null; true")
+
+        # Verify it came up
+        check = self._ssh.exec(
+            f"netstat -tlnup 2>/dev/null | grep ':{ADBLOCK_PORT} ' || true"
+        ).strip()
+        if not check:
+            log.warning("Blocking dnsmasq failed to start on port %d", ADBLOCK_PORT)
+
+    def stop_adblock_dnsmasq(self) -> None:
+        """Stop the blocking dnsmasq. Idempotent."""
+        self._ssh.exec(
+            f"{ADBLOCK_INIT_SCRIPT} stop 2>/dev/null; "
+            f"{ADBLOCK_INIT_SCRIPT} disable 2>/dev/null; true"
+        )
+
+    # ── Ipset + iptables rules ──────────────────────────────────────────
+
+    def sync_adblock_rules(self, macs: set) -> None:
+        """Rebuild the adblock ipset and iptables REDIRECT rules.
+
+        Full rebuild each time — flushes ipset and repopulates from the
+        provided MAC set. Also writes a firewall include script so rules
+        survive ``firewall reload`` and router reboots.
+
+        Args:
+            macs: Set of MAC addresses (lowercase) whose DNS should be
+                  redirected to the blocking dnsmasq.
+        """
+        if not macs:
+            self.cleanup_adblock()
+            return
+
+        # 1. Write MAC list to file (for reboot recovery via firewall include)
+        mac_content = "\n".join(sorted(macs)) + "\n"
+        self._ssh.write_file(ADBLOCK_MACS_FILE, mac_content)
+
+        # 2. Build iptables commands
+        cmds = self._build_rule_commands()
+
+        # 3. Apply live: create ipset, populate, add iptables rules
+        ipset_cmds = [f"ipset create {ADBLOCK_IPSET} hash:mac -exist"]
+        ipset_cmds.append(f"ipset flush {ADBLOCK_IPSET}")
+        for mac in sorted(macs):
+            ipset_cmds.append(
+                f"ipset add {ADBLOCK_IPSET} {mac} -exist 2>/dev/null || true"
+            )
+        self._ssh.exec(" ; ".join(ipset_cmds))
+
+        # 4. Apply iptables rules
+        self._ssh.exec("; ".join(cmds))
+
+        # 5. Write firewall include script (reads MACs from file on reload)
+        script = (
+            "#!/bin/sh\n"
+            "# Auto-generated by FlintVPN — DNS ad-block rules\n"
+            "# Re-applied on every firewall reload\n\n"
+            f"ipset create {ADBLOCK_IPSET} hash:mac -exist\n"
+            f"ipset flush {ADBLOCK_IPSET}\n"
+            f"if [ -f {ADBLOCK_MACS_FILE} ]; then\n"
+            f"  while read mac; do\n"
+            f'    [ -n "$mac" ] && ipset add {ADBLOCK_IPSET} "$mac" -exist 2>/dev/null\n'
+            f"  done < {ADBLOCK_MACS_FILE}\n"
+            f"fi\n\n"
+        )
+        for cmd in cmds:
+            script += cmd + "\n"
+        self._ssh.write_file(ADBLOCK_RULES_SCRIPT, script)
+        self._ssh.exec(f"chmod +x {ADBLOCK_RULES_SCRIPT}")
+
+        # 6. Register as firewall include (idempotent)
+        self._ssh.exec(
+            f"uci -q get firewall.fvpn_adblock >/dev/null 2>&1 || ("
+            f"uci set firewall.fvpn_adblock=include && "
+            f"uci set firewall.fvpn_adblock.type='script' && "
+            f"uci set firewall.fvpn_adblock.path='{ADBLOCK_RULES_SCRIPT}' && "
+            f"uci set firewall.fvpn_adblock.reload='1' && "
+            f"uci commit firewall)"
+        )
+
+        log.info("Adblock rules synced: %d MACs in ipset", len(macs))
+
+    def _build_rule_commands(self) -> list:
+        """Build iptables commands for the adblock REDIRECT chain."""
+        chain = ADBLOCK_CHAIN
+        cmds = [
+            # Create chain (idempotent)
+            f"iptables -t nat -N {chain} 2>/dev/null || true",
+            # Flush existing rules
+            f"iptables -t nat -F {chain}",
+            # REDIRECT matching MACs' DNS to blocking dnsmasq
+            f"iptables -t nat -A {chain} "
+            f"-m set --match-set {ADBLOCK_IPSET} src "
+            f"-p udp --dport 53 -j REDIRECT --to-ports {ADBLOCK_PORT}",
+            f"iptables -t nat -A {chain} "
+            f"-m set --match-set {ADBLOCK_IPSET} src "
+            f"-p tcp --dport 53 -j REDIRECT --to-ports {ADBLOCK_PORT}",
+            # Insert into policy_redirect (idempotent check first)
+            f"iptables -t nat -C policy_redirect -j {chain} 2>/dev/null || "
+            f"iptables -t nat -I policy_redirect 1 -j {chain}",
+        ]
+        return cmds
+
+    # ── Blocklist upload ────────────────────────────────────────────────
+
+    def upload_blocklist(self, content: str) -> None:
+        """Write blocklist to router and reload the blocking dnsmasq.
+
+        Args:
+            content: Hosts-format blocklist (``0.0.0.0 domain`` per line).
+        """
+        self._ssh.write_file(ADBLOCK_HOSTS_PATH, content)
+        # SIGHUP tells dnsmasq to re-read hosts files without full restart
+        self._ssh.exec(
+            "kill -HUP $(pgrep -f 'dnsmasq.*dnsmasq-adblock') 2>/dev/null || true"
+        )
+        log.info("Blocklist uploaded (%d bytes)", len(content))
+
+    # ── Full teardown ───────────────────────────────────────────────────
+
+    def cleanup_adblock(self) -> None:
+        """Remove all adblock infrastructure from the router. Idempotent."""
+        chain = ADBLOCK_CHAIN
+
+        # Remove chain from policy_redirect
+        self._ssh.exec(
+            f"iptables -t nat -D policy_redirect -j {chain} 2>/dev/null; "
+            f"iptables -t nat -F {chain} 2>/dev/null; "
+            f"iptables -t nat -X {chain} 2>/dev/null; true"
+        )
+
+        # Destroy ipset
+        self._ssh.exec(f"ipset destroy {ADBLOCK_IPSET} 2>/dev/null; true")
+
+        # Stop dnsmasq
+        self.stop_adblock_dnsmasq()
+
+        # Remove firewall include
+        self._ssh.exec(
+            f"uci delete firewall.fvpn_adblock 2>/dev/null; "
+            f"uci commit firewall 2>/dev/null; true"
+        )
+
+        # Clean up files (keep blocklist — it's expensive to re-download)
+        self._ssh.exec(
+            f"rm -f {ADBLOCK_RULES_SCRIPT} {ADBLOCK_MACS_FILE} "
+            f"{ADBLOCK_CONF_PATH} {ADBLOCK_INIT_SCRIPT}; true"
+        )
+
+        log.info("Adblock infrastructure cleaned up")

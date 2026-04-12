@@ -31,8 +31,6 @@ export const api = {
   changeServer: (id, data) => request(`/api/profiles/${id}/server`, { method: 'PUT', body: data }),
   changeType: (id, data) => request(`/api/profiles/${id}/type`, { method: 'PUT', body: data }),
   changeProtocol: (id, data) => request(`/api/profiles/${id}/protocol`, { method: 'PUT', body: data }),
-  setProfileLanAccess: (id, data) => request(`/api/profiles/${id}/lan-access`, { method: 'PUT', body: data }),
-
   // Servers
   getServers: (profileId) => request(`/api/profiles/${profileId || 'none'}/servers`),
 
@@ -40,8 +38,6 @@ export const api = {
   getDevices: () => request('/api/devices'),
   assignDevice: (mac, profileId) => request(`/api/devices/${encodeURIComponent(mac)}/profile`, { method: 'PUT', body: { profile_id: profileId } }),
   setDeviceLabel: (mac, label, deviceClass) => request(`/api/devices/${encodeURIComponent(mac)}/label`, { method: 'PUT', body: { label, device_class: deviceClass } }),
-  setDeviceLanAccess: (mac, data) => request(`/api/devices/${encodeURIComponent(mac)}/lan-access`, { method: 'PUT', body: data }),
-
   // Settings
   getSettings: () => request('/api/settings'),
   updateSettings: (data) => request('/api/settings', { method: 'PUT', body: data }),
@@ -54,6 +50,13 @@ export const api = {
   removeFromBlacklist: (serverId) => request(`/api/settings/server-preferences/blacklist/${encodeURIComponent(serverId)}`, { method: 'DELETE' }),
   addToFavourites: (serverId) => request(`/api/settings/server-preferences/favourites/${encodeURIComponent(serverId)}`, { method: 'POST' }),
   removeFromFavourites: (serverId) => request(`/api/settings/server-preferences/favourites/${encodeURIComponent(serverId)}`, { method: 'DELETE' }),
+
+  // DNS Ad Blocker
+  getAdblockSettings: () => request('/api/settings/adblock'),
+  updateAdblockSettings: (data) => request('/api/settings/adblock', { method: 'PUT', body: data }),
+  updateBlocklistNow: () => request('/api/settings/adblock/update-now', { method: 'POST' }),
+  getBlockedDomains: (search = '', page = 1, limit = 100) =>
+    request(`/api/settings/adblock/domains?search=${encodeURIComponent(search)}&page=${page}&limit=${limit}`),
 
   // Ports
   getAvailablePorts: () => request('/api/available-ports'),

@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "review-claudemd": {
+      "source": "ykdojo/claude-code-tips",
+      "sourceType": "github",
+      "computedHash": "1747fab563122ebe6c2bc6c71e1d15c92e67745f2c5e7887917cd3b5ed190996"
+    }
+  }
+}
