@@ -49,6 +49,8 @@
 
   $: typeChanged = mode === 'edit' && type !== initialType;
   $: protocolChanged = mode === 'edit' && type === 'vpn' && vpnProtocol !== initialProto;
+  // Smart Protocol: force WireGuard UDP as starting protocol
+  $: if (smartProtocol && vpnProtocol !== 'wireguard') vpnProtocol = 'wireguard';
   // Reset port when protocol changes (port options differ per protocol)
   $: if (protocolChanged) portOverride = '';
   $: optionsChanged = mode === 'edit' && (
@@ -317,6 +319,20 @@
 
       <!-- VPN Protocol -->
       {#if type === 'vpn'}
+
+      <!-- Smart Protocol toggle — above protocol cards -->
+      <div class="option-item smart-protocol-row">
+        <input type="checkbox" id="gm-smart" bind:checked={smartProtocol}>
+        <label for="gm-smart">
+          Smart Protocol
+          <span class="opt-hint">— automatically picks the best protocol</span>
+        </label>
+        <HelpTooltip title="Smart Protocol">
+          <p>Starts with the fastest protocol (WireGuard UDP) and automatically falls back through WG TCP → Stealth → OpenVPN if the connection doesn't establish within 45 seconds. No manual protocol selection needed.</p>
+        </HelpTooltip>
+      </div>
+
+      {#if !smartProtocol}
       <div class="form-group">
         <label class="required">VPN Protocol</label>
         <div class="protocol-cards">
@@ -392,18 +408,11 @@
           </ul>
         </div>
       </details>
-
-      <!-- Smart Protocol -->
-      <div class="option-item smart-protocol-row">
-        <input type="checkbox" id="gm-smart" bind:checked={smartProtocol}>
-        <label for="gm-smart">
-          Smart Protocol
-          <span class="opt-hint">— auto-fallback: WG → WG TCP → Stealth → OpenVPN</span>
-        </label>
-        <HelpTooltip title="Smart Protocol">
-          <p>When enabled, if the tunnel doesn't connect within 45 seconds, FlintVPN automatically tries alternate protocols until one works. WireGuard variants are tried first (faster), then OpenVPN as a last resort.</p>
-        </HelpTooltip>
-      </div>
+      {:else}
+        <div class="smart-protocol-info">
+          <span class="hint">Protocol will be selected automatically. Starts with WireGuard UDP, falls back through WG TCP → Stealth → OpenVPN.</span>
+        </div>
+      {/if}
 
       <!-- VPN Options -->
       <div class="vpn-options-section">
@@ -581,6 +590,7 @@
   button:disabled { opacity: 0.5; cursor: not-allowed; }
 
   .smart-protocol-row { margin-top: 8px; margin-bottom: 4px; padding: 10px; background: var(--bg); border-radius: var(--radius-xs); border: 1px solid var(--border); }
+  .smart-protocol-info { padding: 10px; background: var(--bg); border-radius: var(--radius-xs); margin-top: 4px; }
 
   .vpn-options-section { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); }
   .vpn-options-section .form-group { margin-bottom: 8px; }
