@@ -319,6 +319,78 @@ class VPNService:
         except Exception:
             return cached
 
+    # ── Self-Heal ────────────────────────────────────────────────────────────
+
+    def _heal_duplicate_tunnel_ids(self, store_data: dict, router) -> None:
+        """Fix proton-wg profiles that share a tunnel_id due to reboot-time races.
+
+        _next_tunnel_id() checks live ipsets on the router, but ipsets vanish on
+        reboot.  If two profiles were created between reboots, the second may have
+        received the same tunnel_id, causing device assignments to bleed between
+        groups.  This method detects collisions and allocates fresh IDs.
+        """
+        seen = set()
+        for p in store_data.get("profiles", []):
+            ri = p.get("router_info") or {}
+            tid = ri.get("tunnel_id")
+            if tid is not None and not ri.get("vpn_protocol", "").startswith("wireguard-"):
+                seen.add(tid)
+
+        for p in store_data.get("profiles", []):
+            ri = p.get("router_info") or {}
+            if not ri.get("vpn_protocol", "").startswith("wireguard-"):
+                continue
+            tid = ri.get("tunnel_id")
+            if tid is None:
+                continue
+            if tid not in seen:
+                seen.add(tid)
+                continue
+            self._reassign_tunnel_id(store_data, p, ri, tid, router)
+            seen.add(ri["tunnel_id"])
+
+    def _reassign_tunnel_id(self, store_data, profile, ri, old_tid, router):
+        """Allocate a fresh tunnel_id for a proton-wg profile and update router state."""
+        try:
+            new_tid = router._next_tunnel_id()
+        except RuntimeError:
+            log.error("No free tunnel_id to heal duplicate %d", old_tid)
+            return
+
+        iface = ri.get("tunnel_name", "")
+        old_ipset = ri.get("ipset_name", f"src_mac_{old_tid}")
+        new_ipset = f"src_mac_{new_tid}"
+        log.warning(
+            "Healing duplicate tunnel_id %d for profile %s (%s) -> %d",
+            old_tid, profile.get("id", "?")[:8], iface, new_tid,
+        )
+
+        # Create new ipset and migrate any existing MACs
+        router.exec(f"ipset create {new_ipset} hash:mac -exist")
+        try:
+            members = router.exec(
+                f"ipset list {old_ipset} 2>/dev/null | "
+                f"awk 'p{{print}} /^Members:/{{p=1}}'"
+            ).strip()
+            for mac_line in members.splitlines():
+                mac_val = mac_line.strip()
+                if mac_val:
+                    router.exec(f"ipset add {new_ipset} {mac_val} -exist")
+        except Exception:
+            pass
+
+        # Update .env file on router
+        if iface:
+            env_path = f"{router.PROTON_WG_DIR}/{iface}.env"
+            router.exec(
+                f"sed -i 's/^FVPN_TUNNEL_ID=.*/FVPN_TUNNEL_ID={new_tid}/' {env_path}; "
+                f"sed -i 's/^FVPN_IPSET=.*/FVPN_IPSET={new_ipset}/' {env_path}"
+            )
+
+        ri["tunnel_id"] = new_tid
+        ri["ipset_name"] = new_ipset
+        ps.save(store_data)
+
     # ── Profile List ─────────────────────────────────────────────────────────
 
     def build_profile_list(self, store_data: dict = None) -> list:
@@ -437,6 +509,9 @@ class VPNService:
             device_counts[canonical] = device_counts.get(canonical, 0) + 1
         for p in vpn_profiles:
             p["device_count"] = device_counts.get(p["router_info"]["rule_name"], 0)
+
+        # Self-heal duplicate tunnel_ids (can happen after router reboot races)
+        self._heal_duplicate_tunnel_ids(store_data, router)
 
         # proton-wg profiles (wireguard-tcp / wireguard-tls): managed outside
         # vpn-client, so they don't appear in router route_policy rules.
@@ -1027,7 +1102,11 @@ class VPNService:
             wg_transport = {PROTO_WIREGUARD_TCP: "tcp", PROTO_WIREGUARD_TLS: "tls"}.get(new_vpn_protocol, "udp")
 
             if new_vpn_protocol == old_proto:
-                raise ValueError("Protocol is already " + old_proto)
+                # OpenVPN UDP ↔ TCP is allowed (same vpn_protocol, different transport)
+                old_ovpn = "tcp" if (profile.get("server") or {}).get("protocol", "").endswith("tcp") else "udp"
+                is_ovpn_transport_change = new_vpn_protocol == PROTO_OPENVPN and ovpn_protocol != old_ovpn
+                if not is_ovpn_transport_change:
+                    raise ValueError("Protocol is already " + old_proto)
 
             # Check limits for the new protocol (don't count current profile)
             existing = ps.get_profiles()

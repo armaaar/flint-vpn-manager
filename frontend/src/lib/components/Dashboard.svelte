@@ -8,6 +8,7 @@
   import GroupModal from './GroupModal.svelte';
   import ServerPicker from './ServerPicker.svelte';
   import SettingsPage from './SettingsPage.svelte';
+  import LanAccessPage from './LanAccessPage.svelte';
   import LogsModal from './LogsModal.svelte';
 
   let refreshing = false;
@@ -17,7 +18,7 @@
   let selectedDevice = null;
   let showCreate = false;
   let editProfile = null;
-  let dashboardView = 'dashboard'; // 'dashboard' | 'settings'
+  let dashboardView = 'dashboard'; // 'dashboard' | 'settings' | 'lan-access'
   let settingsTab = '';  // passed to SettingsPage from hash
   let showLogs = false;
   let showServerPicker = false;
@@ -38,6 +39,9 @@
     if (hash.startsWith('settings')) {
       dashboardView = 'settings';
       settingsTab = hash.split('/')[1] || '';
+    } else if (hash === 'lan-access') {
+      dashboardView = 'lan-access';
+      settingsTab = '';
     } else {
       dashboardView = 'dashboard';
       settingsTab = '';
@@ -47,6 +51,8 @@
   function navigateTo(view, tab = '') {
     if (view === 'settings') {
       window.location.hash = tab ? `settings/${tab}` : 'settings';
+    } else if (view === 'lan-access') {
+      window.location.hash = 'lan-access';
     } else {
       window.location.hash = '';
     }
@@ -195,6 +201,7 @@
     </div>
     <div class="sidebar-nav">
       <a href="#" class:active={dashboardView === 'dashboard'} on:click|preventDefault={() => navigateTo('dashboard')}><span class="nav-icon">☰</span> Dashboard</a>
+      <a href="#lan-access" class:active={dashboardView === 'lan-access'} on:click|preventDefault={() => navigateTo('lan-access')}><span class="nav-icon">🔗</span> LAN Access</a>
       <a href="#settings" class:active={dashboardView === 'settings'} on:click|preventDefault={() => navigateTo('settings')}><span class="nav-icon">⚙</span> Settings</a>
       <a href="#" on:click|preventDefault={() => showLogs = true}><span class="nav-icon">📋</span> Logs</a>
     </div>
@@ -229,6 +236,8 @@
   <div class="content">
     {#if dashboardView === 'settings'}
       <SettingsPage initialTab={settingsTab} on:back={() => navigateTo('dashboard')} on:tabchange={(e) => navigateTo('settings', e.detail)} />
+    {:else if dashboardView === 'lan-access'}
+      <LanAccessPage on:back={() => navigateTo('dashboard')} />
     {:else}
     <div class="content-header">
       <h2>Dashboard</h2>

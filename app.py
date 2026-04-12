@@ -204,6 +204,12 @@ def api_unlock():
         except Exception as e:
             log.warning(f"NoInternet sync on unlock failed: {e}")
 
+        # Reapply LAN access exceptions from config
+        try:
+            _get_lan_service().reapply_all()
+        except Exception as e:
+            log.warning(f"LAN access reapply on unlock failed: {e}")
+
         # Start auto-optimizer
         try:
             start_optimizer(
@@ -629,6 +635,70 @@ def api_assign_device(mac):
         return jsonify({"error": str(e)}), 400
 
 
+# ── LAN Access ────────────────────────────────────────────────────────────────
+
+_lan_service = None
+
+def _get_lan_service():
+    global _lan_service
+    if _lan_service is None:
+        from lan_access_service import LanAccessService
+        _lan_service = LanAccessService(_get_router())
+    return _lan_service
+
+
+@app.route("/api/lan-access/networks", methods=["GET"])
+@require_unlocked
+def api_get_lan_networks():
+    return jsonify(_get_lan_service().get_lan_overview())
+
+
+@app.route("/api/lan-access/networks/<zone_id>/devices", methods=["GET"])
+@require_unlocked
+def api_get_lan_network_devices(zone_id):
+    return jsonify({"devices": _get_lan_service().get_network_devices(zone_id)})
+
+
+@app.route("/api/lan-access/rules", methods=["PUT"])
+@require_unlocked
+def api_update_lan_rules():
+    data = request.json
+    rules = data.get("rules", [])
+    return jsonify(_get_lan_service().update_access_rules(rules))
+
+
+@app.route("/api/lan-access/isolation/<zone_id>", methods=["PUT"])
+@require_unlocked
+def api_set_lan_isolation(zone_id):
+    data = request.json
+    enabled = data.get("enabled", False)
+    try:
+        return jsonify(_get_lan_service().set_isolation(zone_id, enabled))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+
+
+@app.route("/api/lan-access/exceptions", methods=["GET"])
+@require_unlocked
+def api_get_lan_exceptions():
+    return jsonify({"exceptions": _get_lan_service().get_exceptions()})
+
+
+@app.route("/api/lan-access/exceptions", methods=["POST"])
+@require_unlocked
+def api_add_lan_exception():
+    try:
+        return jsonify(_get_lan_service().add_exception(request.json))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/lan-access/exceptions/<exc_id>", methods=["DELETE"])
+@require_unlocked
+def api_remove_lan_exception(exc_id):
+    return jsonify(_get_lan_service().remove_exception(exc_id))
+
+
 # ── Refresh ───────────────────────────────────────────────────────────────────
 
 @app.route("/api/refresh", methods=["POST"])
@@ -976,6 +1046,12 @@ def api_update_adblock_settings():
     adblock = config.get("adblock", {})
     if "blocklist_sources" in data:
         adblock["blocklist_sources"] = data["blocklist_sources"]
+    if "custom_domains" in data:
+        # Validate: each entry should be a domain-like string
+        adblock["custom_domains"] = [
+            d.strip().lower() for d in data["custom_domains"]
+            if d.strip() and "." in d.strip()
+        ]
     adblock.pop("blocklist_url", None)  # Remove legacy field
     sm.update_config(adblock=adblock)
     return jsonify(adblock)
@@ -1073,10 +1149,17 @@ def _download_and_merge_blocklists():
     config = sm.get_config()
     adblock = config.get("adblock", {})
     sources = adblock.get("blocklist_sources", [])
-    if not sources:
+    custom_domains = adblock.get("custom_domains", [])
+    if not sources and not custom_domains:
         return None, 0, []
 
     all_domains = set()
+    # Add user's custom domains first
+    for d in custom_domains:
+        d = d.strip().lower()
+        if d and "." in d:
+            all_domains.add(d)
+
     failed = []
     for source in sources:
         url = BLOCKLIST_PRESETS.get(source, {}).get("url", source)
@@ -1164,4 +1247,4 @@ def index():
 # ── Startup ───────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True, threaded=True)
+    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)

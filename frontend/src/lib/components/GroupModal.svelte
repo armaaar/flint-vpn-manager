@@ -45,10 +45,14 @@
   // Edit-mode change detection
   let initialType = 'vpn';
   let initialProto = 'wireguard';
+  let initialOvpnProtocol = 'udp';
   let initialOptions = { killSwitch: true, netshield: '2', accelerator: true, moderateNat: false, natPmp: false, portOverride: '', customDns: '', smartProtocol: false };
 
   $: typeChanged = mode === 'edit' && type !== initialType;
-  $: protocolChanged = mode === 'edit' && type === 'vpn' && vpnProtocol !== initialProto;
+  $: protocolChanged = mode === 'edit' && type === 'vpn' && (
+    (vpnProtocol === 'wireguard-tcp' ? `wireguard-${wgTcpTransport}` : vpnProtocol) !== initialProto ||
+    (vpnProtocol === 'openvpn' && ovpnProtocol !== initialOvpnProtocol)
+  );
   // Smart Protocol: force WireGuard UDP as starting protocol
   $: if (smartProtocol && vpnProtocol !== 'wireguard') vpnProtocol = 'wireguard';
   // Reset port when protocol changes (port options differ per protocol)
@@ -105,9 +109,10 @@
     if (curProto === 'wireguard-tls') { vpnProtocol = 'wireguard-tcp'; wgTcpTransport = 'tls'; }
     else if (curProto === 'wireguard-tcp') { vpnProtocol = 'wireguard-tcp'; wgTcpTransport = 'tcp'; }
     else { vpnProtocol = curProto; }
-    initialProto = vpnProtocol;
     const serverProto = liveProfile.server?.protocol || '';
     ovpnProtocol = serverProto.endsWith('tcp') ? 'tcp' : 'udp';
+    initialProto = curProto;
+    initialOvpnProtocol = ovpnProtocol;
     error = '';
   }
   $: if (!profile) lastLoadedId = null;

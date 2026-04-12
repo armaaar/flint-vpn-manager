@@ -249,6 +249,13 @@ class RouterAPI:
             self._adblock_facade = RouterAdblock(self)
         return self._adblock_facade
 
+    @property
+    def lan_access(self):
+        if not hasattr(self, "_lan_access_facade"):
+            from router_lan_access import RouterLanAccess
+            self._lan_access_facade = RouterLanAccess(self)
+        return self._lan_access_facade
+
     # ── Delegates: Devices ───────────────────────────────────────────────
 
     def get_dhcp_leases(self) -> list[dict]:
@@ -262,8 +269,10 @@ class RouterAPI:
     def _next_tunnel_id(self) -> int:
         """Find the next available tunnel_id.
 
-        Checks BOTH route_policy UCI rules (kernel WG + OVPN) AND
-        existing src_mac_* ipsets (proton-wg tunnels) to avoid collisions.
+        Checks route_policy UCI rules (kernel WG + OVPN), existing
+        src_mac_* ipsets, AND proton-wg .env files on the router to
+        avoid collisions.  The .env check is critical because ipsets are
+        in-memory and vanish on reboot, while .env files persist.
         """
         # IDs used by route_policy (kernel WG + OVPN)
         existing = self.exec(
@@ -287,6 +296,15 @@ class RouterAPI:
                     used.add(int(line.split("_")[-1]))
                 except ValueError:
                     pass
+        # IDs claimed by proton-wg .env files (persist across reboots)
+        env_ids = self.exec(
+            f"grep -h '^FVPN_TUNNEL_ID=' {self.PROTON_WG_DIR}/*.env 2>/dev/null || true"
+        )
+        for line in env_ids.strip().splitlines():
+            try:
+                used.add(int(line.split("=", 1)[1].strip()))
+            except (ValueError, IndexError):
+                pass
         # Start from 300 to avoid conflicts with built-in IDs
         for tid in range(300, 400):
             if tid not in used:

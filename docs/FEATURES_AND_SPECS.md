@@ -93,6 +93,44 @@ Global toggle in Settings. When enabled (default), Proton API calls automaticall
 
 ---
 
+## LAN Access Control
+
+Controls cross-network communication on the router. Operates at the network/zone level (separate from per-group VPN routing).
+
+### Network discovery
+
+Networks are discovered from UCI `wireless`/`network`/`firewall` config. Each network maps to a fw3 zone (e.g. `lan`, `guest`) with its own bridge interface, subnet, and zero or more SSIDs (2.4G / 5G). Device counts are derived from DHCP leases matched against each subnet. The LAN Access page shows all non-WAN zones as collapsible cards.
+
+### Device isolation (AP isolation)
+
+Per-SSID toggle (`wireless.*.isolate`). When enabled, WiFi clients on the same SSID cannot see each other at L2 -- all traffic must go through the router. Applied to all SSIDs in a zone simultaneously. Toggling triggers `wifi reload` (clients may briefly reconnect).
+
+### Cross-network access rules (zone forwarding)
+
+Traffic between zones is controlled by `firewall.forwarding` UCI entries. Each zone pair has an independent inbound/outbound toggle. Presence of a forwarding entry = allowed; absence = blocked. The UI shows a matrix of inbound/outbound toggles per network pair. Changes are staged locally and applied on Save (one `uci add/delete` + `firewall reload` per rule change).
+
+Router UCI is the source of truth for forwarding state. `config.json` stores intent for UI reference.
+
+### Device exceptions
+
+When cross-network traffic is blocked at the zone level, individual devices can be exempted. Exceptions are iptables ACCEPT rules inserted into the `forwarding_rule` chain (which runs before zone forwarding checks). Each exception specifies:
+- **From**: a device IP or entire network subnet
+- **To**: a device IP or entire network subnet
+- **Direction**: outbound only, inbound only, or both
+
+Exceptions are persisted in `config.json` under `lan_access.exceptions` and written to a firewall include script (`/etc/fvpn/lan_access_rules.sh`) so they survive router reboots. On unlock, `LanAccessService.reapply_all()` re-applies all saved exceptions to iptables.
+
+### LAN Access page
+
+Hash route `#lan-access`. Shows:
+- Network cards (collapsible): SSID names, subnet, device count, isolation badge, isolation toggle
+- Per-network access rules table: inbound/outbound toggles for each other network
+- Device list per network (loaded on expand): name, IP, online status, interface
+- Exceptions section: list of active exceptions with add/remove controls
+- Exception modal (`ExceptionModal.svelte`): From/To pickers (device or entire network), direction selector
+
+---
+
 ## Security
 
 - **Master password** — required on each session. Used to derive a key (PBKDF2) that decrypts `secrets.enc` (Fernet / AES-128-CBC + HMAC-SHA256).
@@ -149,6 +187,14 @@ POST   /api/settings/server-preferences/favourites/:id  → add to favourites
 DELETE /api/settings/server-preferences/favourites/:id  → remove from favourites
 PUT    /api/settings/credentials        → update encrypted creds
 PUT    /api/settings/master-password    → change master password
+
+GET    /api/lan-access/networks                → discovered networks (zones, SSIDs, subnets, counts)
+GET    /api/lan-access/networks/:zone/devices  → devices in a specific network
+PUT    /api/lan-access/rules                   → update cross-network zone forwarding rules
+PUT    /api/lan-access/isolation/:zone         → toggle WiFi AP isolation for a network
+GET    /api/lan-access/exceptions              → list device exceptions
+POST   /api/lan-access/exceptions              → add device exception
+DELETE /api/lan-access/exceptions/:id          → remove device exception
 
 GET    /                                → serve Svelte frontend
 ```

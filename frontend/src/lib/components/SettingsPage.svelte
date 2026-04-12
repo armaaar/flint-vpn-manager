@@ -29,6 +29,7 @@
   let blacklistCount = 0, favouritesCount = 0, clearingPrefs = false;
   let blocklistSources = [], blocklistLastUpdated = '', blocklistDomainCount = 0;
   let presets = {}, customUrl = '', updatingBlocklist = false;
+  let customDomains = [], newCustomDomain = '';
   let showDomainViewer = false, domainSearch = '', domains = [], domainTotal = 0, domainPage = 1, domainHasMore = false, domainsLoading = false;
   let sessions = [], maxConnections = 10, sessionsLoading = false;
   let protonUser = '', protonPass = '', routerPass = '', masterPass = '', savingCreds = false;
@@ -57,6 +58,7 @@
       blocklistLastUpdated = ab.last_updated || '';
       blocklistDomainCount = ab.domain_count || 0;
       presets = ab.presets || {};
+      customDomains = ab.custom_domains || [];
     } catch (e) { /* ignore */ }
   }
 
@@ -132,7 +134,7 @@
     updatingBlocklist = true;
     try {
       // Save first, then update
-      await api.updateAdblockSettings({ blocklist_sources: blocklistSources });
+      await api.updateAdblockSettings({ blocklist_sources: blocklistSources, custom_domains: customDomains });
       const res = await api.updateBlocklistNow();
       if (res.error) { showToast(res.error, true); }
       else {
@@ -157,6 +159,17 @@
       domainHasMore = res.has_more;
     } catch (e) { /* ignore */ }
     domainsLoading = false;
+  }
+
+  function addCustomDomain() {
+    const d = newCustomDomain.trim().toLowerCase();
+    if (!d || !d.includes('.') || customDomains.includes(d)) return;
+    customDomains = [...customDomains, d];
+    newCustomDomain = '';
+  }
+
+  function removeCustomDomain(domain) {
+    customDomains = customDomains.filter(d => d !== domain);
   }
 
   function searchDomains() {
@@ -322,19 +335,25 @@
 
         <div class="preset-grid">
           {#each Object.entries(presets) as [id, preset]}
-            <button class="preset-card" class:selected={blocklistSources.includes(id)}
-                    on:click={() => togglePreset(id)}>
-              <span class="preset-check">{blocklistSources.includes(id) ? '✓' : ''}</span>
-              <div class="preset-info">
-                <span class="preset-name">{preset.name}</span>
-                <span class="preset-desc">{preset.description}</span>
-              </div>
-            </button>
+            <div class="preset-row">
+              <button class="preset-card" class:selected={blocklistSources.includes(id)}
+                      on:click={() => togglePreset(id)}>
+                <span class="preset-check">{blocklistSources.includes(id) ? '✓' : ''}</span>
+                <div class="preset-info">
+                  <span class="preset-name">{preset.name}</span>
+                  <span class="preset-desc">{preset.description}</span>
+                </div>
+              </button>
+              {#if preset.info_url}
+                <a href={preset.info_url} target="_blank" rel="noopener" class="preset-link" title="View blocklist source">↗</a>
+              {/if}
+            </div>
           {/each}
         </div>
 
-        <div class="custom-url-row" style="margin-top:12px">
-          <input bind:value={customUrl} placeholder="Custom blocklist URL (hosts format)"
+        <h4 class="subsection-title" style="margin-top:16px">Custom Blocklist URLs</h4>
+        <div class="custom-url-row">
+          <input bind:value={customUrl} placeholder="https://example.com/blocklist.txt"
                  on:keydown={(e) => { urlError = ''; if (e.key === 'Enter') addCustomUrl(); }}
                  class:input-error={urlError}
                  style="flex:1">
@@ -348,8 +367,27 @@
           <div class="custom-sources" style="margin-top:8px">
             {#each blocklistSources.filter(s => !presets[s]) as url}
               <div class="custom-source-chip">
-                <span class="custom-source-url" title={url}>{url}</span>
+                <a href={url} target="_blank" rel="noopener" class="custom-source-url" title={url}>{url}</a>
                 <button class="chip-remove" on:click={() => removeSource(url)}>&times;</button>
+              </div>
+            {/each}
+          </div>
+        {/if}
+
+        <h4 class="subsection-title" style="margin-top:16px">Custom Blocked Domains</h4>
+        <span class="hint" style="display:block;margin-bottom:8px">Add individual domains to block (e.g. ads.example.com).</span>
+        <div class="custom-url-row">
+          <input bind:value={newCustomDomain} placeholder="ads.example.com"
+                 on:keydown={(e) => e.key === 'Enter' && addCustomDomain()}
+                 style="flex:1">
+          <button class="btn-outline btn-sm" on:click={addCustomDomain} disabled={!newCustomDomain.trim()}>Add</button>
+        </div>
+        {#if customDomains.length > 0}
+          <div class="custom-sources" style="margin-top:8px">
+            {#each customDomains as domain}
+              <div class="custom-source-chip">
+                <span class="custom-source-url">{domain}</span>
+                <button class="chip-remove" on:click={() => removeCustomDomain(domain)}>&times;</button>
               </div>
             {/each}
           </div>
@@ -483,7 +521,7 @@
 </div>
 
 <style>
-  .settings-page { max-width: 720px; }
+  .settings-page { max-width: 800px; margin: 0 auto; padding: 20px; }
   .settings-header { display: flex; align-items: center; gap: 16px; margin-bottom: 24px; }
   .settings-header h2 { margin: 0; font-size: 1.3rem; color: var(--fg); }
   .back-btn { background: none; border: 1px solid var(--border); color: var(--fg2); padding: 6px 14px; border-radius: var(--radius-sm); cursor: pointer; font-size: .85rem; transition: var(--transition); }
@@ -510,9 +548,14 @@
   .spinner-sm { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .6s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
 
+  .subsection-title { font-size: .85rem; color: var(--fg3); margin: 0 0 8px 0; font-weight: 600; }
+
   /* Preset cards */
   .preset-grid { display: flex; flex-direction: column; gap: 6px; }
-  .preset-card { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: var(--bg3); border: 1.5px solid var(--border); border-radius: var(--radius-sm, 6px); cursor: pointer; transition: var(--transition); text-align: left; color: var(--fg); }
+  .preset-row { display: flex; align-items: stretch; gap: 6px; }
+  .preset-card { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: var(--bg3); border: 1.5px solid var(--border); border-radius: var(--radius-sm, 6px); cursor: pointer; transition: var(--transition); text-align: left; color: var(--fg); flex: 1; }
+  .preset-link { display: flex; align-items: center; justify-content: center; width: 36px; background: var(--bg3); border: 1.5px solid var(--border); border-radius: var(--radius-sm, 6px); color: var(--fg3); text-decoration: none; font-size: 1rem; transition: var(--transition); flex-shrink: 0; }
+  .preset-link:hover { color: var(--accent); border-color: var(--accent); }
   .preset-card:hover { border-color: var(--accent); }
   .preset-card.selected { border-color: var(--accent); background: rgba(0,180,216,.08); }
   .preset-check { width: 20px; height: 20px; display: flex; align-items: center; justify-content: center; border: 2px solid var(--border); border-radius: 4px; font-size: .75rem; font-weight: 700; color: var(--accent); flex-shrink: 0; }
@@ -527,7 +570,8 @@
   .url-error { color: var(--red); font-size: .78rem; margin-top: 4px; }
   .custom-sources { display: flex; flex-wrap: wrap; gap: 6px; }
   .custom-source-chip { display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; background: var(--bg3); border-radius: 4px; font-size: .78rem; max-width: 100%; }
-  .custom-source-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg2); }
+  .custom-source-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg2); text-decoration: none; }
+  a.custom-source-url:hover { color: var(--accent); }
   .chip-remove { background: none; border: none; color: var(--fg3); cursor: pointer; font-size: 1rem; padding: 0 2px; line-height: 1; }
   .chip-remove:hover { color: var(--red); }
 

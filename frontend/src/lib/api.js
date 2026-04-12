@@ -68,6 +68,15 @@ export const api = {
   getLocation: () => request('/api/location'),
   getSessions: () => request('/api/sessions'),
 
+  // LAN Access
+  getNetworks: () => request('/api/lan-access/networks'),
+  getNetworkDevices: (zoneId) => request(`/api/lan-access/networks/${zoneId}/devices`),
+  updateAccessRules: (rules) => request('/api/lan-access/rules', { method: 'PUT', body: { rules } }),
+  setIsolation: (zoneId, enabled) => request(`/api/lan-access/isolation/${zoneId}`, { method: 'PUT', body: { enabled } }),
+  getExceptions: () => request('/api/lan-access/exceptions'),
+  addException: (data) => request('/api/lan-access/exceptions', { method: 'POST', body: data }),
+  removeException: (id) => request(`/api/lan-access/exceptions/${id}`, { method: 'DELETE' }),
+
   // Refresh
   refresh: () => request('/api/refresh', { method: 'POST' }),
 };

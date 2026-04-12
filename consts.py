@@ -29,23 +29,39 @@ ADBLOCK_INIT_SCRIPT = "/etc/init.d/fvpn-adblock"
 BLOCKLIST_PRESETS = {
     "hagezi-light": {
         "name": "HaGeZi Light",
-        "description": "Balanced — minimal false positives (~80K domains)",
+        "description": "Balanced — minimal false positives (~140K domains)",
         "url": "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/hosts/light.txt",
+        "info_url": "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/hosts/light.txt",
     },
     "hagezi-multi": {
         "name": "HaGeZi Multi",
-        "description": "Recommended — ads, trackers, analytics (~180K domains)",
+        "description": "Recommended — ads, trackers, analytics (~320K domains)",
         "url": "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/hosts/multi.txt",
+        "info_url": "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/hosts/multi.txt",
     },
     "hagezi-pro": {
         "name": "HaGeZi Pro",
-        "description": "Aggressive — comprehensive blocking (~250K domains)",
+        "description": "Aggressive — comprehensive blocking (~420K domains)",
         "url": "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/hosts/pro.txt",
+        "info_url": "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/hosts/pro.txt",
+    },
+    "hagezi-ultimate": {
+        "name": "HaGeZi Ultimate",
+        "description": "Maximum blocking — may have false positives (~580K domains)",
+        "url": "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/hosts/ultimate.txt",
+        "info_url": "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/hosts/ultimate.txt",
+    },
+    "hagezi-tif": {
+        "name": "HaGeZi Threat Intelligence",
+        "description": "Malware, cryptojacking, scam, phishing (~1.1M domains)",
+        "url": "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/hosts/tif.txt",
+        "info_url": "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/hosts/tif.txt",
     },
     "steven-black": {
         "name": "Steven Black Unified",
-        "description": "Popular community list — ads + malware (~130K domains)",
+        "description": "Popular community list — ads + malware (~90K domains)",
         "url": "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
+        "info_url": "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
     },
 }
 
