@@ -310,7 +310,7 @@
 <!-- Modals -->
 <DeviceModal device={selectedDevice} on:close={() => selectedDevice = null} on:reload={reload} />
 <GroupModal bind:visible={showCreate} onNeedServer={handleNeedServer} on:reload={reload} />
-<GroupModal bind:profile={editProfile} on:reload={reload} />
+<GroupModal bind:profile={editProfile} onNeedServer={handleNeedServer} on:reload={reload} />
 <ServerPicker bind:visible={showServerPicker} profileId={serverPickerProfileId} vpnProtocol={serverPickerProtocol} on:select={handleServerSelect} on:close={() => showServerPicker = false} />
 <LogsModal bind:visible={showLogs} />
 
