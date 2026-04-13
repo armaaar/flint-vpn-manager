@@ -82,15 +82,50 @@ class RouterDevices:
         except Exception:
             pass
 
-        # WiFi signal strength from iwinfo
+        # ARP neighbor table — online fallback for devices on non-lan bridges
+        # (gl-clients only tracks br-lan devices)
+        try:
+            raw = self._ssh.exec("ip neigh show 2>/dev/null || cat /proc/net/arp 2>/dev/null")
+            for line in raw.strip().splitlines():
+                parts = line.split()
+                # ip neigh format: "IP dev IFACE lladdr MAC STATE"
+                if "lladdr" in parts and len(parts) >= 6:
+                    try:
+                        idx = parts.index("lladdr")
+                        mac = parts[idx + 1].lower()
+                        state = parts[idx + 2] if idx + 2 < len(parts) else ""
+                    except (ValueError, IndexError):
+                        continue
+                    if mac not in result:
+                        result[mac] = {}
+                    # Supplement online status — gl-clients only tracks br-lan,
+                    # so ARP can upgrade offline→online for non-lan devices
+                    if state in ("REACHABLE", "STALE", "DELAY", "PROBE"):
+                        result[mac]["online"] = True
+                    # Detect interface for bridge membership
+                    if "iface" not in result[mac] and "dev" in parts:
+                        try:
+                            dev = parts[parts.index("dev") + 1]
+                            if dev.startswith("br-") and dev != "br-lan":
+                                result[mac]["iface"] = dev.replace("br-", "")
+                        except (ValueError, IndexError):
+                            pass
+        except Exception:
+            pass
+
+        # WiFi signal strength + band detection from iwinfo
         try:
             raw = self._ssh.exec(
                 "for iface in $(iwinfo 2>&1 | grep ESSID | awk '{print $1}'); do "
-                "iwinfo $iface assoclist 2>&1; done"
+                "echo \"IFACE:$iface\"; iwinfo $iface assoclist 2>&1; done"
             )
             current_mac = None
+            current_iface = ""
             for line in raw.strip().splitlines():
                 line = line.strip()
+                if line.startswith("IFACE:"):
+                    current_iface = line.split(":", 1)[1]
+                    continue
                 if "dBm" in line and len(line) > 17 and line[2] == ":":
                     parts = line.split()
                     current_mac = parts[0].lower()
@@ -100,6 +135,12 @@ class RouterDevices:
                         result[current_mac]["signal_dbm"] = int(parts[1])
                     except (ValueError, IndexError):
                         pass
+                    # Detect band from interface name: rax* = 5G, ra* = 2.4G
+                    # Always override — iwinfo is the live truth for WiFi band
+                    if current_iface.startswith("rax"):
+                        result[current_mac]["iface"] = "5G"
+                    elif current_iface.startswith("ra"):
+                        result[current_mac]["iface"] = "2.4G"
                 elif line.startswith("TX:") and current_mac:
                     try:
                         speed_str = line.split(",")[0].replace("TX:", "").strip()
