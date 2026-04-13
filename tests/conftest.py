@@ -12,7 +12,7 @@ import pytest
 @pytest.fixture
 def tmp_data_dir(tmp_path):
     """Provide a temporary directory and patch secrets_manager to use it."""
-    import secrets_manager
+    import persistence.secrets_manager as secrets_manager
 
     orig_data_dir = secrets_manager.DATA_DIR
     orig_secrets = secrets_manager.SECRETS_FILE

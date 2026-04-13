@@ -50,11 +50,11 @@ Commands added in later sessions:
 
 import click
 
-import secrets_manager as sm
+import persistence.secrets_manager as sm
 from consts import PROFILE_TYPE_VPN
-from proton_api import ProtonAPI
-from router_api import RouterAPI
-from vpn_service import VPNService
+from proton_vpn.api import ProtonAPI
+from router.api import RouterAPI
+from services.vpn_service import VPNService
 
 # Module-level session state (populated by unlock)
 _session = {"secrets": None, "unlocked": False}
@@ -216,7 +216,7 @@ def reset_local_state(yes, keep_router):
       ./cli.py reset-local-state --yes          # full wipe, no prompts
       ./cli.py reset-local-state --keep-router  # only wipe local + backup
     """
-    import profile_store as pstore
+    import persistence.profile_store as pstore
 
     if not yes:
         click.echo("This will permanently delete:")
@@ -247,7 +247,7 @@ def reset_local_state(yes, keep_router):
     if not keep_router:
         try:
             router = get_router_api()
-            import noint_sync
+            import router.noint_sync as noint_sync
             noint_sync.wipe_noint(router)
             click.echo("Wiped NoInternet router state (UCI sections + ipsets)")
         except Exception as e:
@@ -547,7 +547,7 @@ def router_devices():
     """
     r = get_router_api()
     try:
-        leases = r.get_dhcp_leases()
+        leases = r.devices.get_dhcp_leases()
     except Exception as e:
         click.echo(f"Error connecting to router: {e}")
         return
@@ -583,8 +583,8 @@ def router_tunnels():
     """
     r = get_router_api()
     try:
-        rules = r.get_flint_vpn_rules()
-        peers = r.get_flint_vpn_peers()
+        rules = r.policy.get_flint_vpn_rules()
+        peers = r.policy.get_flint_vpn_peers()
     except Exception as e:
         click.echo(f"Error connecting to router: {e}")
         return
@@ -603,7 +603,7 @@ def router_tunnels():
 
         if enabled:
             try:
-                health = r.get_tunnel_health(iface)
+                health = r.tunnel.get_tunnel_health(iface)
             except Exception:
                 health = "unknown"
         else:
@@ -631,11 +631,11 @@ def router_status():
     try:
         r.connect()
         click.echo("SSH connection: OK")
-        leases = r.get_dhcp_leases()
+        leases = r.devices.get_dhcp_leases()
         click.echo(f"Devices on network: {len(leases)}")
-        rules = r.get_flint_vpn_rules()
+        rules = r.policy.get_flint_vpn_rules()
         click.echo(f"FlintVPN tunnels: {len(rules)}")
-        active = r.get_active_interfaces()
+        active = r.policy.get_active_interfaces()
         click.echo(f"Active WG interfaces: {', '.join(active) if active else 'none'}")
     except Exception as e:
         click.echo(f"SSH connection: FAILED ({e})")
@@ -660,7 +660,7 @@ def profiles_list():
     \b
     Example: ./cli.py profiles list
     """
-    import profile_store as pstore
+    import persistence.profile_store as pstore
     data = pstore.load()
     profs = data["profiles"]
 
@@ -732,8 +732,8 @@ def profiles_delete(profile_id, yes):
     \b
     Example: ./cli.py profiles delete <profile-id>
     """
-    import profile_store as pstore
-    from vpn_service import NotFoundError
+    import persistence.profile_store as pstore
+    from services.vpn_service import NotFoundError
 
     profile = pstore.get_profile(profile_id)
     if not profile:
@@ -779,7 +779,7 @@ def devices_list():
     \b
     Example: ./cli.py devices list
     """
-    import profile_store as pstore
+    import persistence.profile_store as pstore
 
     if not _session["unlocked"]:
         click.echo("Session locked. Run `unlock` first or use the dashboard.")
@@ -818,8 +818,8 @@ def devices_assign(mac, profile_id):
     Examples:
       ./cli.py devices assign aa:bb:cc:dd:ee:ff <profile-id>
     """
-    import profile_store as pstore
-    from vpn_service import NotFoundError
+    import persistence.profile_store as pstore
+    from services.vpn_service import NotFoundError
 
     profile = pstore.get_profile(profile_id)
     if not profile:

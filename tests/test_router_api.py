@@ -7,7 +7,7 @@ Integration tests (marked @pytest.mark.integration) use a live router.
 import pytest
 from unittest.mock import MagicMock
 
-from router_api import RouterAPI
+from router.api import RouterAPI
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -40,7 +40,7 @@ class TestGetDhcpLeases:
             "1775453082 42:5a:e3:13:f6:37 192.168.8.163 * 01:42:5a:e3:13:f6:37\n"
             "1775453152 a4:f9:33:1c:b6:78 192.168.8.228 Armaaar-PC 01:a4:f9:33:1c:b6:78"
         )
-        leases = mock_router.get_dhcp_leases()
+        leases = mock_router.devices.get_dhcp_leases()
         assert len(leases) == 2
         assert leases[0]["mac"] == "42:5a:e3:13:f6:37"
         assert leases[0]["ip"] == "192.168.8.163"
@@ -49,14 +49,14 @@ class TestGetDhcpLeases:
 
     def test_empty_leases(self, mock_router):
         mock_router._exec_responses["cat /tmp/dhcp.leases"] = ""
-        leases = mock_router.get_dhcp_leases()
+        leases = mock_router.devices.get_dhcp_leases()
         assert leases == []
 
     def test_mac_lowercased(self, mock_router):
         mock_router._exec_responses["cat /tmp/dhcp.leases"] = (
             "123 AA:BB:CC:DD:EE:FF 10.0.0.1 host 01:aa:bb:cc:dd:ee:ff"
         )
-        leases = mock_router.get_dhcp_leases()
+        leases = mock_router.devices.get_dhcp_leases()
         assert leases[0]["mac"] == "aa:bb:cc:dd:ee:ff"
 
 
@@ -65,49 +65,49 @@ class TestGetDhcpLeases:
 class TestGetTunnelHealth:
     def test_disabled_rule_is_red(self, mock_router):
         mock_router._exec_responses["enabled"] = "0"
-        assert mock_router.get_tunnel_health("fvpn_rule_9001") == "red"
+        assert mock_router.tunnel.get_tunnel_health("fvpn_rule_9001") == "red"
 
     def test_no_interface_enabled_is_connecting(self, mock_router):
         mock_router._exec_responses["enabled"] = "1"
-        mock_router._exec_responses["uci get"] = ""
-        assert mock_router.get_tunnel_health("fvpn_rule_9001") == "connecting"
+        mock_router._exec_responses["uci -q get"] = ""
+        assert mock_router.tunnel.get_tunnel_health("fvpn_rule_9001") == "connecting"
 
     def test_interface_down_is_red(self, mock_router):
         mock_router._exec_responses["enabled"] = "1"
-        mock_router._exec_responses["uci get"] = "wgclient1"
+        mock_router._exec_responses[".via"] = "wgclient1"
         mock_router._exec_responses["ifstatus"] = "false"
         mock_router._exec_responses["cat"] = ""  # no state file
-        assert mock_router.get_tunnel_health("fvpn_rule_9001") == "red"
+        assert mock_router.tunnel.get_tunnel_health("fvpn_rule_9001") == "red"
 
     def test_recent_handshake_is_green(self, mock_router):
         import time
         now = int(time.time())
         mock_router._exec_responses["enabled"] = "1"
-        mock_router._exec_responses["uci get"] = "wgclient1"
+        mock_router._exec_responses[".via"] = "wgclient1"
         mock_router._exec_responses["ifstatus"] = "true"
         mock_router._exec_responses["latest-handshakes"] = f"peer1\t{now - 60}"
         mock_router._exec_responses["transfer"] = "peer1\t1000\t2000"
-        assert mock_router.get_tunnel_health("fvpn_rule_9001") == "green"
+        assert mock_router.tunnel.get_tunnel_health("fvpn_rule_9001") == "green"
 
     def test_old_handshake_is_amber(self, mock_router):
         import time
         now = int(time.time())
         mock_router._exec_responses["enabled"] = "1"
-        mock_router._exec_responses["uci get"] = "wgclient1"
+        mock_router._exec_responses[".via"] = "wgclient1"
         mock_router._exec_responses["ifstatus"] = "true"
         mock_router._exec_responses["latest-handshakes"] = f"peer1\t{now - 300}"
         mock_router._exec_responses["transfer"] = ""
-        assert mock_router.get_tunnel_health("fvpn_rule_9001") == "amber"
+        assert mock_router.tunnel.get_tunnel_health("fvpn_rule_9001") == "amber"
 
     def test_very_old_handshake_is_red(self, mock_router):
         import time
         now = int(time.time())
         mock_router._exec_responses["enabled"] = "1"
-        mock_router._exec_responses["uci get"] = "wgclient1"
+        mock_router._exec_responses[".via"] = "wgclient1"
         mock_router._exec_responses["ifstatus"] = "true"
         mock_router._exec_responses["latest-handshakes"] = f"peer1\t{now - 700}"
         mock_router._exec_responses["transfer"] = ""
-        assert mock_router.get_tunnel_health("fvpn_rule_9001") == "red"
+        assert mock_router.tunnel.get_tunnel_health("fvpn_rule_9001") == "red"
 
 
 # ── Unit Tests: Tunnel Control ─────────────────────────────────────────────────
@@ -115,18 +115,18 @@ class TestGetTunnelHealth:
 class TestBringTunnelUp:
     def test_enables_rule_and_restarts(self, mock_router):
         mock_router._exec_responses["tunnel_id"] = "300"
-        mock_router.bring_tunnel_up("fvpn_rule_test")
+        mock_router.tunnel.bring_tunnel_up("fvpn_rule_test")
         assert any("enabled='1'" in c for c in mock_router._exec_calls)
         assert any("vpn-client restart" in c for c in mock_router._exec_calls)
 
     def test_missing_rule_raises(self, mock_router):
         mock_router._exec_responses["tunnel_id"] = "MISSING"
         with pytest.raises(RuntimeError, match="does not exist"):
-            mock_router.bring_tunnel_up("nonexistent_rule")
+            mock_router.tunnel.bring_tunnel_up("nonexistent_rule")
 
 class TestBringTunnelDown:
     def test_disables_rule_and_restarts(self, mock_router):
-        mock_router.bring_tunnel_down("fvpn_rule_test")
+        mock_router.tunnel.bring_tunnel_down("fvpn_rule_test")
         assert any("enabled='0'" in c for c in mock_router._exec_calls)
         assert any("vpn-client restart" in c for c in mock_router._exec_calls)
 
@@ -137,26 +137,26 @@ class TestDevicePolicy:
     def test_set_device_vpn_adds_mac(self, mock_router):
         mock_router._exec_responses["from_mac"] = ""
         mock_router._exec_responses[".from "] = "src_mac_301"
-        mock_router.set_device_vpn("aa:bb:cc:dd:ee:ff", "fvpn_rule_test")
+        mock_router.devices.set_device_vpn("aa:bb:cc:dd:ee:ff", "fvpn_rule_test")
         assert any("add_list" in c and "aa:bb:cc:dd:ee:ff" in c
                     for c in mock_router._exec_calls)
 
     def test_set_device_vpn_skips_duplicate(self, mock_router):
         mock_router._exec_responses["from_mac"] = "aa:bb:cc:dd:ee:ff"
-        mock_router.set_device_vpn("aa:bb:cc:dd:ee:ff", "fvpn_rule_test")
+        mock_router.devices.set_device_vpn("aa:bb:cc:dd:ee:ff", "fvpn_rule_test")
         assert not any("add_list" in c for c in mock_router._exec_calls)
 
     def test_mac_lowercased(self, mock_router):
         mock_router._exec_responses["from_mac"] = ""
         mock_router._exec_responses[".from "] = "src_mac_301"
-        mock_router.set_device_vpn("AA:BB:CC:DD:EE:FF", "fvpn_rule_test")
+        mock_router.devices.set_device_vpn("AA:BB:CC:DD:EE:FF", "fvpn_rule_test")
         assert any("aa:bb:cc:dd:ee:ff" in c for c in mock_router._exec_calls)
 
     def test_set_device_vpn_uses_ipset_not_rtp2(self, mock_router):
         """Stage 1: must use ipset for immediate effect, never call rtp2.sh."""
         mock_router._exec_responses["from_mac"] = ""
         mock_router._exec_responses[".from "] = "src_mac_301"
-        mock_router.set_device_vpn("aa:bb:cc:dd:ee:ff", "fvpn_rule_test")
+        mock_router.devices.set_device_vpn("aa:bb:cc:dd:ee:ff", "fvpn_rule_test")
         assert any("ipset add src_mac_301 aa:bb:cc:dd:ee:ff" in c
                    for c in mock_router._exec_calls)
         assert not any("rtp2.sh" in c for c in mock_router._exec_calls)
@@ -165,7 +165,7 @@ class TestDevicePolicy:
         """Defensive: if route_policy.{rule}.from is empty, skip ipset add."""
         mock_router._exec_responses["from_mac"] = ""
         # No response for ".from " — defaults to ""
-        mock_router.set_device_vpn("aa:bb:cc:dd:ee:ff", "fvpn_rule_test")
+        mock_router.devices.set_device_vpn("aa:bb:cc:dd:ee:ff", "fvpn_rule_test")
         assert not any("ipset add" in c for c in mock_router._exec_calls)
         assert not any("rtp2.sh" in c for c in mock_router._exec_calls)
 
@@ -173,7 +173,7 @@ class TestDevicePolicy:
         """Stage 1: remove uses ipset del, never rtp2.sh."""
         mock_router._exec_responses["from_mac"] = "'aa:bb:cc:dd:ee:ff'"
         mock_router._exec_responses[".from "] = "src_mac_301"
-        mock_router.remove_device_from_vpn("aa:bb:cc:dd:ee:ff", "fvpn_rule_test")
+        mock_router.devices.remove_device_from_vpn("aa:bb:cc:dd:ee:ff", "fvpn_rule_test")
         assert any("del_list" in c and "aa:bb:cc:dd:ee:ff" in c
                    for c in mock_router._exec_calls)
         assert any("ipset del src_mac_301 aa:bb:cc:dd:ee:ff" in c
@@ -182,7 +182,7 @@ class TestDevicePolicy:
 
     def test_remove_device_from_vpn_skips_if_not_assigned(self, mock_router):
         mock_router._exec_responses["from_mac"] = ""
-        mock_router.remove_device_from_vpn("aa:bb:cc:dd:ee:ff", "fvpn_rule_test")
+        mock_router.devices.remove_device_from_vpn("aa:bb:cc:dd:ee:ff", "fvpn_rule_test")
         assert not any("del_list" in c for c in mock_router._exec_calls)
         assert not any("ipset del" in c for c in mock_router._exec_calls)
 
@@ -207,7 +207,7 @@ class TestDevicePolicy:
         mock_router._exec_responses["uci -q get route_policy.fvpn_rule_test1.from_mac"] = "'aa:bb:cc:dd:ee:ff'"
         mock_router._exec_responses["uci -q get route_policy.fvpn_rule_test2.from_mac"] = "'aa:bb:cc:dd:ee:ff'"
         mock_router._exec_responses[".from "] = "src_mac_301"
-        mock_router.remove_device_from_all_vpn("aa:bb:cc:dd:ee:ff")
+        mock_router.devices.remove_device_from_all_vpn("aa:bb:cc:dd:ee:ff")
         del_list_calls = [c for c in mock_router._exec_calls if "del_list" in c]
         ipset_del_calls = [c for c in mock_router._exec_calls if "ipset del" in c]
         assert len(del_list_calls) == 2
@@ -221,47 +221,47 @@ class TestDevicePolicy:
             "'AA:BB:CC:DD:EE:FF'"
         )
         mock_router._exec_responses[".from "] = "src_mac_301"
-        mock_router.remove_device_from_vpn("aa:bb:cc:dd:ee:ff", "fvpn_rule_test")
+        mock_router.devices.remove_device_from_vpn("aa:bb:cc:dd:ee:ff", "fvpn_rule_test")
         joined = " | ".join(mock_router._exec_calls)
         # del_list must use the EXACT stored case (uppercase)
         assert "del_list route_policy.fvpn_rule_test.from_mac='AA:BB:CC:DD:EE:FF'" in joined
 
     def test_set_kill_switch_no_rtp2(self, mock_router):
         """Stage 1: kill switch toggle uses uci commit only, no rtp2.sh."""
-        mock_router.set_kill_switch("fvpn_rule_test", True)
+        mock_router.policy.set_kill_switch("fvpn_rule_test", True)
         assert any("killswitch='1'" in c for c in mock_router._exec_calls)
         assert any("uci commit route_policy" in c for c in mock_router._exec_calls)
         assert not any("rtp2.sh" in c for c in mock_router._exec_calls)
 
     def test_set_kill_switch_disable(self, mock_router):
-        mock_router.set_kill_switch("fvpn_rule_test", False)
+        mock_router.policy.set_kill_switch("fvpn_rule_test", False)
         assert any("killswitch='0'" in c for c in mock_router._exec_calls)
         assert not any("rtp2.sh" in c for c in mock_router._exec_calls)
 
     def test_get_kill_switch_returns_true(self, mock_router):
         """Stage 3: live kill switch read."""
         mock_router._exec_responses["killswitch"] = "1"
-        assert mock_router.get_kill_switch("fvpn_rule_test") is True
+        assert mock_router.policy.get_kill_switch("fvpn_rule_test") is True
 
     def test_get_kill_switch_returns_false(self, mock_router):
         mock_router._exec_responses["killswitch"] = "0"
-        assert mock_router.get_kill_switch("fvpn_rule_test") is False
+        assert mock_router.policy.get_kill_switch("fvpn_rule_test") is False
 
     def test_get_kill_switch_default_false_when_unset(self, mock_router):
         # No response → empty string → False
-        assert mock_router.get_kill_switch("fvpn_rule_test") is False
+        assert mock_router.policy.get_kill_switch("fvpn_rule_test") is False
 
     def test_get_profile_name_returns_router_value(self, mock_router):
         """Stage 4: profile name comes from route_policy.{rule}.name."""
         mock_router._exec_responses["route_policy.fvpn_rule_9001.name"] = "Trusted"
-        assert mock_router.get_profile_name("fvpn_rule_9001") == "Trusted"
+        assert mock_router.policy.get_profile_name("fvpn_rule_9001") == "Trusted"
 
     def test_get_profile_name_empty_when_unset(self, mock_router):
-        assert mock_router.get_profile_name("fvpn_rule_9001") == ""
+        assert mock_router.policy.get_profile_name("fvpn_rule_9001") == ""
 
     def test_rename_profile_wireguard_writes_route_policy_and_wireguard(self, mock_router):
         """Stage 4: WG rename writes both route_policy.name and wireguard.peer.name."""
-        mock_router.rename_profile(
+        mock_router.policy.rename_profile(
             rule_name="fvpn_rule_9001",
             new_name="Streaming",
             peer_id="9001",
@@ -276,7 +276,7 @@ class TestDevicePolicy:
 
     def test_rename_profile_openvpn_writes_route_policy_and_ovpnclient(self, mock_router):
         """Stage 4: OVPN rename writes both route_policy.name and ovpnclient.{id}.name."""
-        mock_router.rename_profile(
+        mock_router.policy.rename_profile(
             rule_name="fvpn_rule_ovpn_9051",
             new_name="OVPN Group",
             client_uci_id="28216_9051",
@@ -290,7 +290,7 @@ class TestDevicePolicy:
 
     def test_rename_profile_escapes_single_quote(self, mock_router):
         """Names with single quotes should not break the uci set command."""
-        mock_router.rename_profile(
+        mock_router.policy.rename_profile(
             rule_name="fvpn_rule_9001",
             new_name="Bob's Phone",
             peer_id="9001",
@@ -313,14 +313,14 @@ class TestDevicePolicy:
             "route_policy.fvpn_rule_9002.via_type='wireguard'\n"
             "route_policy.fvpn_rule_9002.group_id='1957'"
         )
-        out = mock_router.get_device_assignments()
+        out = mock_router.devices.get_device_assignments()
         assert out["aa:bb:cc:dd:ee:ff"] == "fvpn_rule_9001"
         assert out["cc:dd:ee:ff:00:11"] == "fvpn_rule_9001"
         assert out["11:22:33:44:55:66"] == "fvpn_rule_9002"
         assert len(out) == 3
 
     def test_get_device_assignments_empty(self, mock_router):
-        out = mock_router.get_device_assignments()
+        out = mock_router.devices.get_device_assignments()
         assert out == {}
 
     def test_get_device_assignments_recognizes_anonymous_section(self, mock_router):
@@ -332,7 +332,7 @@ class TestDevicePolicy:
             "route_policy.@rule[4].via_type='wireguard'\n"
             "route_policy.@rule[4].group_id='1957'"
         )
-        out = mock_router.get_device_assignments()
+        out = mock_router.devices.get_device_assignments()
         assert out["aa:bb:cc:dd:ee:ff"] == "@rule[4]"
 
     def test_get_device_assignments_ignores_non_fvpn_groups(self, mock_router):
@@ -346,7 +346,7 @@ class TestDevicePolicy:
             "route_policy.fvpn_rule_9001.via_type='wireguard'\n"
             "route_policy.fvpn_rule_9001.group_id='1957'"
         )
-        out = mock_router.get_device_assignments()
+        out = mock_router.devices.get_device_assignments()
         assert "aa:bb:cc:dd:ee:ff" not in out
         assert out["11:22:33:44:55:66"] == "fvpn_rule_9001"
 
@@ -361,7 +361,7 @@ class TestDevicePolicy:
             "route_policy.@rule[4].killswitch='0'\n"
             "route_policy.@rule[4].from_mac='aa:bb:cc:dd:ee:ff'"
         )
-        rules = mock_router.get_flint_vpn_rules()
+        rules = mock_router.policy.get_flint_vpn_rules()
         assert len(rules) == 1
         assert rules[0]["rule_name"] == "@rule[4]"
         assert rules[0]["name"] == "Trusted"
@@ -381,18 +381,18 @@ class TestDevicePolicy:
             "route_policy.@rule[4].via_type='wireguard'\n"
             "route_policy.@rule[4].group_id='1957'"
         )
-        rules = mock_router.get_flint_vpn_rules()
+        rules = mock_router.policy.get_flint_vpn_rules()
         names = sorted(r["name"] for r in rules)
         assert names == ["Streaming", "Trusted"]
 
     def test_heal_anonymous_rule_section_renames_via_uci(self, mock_router):
-        mock_router.heal_anonymous_rule_section("@rule[4]", "fvpn_rule_9001")
+        mock_router.policy.heal_anonymous_rule_section("@rule[4]", "fvpn_rule_9001")
         joined = " | ".join(mock_router._exec_calls)
         assert "uci rename route_policy.@rule[4]=fvpn_rule_9001" in joined
         assert "uci commit route_policy" in joined
 
     def test_heal_anonymous_rule_section_skips_already_named(self, mock_router):
-        mock_router.heal_anonymous_rule_section("fvpn_rule_9001", "fvpn_rule_9001")
+        mock_router.policy.heal_anonymous_rule_section("fvpn_rule_9001", "fvpn_rule_9001")
         # No exec calls — already named
         assert not any("rename" in c for c in mock_router._exec_calls)
 
@@ -401,49 +401,49 @@ class TestDevicePolicy:
 
 class TestGetRuleInterface:
     def test_returns_wgclient(self, mock_router):
-        mock_router._exec_responses["uci get"] = "wgclient1"
-        assert mock_router.get_rule_interface("fvpn_rule_9001") == "wgclient1"
+        mock_router._exec_responses[".via"] = "wgclient1"
+        assert mock_router.tunnel.get_rule_interface("fvpn_rule_9001") == "wgclient1"
 
     def test_returns_ovpnclient(self, mock_router):
-        mock_router._exec_responses["uci get"] = "ovpnclient1"
-        assert mock_router.get_rule_interface("fvpn_rule_ovpn_9001") == "ovpnclient1"
+        mock_router._exec_responses[".via"] = "ovpnclient1"
+        assert mock_router.tunnel.get_rule_interface("fvpn_rule_ovpn_9001") == "ovpnclient1"
 
     def test_returns_none_for_novpn(self, mock_router):
-        mock_router._exec_responses["uci get"] = "novpn"
-        assert mock_router.get_rule_interface("some_rule") is None
+        mock_router._exec_responses[".via"] = "novpn"
+        assert mock_router.tunnel.get_rule_interface("some_rule") is None
 
     def test_returns_none_for_empty(self, mock_router):
-        mock_router._exec_responses["uci get"] = ""
-        assert mock_router.get_rule_interface("some_rule") is None
+        mock_router._exec_responses[".via"] = ""
+        assert mock_router.tunnel.get_rule_interface("some_rule") is None
 
 
 class TestTunnelStatusOpenVPN:
     def test_ovpn_up_shows_green(self, mock_router):
         mock_router._exec_responses["enabled"] = "1"
-        mock_router._exec_responses["uci get"] = "ovpnclient1"
+        mock_router._exec_responses[".via"] = "ovpnclient1"
         mock_router._exec_responses["ifstatus"] = "true"
-        health = mock_router.get_tunnel_health("fvpn_rule_ovpn_9001")
+        health = mock_router.tunnel.get_tunnel_health("fvpn_rule_ovpn_9001")
         assert health == "green"
 
     def test_ovpn_down_shows_red(self, mock_router):
         mock_router._exec_responses["enabled"] = "1"
-        mock_router._exec_responses["uci get"] = "ovpnclient1"
+        mock_router._exec_responses[".via"] = "ovpnclient1"
         mock_router._exec_responses["ifstatus"] = "false"
         mock_router._exec_responses["grep"] = ""  # no openvpn process
-        health = mock_router.get_tunnel_health("fvpn_rule_ovpn_9001")
+        health = mock_router.tunnel.get_tunnel_health("fvpn_rule_ovpn_9001")
         assert health == "red"
 
     def test_ovpn_connecting(self, mock_router):
         mock_router._exec_responses["enabled"] = "1"
-        mock_router._exec_responses["uci get"] = "ovpnclient1"
+        mock_router._exec_responses[".via"] = "ovpnclient1"
         mock_router._exec_responses["ifstatus"] = "false"
         mock_router._exec_responses["grep"] = "10265 root openvpn"  # process running
-        health = mock_router.get_tunnel_health("fvpn_rule_ovpn_9001")
+        health = mock_router.tunnel.get_tunnel_health("fvpn_rule_ovpn_9001")
         assert health == "connecting"
 
     def test_disabled_rule_shows_red(self, mock_router):
         mock_router._exec_responses["enabled"] = "0"
-        health = mock_router.get_tunnel_health("fvpn_rule_ovpn_9001")
+        health = mock_router.tunnel.get_tunnel_health("fvpn_rule_ovpn_9001")
         assert health == "red"
 
 
@@ -533,14 +533,14 @@ class TestRouterAPIIntegration:
         assert result == "ok"
 
     def test_get_dhcp_leases(self, router):
-        leases = router.get_dhcp_leases()
+        leases = router.devices.get_dhcp_leases()
         assert isinstance(leases, list)
         assert len(leases) >= 1
         assert all("mac" in l and "ip" in l for l in leases)
 
     def test_wireguard_lifecycle(self, router):
         """Create peer + rule, verify, then delete. Does NOT connect."""
-        result = router.upload_wireguard_config(
+        result = router.wireguard.upload_wireguard_config(
             profile_name="integration_test",
             private_key="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
             public_key="BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=",
@@ -550,10 +550,10 @@ class TestRouterAPIIntegration:
         assert "rule_name" in result
 
         try:
-            peers = router.get_flint_vpn_peers()
+            peers = router.policy.get_flint_vpn_peers()
             assert any(p["peer_id"] == result["peer_id"] for p in peers)
 
-            rules = router.get_flint_vpn_rules()
+            rules = router.policy.get_flint_vpn_rules()
             assert any(r["rule_name"] == result["rule_name"] for r in rules)
 
             # Verify rule has correct via_type for vpn-client compatibility
@@ -568,11 +568,11 @@ class TestRouterAPIIntegration:
             assert peer_id_val == result["peer_num"]
 
         finally:
-            router.delete_wireguard_config(result["peer_id"], result["rule_name"])
+            router.wireguard.delete_wireguard_config(result["peer_id"], result["rule_name"])
 
-        peers = router.get_flint_vpn_peers()
+        peers = router.policy.get_flint_vpn_peers()
         assert not any(p["peer_id"] == result["peer_id"] for p in peers)
 
     def test_tunnel_status_no_rule(self, router):
-        status = router.get_tunnel_status("nonexistent_rule")
+        status = router.tunnel.get_tunnel_status("nonexistent_rule")
         assert status["up"] is False

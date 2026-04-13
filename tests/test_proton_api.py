@@ -9,8 +9,8 @@ import time
 import pytest
 from unittest.mock import MagicMock, patch, PropertyMock
 
-import proton_api
-from proton_api import ProtonAPI, FEATURE_MAP, NETSHIELD_DNS
+import proton_vpn.api as proton_api
+from proton_vpn.api import ProtonAPI, FEATURE_MAP, NETSHIELD_DNS
 from proton.vpn.session.servers.types import ServerFeatureEnum, LogicalServer, PhysicalServer
 
 
@@ -57,8 +57,8 @@ def _make_server_list(logicals, user_tier=2):
 @pytest.fixture
 def mock_api():
     """Create a ProtonAPI with mocked internals, bypassing sync_wrapper."""
-    with patch("proton_api.ProtonVPNAPI") as MockVPNAPI, \
-         patch("proton_api.sync_wrapper", side_effect=lambda f: f):
+    with patch("proton_vpn.api.ProtonVPNAPI") as MockVPNAPI, \
+         patch("proton_vpn.api.sync_wrapper", side_effect=lambda f: f):
         mock_instance = MockVPNAPI.return_value
 
         # Default: not logged in
@@ -487,7 +487,7 @@ class TestServerRefresh:
         mock_session.update_server_loads = MagicMock(return_value=None)
         mock._session_holder.session = mock_session
 
-        with patch("proton_api.sync_wrapper") as mock_sw:
+        with patch("proton_vpn.api.sync_wrapper") as mock_sw:
             mock_sw.return_value = MagicMock()
             api.refresh_server_loads()
             mock_sw.assert_called_once_with(mock_session.update_server_loads)
@@ -499,7 +499,7 @@ class TestServerRefresh:
         mock_session.fetch_server_list = MagicMock(return_value=None)
         mock._session_holder.session = mock_session
 
-        with patch("proton_api.sync_wrapper") as mock_sw:
+        with patch("proton_vpn.api.sync_wrapper") as mock_sw:
             mock_sw.return_value = MagicMock()
             api.refresh_server_list()
             mock_sw.assert_called_once_with(mock_session.fetch_server_list)

@@ -18,14 +18,14 @@ from typing import Optional
 
 from flask import Flask, request, jsonify, Response, send_from_directory
 
-import secrets_manager as sm
-import profile_store as ps
+import persistence.secrets_manager as sm
+import persistence.profile_store as ps
 from consts import PROFILE_TYPE_VPN
-from proton_api import ProtonAPI
-from router_api import RouterAPI
-from device_tracker import start_tracker, stop_tracker, get_tracker
-from auto_optimizer import start_optimizer, stop_optimizer
-from vpn_service import (
+from proton_vpn.api import ProtonAPI
+from router.api import RouterAPI
+from background.device_tracker import start_tracker, stop_tracker, get_tracker
+from background.auto_optimizer import start_optimizer, stop_optimizer
+from services.vpn_service import (
     VPNService, NotFoundError, ConflictError, LimitExceededError,
     NotLoggedInError, backup_local_state_to_router, check_and_auto_restore,
     ROUTER_BACKUP_PATH, BACKUP_FORMAT_VERSION,
@@ -357,7 +357,7 @@ def api_get_servers(profile_id):
 @require_unlocked
 def api_available_ports():
     """Get available VPN ports per protocol."""
-    from proton_api import ProtonAPI
+    from proton_vpn.api import ProtonAPI
     return jsonify(ProtonAPI.AVAILABLE_PORTS)
 
 
@@ -628,7 +628,7 @@ _lan_service = None
 def _get_lan_service():
     global _lan_service
     if _lan_service is None:
-        from lan_access_service import LanAccessService
+        from services.lan_access_service import LanAccessService
         _lan_service = LanAccessService(_get_router())
     return _lan_service
 
@@ -763,7 +763,7 @@ def api_probe_latency():
     if not to_probe:
         return jsonify({"latencies": {}})
 
-    from latency_probe import probe_servers_via_router
+    from proton_vpn.latency_probe import probe_servers_via_router
 
     try:
         router = _get_router()

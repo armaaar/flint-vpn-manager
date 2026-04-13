@@ -7,9 +7,9 @@ fields on the registry object instead of patching module-level globals.
 
 from typing import Optional
 
-from proton_api import ProtonAPI
-from router_api import RouterAPI
-from vpn_service import VPNService
+from proton_vpn.api import ProtonAPI
+from router.api import RouterAPI
+from services.vpn_service import VPNService
 
 
 SSH_KEY_PATH = "/home/armaaar/.ssh/id_ed25519"
@@ -33,7 +33,7 @@ class ServiceRegistry:
     def get_router(self) -> RouterAPI:
         """Lazy-init RouterAPI from config."""
         if self.router is None:
-            import secrets_manager as sm
+            import persistence.secrets_manager as sm
             config = sm.get_config()
             self.router = RouterAPI(
                 host=config.get("router_ip", "192.168.8.1"),

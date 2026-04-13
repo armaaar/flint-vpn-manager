@@ -6,7 +6,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 from datetime import datetime, timedelta
 
-from auto_optimizer import AutoOptimizer, MIN_DWELL_HOURS
+from background.auto_optimizer import AutoOptimizer, MIN_DWELL_HOURS
 
 
 @pytest.fixture
@@ -28,15 +28,15 @@ def optimizer():
 class TestAutoOptimizer:
     def test_skips_when_disabled(self, optimizer):
         opt, *_, switch_fn, _ = optimizer
-        with patch("auto_optimizer.sm") as mock_sm:
+        with patch("background.auto_optimizer.sm") as mock_sm:
             mock_sm.get_config.return_value = {"auto_optimize": {"enabled": False}}
             opt.check_and_optimize()
         switch_fn.assert_not_called()
 
     def test_skips_when_outside_window(self, optimizer):
         opt, *_, switch_fn, _ = optimizer
-        with patch("auto_optimizer.sm") as mock_sm, \
-             patch("auto_optimizer.datetime") as mock_dt:
+        with patch("background.auto_optimizer.sm") as mock_sm, \
+             patch("background.auto_optimizer.datetime") as mock_dt:
             mock_sm.get_config.return_value = {
                 "auto_optimize": {"enabled": True, "time": "04:00"}
             }
@@ -53,9 +53,9 @@ class TestAutoOptimizer:
         get_proton.return_value = mock_proton
         build_fn.return_value = []  # nothing to optimize
 
-        with patch("auto_optimizer.sm") as mock_sm, \
-             patch("auto_optimizer.ps") as mock_ps, \
-             patch("auto_optimizer.datetime") as mock_dt:
+        with patch("background.auto_optimizer.sm") as mock_sm, \
+             patch("background.auto_optimizer.ps") as mock_ps, \
+             patch("background.auto_optimizer.datetime") as mock_dt:
             mock_sm.get_config.return_value = {
                 "auto_optimize": {"enabled": True, "time": "04:00"}
             }
@@ -69,8 +69,8 @@ class TestAutoOptimizer:
     def test_skips_if_already_ran_today(self, optimizer):
         opt, *_, switch_fn, _ = optimizer
         opt._last_run_date = "2026-04-06"
-        with patch("auto_optimizer.sm") as mock_sm, \
-             patch("auto_optimizer.datetime") as mock_dt:
+        with patch("background.auto_optimizer.sm") as mock_sm, \
+             patch("background.auto_optimizer.datetime") as mock_dt:
             mock_sm.get_config.return_value = {
                 "auto_optimize": {"enabled": True, "time": "04:00"}
             }
@@ -116,9 +116,9 @@ class TestAutoOptimizer:
             "options": {},
         }]
 
-        with patch("auto_optimizer.sm") as mock_sm, \
-             patch("auto_optimizer.ps") as mock_ps, \
-             patch("auto_optimizer.datetime") as mock_dt:
+        with patch("background.auto_optimizer.sm") as mock_sm, \
+             patch("background.auto_optimizer.ps") as mock_ps, \
+             patch("background.auto_optimizer.datetime") as mock_dt:
             mock_sm.get_config.return_value = {
                 "auto_optimize": {"enabled": True, "time": "04:00"}
             }
@@ -144,9 +144,9 @@ class TestAutoOptimizer:
             "options": {},
         }]
 
-        with patch("auto_optimizer.sm") as mock_sm, \
-             patch("auto_optimizer.ps") as mock_ps, \
-             patch("auto_optimizer.datetime") as mock_dt:
+        with patch("background.auto_optimizer.sm") as mock_sm, \
+             patch("background.auto_optimizer.ps") as mock_ps, \
+             patch("background.auto_optimizer.datetime") as mock_dt:
             mock_sm.get_config.return_value = {
                 "auto_optimize": {"enabled": True, "time": "04:00"}
             }
@@ -171,9 +171,9 @@ class TestAutoOptimizer:
             "options": {},
         }]
 
-        with patch("auto_optimizer.sm") as mock_sm, \
-             patch("auto_optimizer.ps") as mock_ps, \
-             patch("auto_optimizer.datetime") as mock_dt:
+        with patch("background.auto_optimizer.sm") as mock_sm, \
+             patch("background.auto_optimizer.ps") as mock_ps, \
+             patch("background.auto_optimizer.datetime") as mock_dt:
             mock_sm.get_config.return_value = {
                 "auto_optimize": {"enabled": True, "time": "04:00"}
             }
@@ -207,9 +207,9 @@ class TestAutoOptimizer:
         # Pretend we switched this profile 1 hour ago — well within the dwell window.
         opt._last_switch_at["p1"] = now - timedelta(hours=1)
 
-        with patch("auto_optimizer.sm") as mock_sm, \
-             patch("auto_optimizer.ps") as mock_ps, \
-             patch("auto_optimizer.datetime") as mock_dt:
+        with patch("background.auto_optimizer.sm") as mock_sm, \
+             patch("background.auto_optimizer.ps") as mock_ps, \
+             patch("background.auto_optimizer.datetime") as mock_dt:
             mock_sm.get_config.return_value = {
                 "auto_optimize": {"enabled": True, "time": "04:00"}
             }
@@ -242,9 +242,9 @@ class TestAutoOptimizer:
         # Last switch was just outside the dwell window.
         opt._last_switch_at["p1"] = now - timedelta(hours=MIN_DWELL_HOURS + 1)
 
-        with patch("auto_optimizer.sm") as mock_sm, \
-             patch("auto_optimizer.ps") as mock_ps, \
-             patch("auto_optimizer.datetime") as mock_dt:
+        with patch("background.auto_optimizer.sm") as mock_sm, \
+             patch("background.auto_optimizer.ps") as mock_ps, \
+             patch("background.auto_optimizer.datetime") as mock_dt:
             mock_sm.get_config.return_value = {
                 "auto_optimize": {"enabled": True, "time": "04:00"}
             }
@@ -281,9 +281,9 @@ class TestAutoOptimizer:
             "options": {},
         }]
 
-        with patch("auto_optimizer.sm") as mock_sm, \
-             patch("auto_optimizer.ps") as mock_ps, \
-             patch("auto_optimizer.datetime") as mock_dt:
+        with patch("background.auto_optimizer.sm") as mock_sm, \
+             patch("background.auto_optimizer.ps") as mock_ps, \
+             patch("background.auto_optimizer.datetime") as mock_dt:
             mock_sm.get_config.return_value = {
                 "auto_optimize": {"enabled": True, "time": "04:00"}
             }
@@ -367,7 +367,7 @@ class TestCertRenewal:
     def test_skips_when_already_checked_today(self, optimizer):
         opt, *_ = optimizer
         opt._last_cert_check_date = datetime.now().strftime("%Y-%m-%d")
-        with patch("auto_optimizer.ps") as mock_ps:
+        with patch("background.auto_optimizer.ps") as mock_ps:
             opt.check_and_refresh_certs()
         mock_ps.load.assert_not_called()  # Didn't even load profiles
 
@@ -377,8 +377,8 @@ class TestCertRenewal:
         mock_proton.is_logged_in = False
         get_proton.return_value = mock_proton
 
-        with patch("auto_optimizer.ps") as mock_ps, \
-             patch("auto_optimizer.datetime") as mock_dt:
+        with patch("background.auto_optimizer.ps") as mock_ps, \
+             patch("background.auto_optimizer.datetime") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 4, 9, 12, 0)
             opt.check_and_refresh_certs()
         mock_ps.load.assert_not_called()
@@ -400,8 +400,8 @@ class TestCertRenewal:
                         "nat_pmp": False, "vpn_accelerator": True},
         }
 
-        with patch("auto_optimizer.ps") as mock_ps, \
-             patch("auto_optimizer.datetime") as mock_dt:
+        with patch("background.auto_optimizer.ps") as mock_ps, \
+             patch("background.auto_optimizer.datetime") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 4, 9, 12, 0)
             mock_ps.load.return_value = {"profiles": [expiring_profile]}
             opt.check_and_refresh_certs()
@@ -430,8 +430,8 @@ class TestCertRenewal:
             "options": {},
         }
 
-        with patch("auto_optimizer.ps") as mock_ps, \
-             patch("auto_optimizer.datetime") as mock_dt:
+        with patch("background.auto_optimizer.ps") as mock_ps, \
+             patch("background.auto_optimizer.datetime") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 4, 9, 12, 0)
             mock_ps.load.return_value = {"profiles": [fresh_profile]}
             opt.check_and_refresh_certs()
@@ -451,8 +451,8 @@ class TestCertRenewal:
             "options": {},
         }
 
-        with patch("auto_optimizer.ps") as mock_ps, \
-             patch("auto_optimizer.datetime") as mock_dt:
+        with patch("background.auto_optimizer.ps") as mock_ps, \
+             patch("background.auto_optimizer.datetime") as mock_dt:
             mock_dt.now.return_value = datetime(2026, 4, 9, 12, 0)
             mock_ps.load.return_value = {"profiles": [legacy_profile]}
             opt.check_and_refresh_certs()

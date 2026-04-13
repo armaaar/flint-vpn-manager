@@ -13,7 +13,7 @@ The new scope shape (see profile_store.normalize_server_scope):
 
 import pytest
 
-from server_optimizer import (
+from proton_vpn.server_optimizer import (
     filter_servers_by_scope,
     filter_blacklisted,
     apply_favourites,

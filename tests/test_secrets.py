@@ -5,7 +5,7 @@ import os
 
 import pytest
 
-import secrets_manager as sm
+import persistence.secrets_manager as sm
 
 
 class TestIsSetup:

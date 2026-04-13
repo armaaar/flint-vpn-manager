@@ -4,19 +4,19 @@ from unittest.mock import MagicMock, patch, call
 import json
 import pytest
 
-from lan_access_service import LanAccessService
+from services.lan_access_service import LanAccessService
 
 
 def _mock_router():
     """Create a mock RouterAPI with lan_access facade."""
     r = MagicMock()
     r.lan_access = MagicMock()
-    r.get_dhcp_leases.return_value = [
+    r.devices.get_dhcp_leases.return_value = [
         {"mac": "aa:bb:cc:dd:ee:01", "ip": "192.168.8.101", "hostname": "phone"},
         {"mac": "aa:bb:cc:dd:ee:02", "ip": "192.168.8.102", "hostname": "laptop"},
         {"mac": "11:22:33:44:55:01", "ip": "192.168.9.50", "hostname": "bulb"},
     ]
-    r.get_client_details.return_value = {
+    r.devices.get_client_details.return_value = {
         "aa:bb:cc:dd:ee:01": {"name": "phone", "alias": "Phone", "online": True, "iface": "5G"},
         "aa:bb:cc:dd:ee:02": {"name": "laptop", "alias": "", "online": True, "iface": "5G"},
         "11:22:33:44:55:01": {"name": "bulb", "alias": "Smart Bulb", "online": True, "iface": "2.4G"},
@@ -41,7 +41,7 @@ class TestGetLanOverview:
             {"src": "lan", "dest": "guest", "section": "@forwarding[1]"},
         ]
 
-        with patch("lan_access_service.sm") as mock_sm:
+        with patch("services.lan_access_service.sm") as mock_sm:
             mock_sm.get_config.return_value = {"lan_access": {"exceptions": []}}
             svc = LanAccessService(r)
             result = svc.get_lan_overview()
@@ -89,7 +89,7 @@ class TestUpdateAccessRules:
             {"src_zone": "guest", "dest_zone": "lan", "allowed": False},
         ]
 
-        with patch("lan_access_service.sm") as mock_sm:
+        with patch("services.lan_access_service.sm") as mock_sm:
             mock_sm.get_config.return_value = {}
             svc = LanAccessService(r)
             result = svc.update_access_rules(rules)
@@ -123,7 +123,7 @@ class TestExceptions:
     def test_add_and_remove(self):
         r = _mock_router()
 
-        with patch("lan_access_service.sm") as mock_sm:
+        with patch("services.lan_access_service.sm") as mock_sm:
             mock_sm.get_config.return_value = {"lan_access": {"exceptions": []}}
             svc = LanAccessService(r)
 
@@ -143,7 +143,7 @@ class TestExceptions:
     def test_add_without_ip_raises(self):
         r = _mock_router()
 
-        with patch("lan_access_service.sm") as mock_sm:
+        with patch("services.lan_access_service.sm") as mock_sm:
             mock_sm.get_config.return_value = {"lan_access": {"exceptions": []}}
             svc = LanAccessService(r)
 
@@ -154,7 +154,7 @@ class TestExceptions:
         r = _mock_router()
         existing = [{"id": "exc_123", "from_ip": "1.1.1.1", "to_ip": "2.2.2.2", "direction": "both"}]
 
-        with patch("lan_access_service.sm") as mock_sm:
+        with patch("services.lan_access_service.sm") as mock_sm:
             mock_sm.get_config.return_value = {"lan_access": {"exceptions": existing}}
             svc = LanAccessService(r)
             result = svc.remove_exception("exc_123")
@@ -168,7 +168,7 @@ class TestReapplyAll:
         r = _mock_router()
         existing = [{"id": "exc_1", "from_ip": "1.1.1.1", "to_ip": "2.2.2.2", "direction": "both"}]
 
-        with patch("lan_access_service.sm") as mock_sm:
+        with patch("services.lan_access_service.sm") as mock_sm:
             mock_sm.get_config.return_value = {"lan_access": {"exceptions": existing}}
             svc = LanAccessService(r)
             svc.reapply_all()
@@ -178,7 +178,7 @@ class TestReapplyAll:
     def test_noop_when_no_exceptions(self):
         r = _mock_router()
 
-        with patch("lan_access_service.sm") as mock_sm:
+        with patch("services.lan_access_service.sm") as mock_sm:
             mock_sm.get_config.return_value = {}
             svc = LanAccessService(r)
             svc.reapply_all()

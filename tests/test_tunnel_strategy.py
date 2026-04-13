@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
-from tunnel_strategy import (
+from vpn.tunnel_strategy import (
     OpenVPNStrategy,
     ProtonWGStrategy,
     WireGuardStrategy,
@@ -63,17 +63,17 @@ def _mock_proton():
 def _mock_router():
     """Create a MagicMock router API with sensible return values."""
     router = MagicMock()
-    router.upload_wireguard_config.return_value = {
+    router.wireguard.upload_wireguard_config.return_value = {
         "rule_name": "fvpn_rule_9001",
         "peer_id": "9001",
         "vpn_protocol": "wireguard",
     }
-    router.upload_openvpn_config.return_value = {
+    router.openvpn.upload_openvpn_config.return_value = {
         "rule_name": "fvpn_rule_ovpn_9051",
         "client_uci_id": "28216_9051",
         "vpn_protocol": "openvpn",
     }
-    router.upload_proton_wg_config.return_value = {
+    router.proton_wg.upload_proton_wg_config.return_value = {
         "rule_name": "fvpn_rule_protonwg_1",
         "tunnel_name": "protonwg0",
         "tunnel_id": 1,
@@ -81,8 +81,8 @@ def _mock_router():
         "table_num": 100,
         "vpn_protocol": "wireguard-tcp",
     }
-    router.get_tunnel_health.return_value = "green"
-    router.get_proton_wg_health.return_value = "green"
+    router.tunnel.get_tunnel_health.return_value = "green"
+    router.proton_wg.get_proton_wg_health.return_value = "green"
     router.PROTON_WG_DIR = "/etc/protonwg"
     return router
 
@@ -186,7 +186,7 @@ class TestWireGuardStrategy:
         )
 
         # Router upload called with parsed WG fields
-        self.router.upload_wireguard_config.assert_called_once_with(
+        self.router.wireguard.upload_wireguard_config.assert_called_once_with(
             profile_name="TestProfile",
             private_key="test_private_key",
             public_key="test_public_key",
@@ -205,7 +205,7 @@ class TestWireGuardStrategy:
         router_info = {"rule_name": "fvpn_rule_9001", "peer_id": "9001"}
         self.strategy.delete(self.router, router_info)
 
-        self.router.delete_wireguard_config.assert_called_once_with(
+        self.router.wireguard.delete_wireguard_config.assert_called_once_with(
             "9001", "fvpn_rule_9001"
         )
 
@@ -213,15 +213,15 @@ class TestWireGuardStrategy:
         router_info = {"rule_name": "fvpn_rule_9001"}
         health = self.strategy.connect(self.router, router_info)
 
-        self.router.bring_tunnel_up.assert_called_once_with("fvpn_rule_9001")
-        self.router.get_tunnel_health.assert_called_once_with("fvpn_rule_9001")
+        self.router.tunnel.bring_tunnel_up.assert_called_once_with("fvpn_rule_9001")
+        self.router.tunnel.get_tunnel_health.assert_called_once_with("fvpn_rule_9001")
         assert health == "green"
 
     def test_disconnect(self):
         router_info = {"rule_name": "fvpn_rule_9001"}
         self.strategy.disconnect(self.router, router_info)
 
-        self.router.bring_tunnel_down.assert_called_once_with("fvpn_rule_9001")
+        self.router.tunnel.bring_tunnel_down.assert_called_once_with("fvpn_rule_9001")
 
     def test_switch_server(self):
         profile = {
@@ -250,7 +250,7 @@ class TestWireGuardStrategy:
         )
 
         # In-place update, not delete-recreate
-        self.router.update_wireguard_peer_live.assert_called_once_with(
+        self.router.wireguard.update_wireguard_peer_live.assert_called_once_with(
             peer_id="9001",
             rule_name="fvpn_rule_9001",
             private_key="test_private_key",
@@ -279,7 +279,7 @@ class TestWireGuardStrategy:
         router_info = {"rule_name": "fvpn_rule_9001"}
         health = self.strategy.get_health(self.router, router_info)
 
-        self.router.get_tunnel_health.assert_called_once_with("fvpn_rule_9001")
+        self.router.tunnel.get_tunnel_health.assert_called_once_with("fvpn_rule_9001")
         assert health == "green"
 
 
@@ -309,7 +309,7 @@ class TestOpenVPNStrategy:
             port=None,
         )
 
-        self.router.upload_openvpn_config.assert_called_once_with(
+        self.router.openvpn.upload_openvpn_config.assert_called_once_with(
             profile_name="OVPNProfile",
             ovpn_config="client\nremote 1.2.3.4 443 tcp\n",
             username="ovpn_user",
@@ -344,7 +344,7 @@ class TestOpenVPNStrategy:
         }
         self.strategy.delete(self.router, router_info)
 
-        self.router.delete_openvpn_config.assert_called_once_with(
+        self.router.openvpn.delete_openvpn_config.assert_called_once_with(
             "28216_9051", "fvpn_rule_ovpn_9051"
         )
 
@@ -352,15 +352,15 @@ class TestOpenVPNStrategy:
         router_info = {"rule_name": "fvpn_rule_ovpn_9051"}
         health = self.strategy.connect(self.router, router_info)
 
-        self.router.bring_tunnel_up.assert_called_once_with("fvpn_rule_ovpn_9051")
-        self.router.get_tunnel_health.assert_called_once_with("fvpn_rule_ovpn_9051")
+        self.router.tunnel.bring_tunnel_up.assert_called_once_with("fvpn_rule_ovpn_9051")
+        self.router.tunnel.get_tunnel_health.assert_called_once_with("fvpn_rule_ovpn_9051")
         assert health == "green"
 
     def test_disconnect(self):
         router_info = {"rule_name": "fvpn_rule_ovpn_9051"}
         self.strategy.disconnect(self.router, router_info)
 
-        self.router.bring_tunnel_down.assert_called_once_with("fvpn_rule_ovpn_9051")
+        self.router.tunnel.bring_tunnel_down.assert_called_once_with("fvpn_rule_ovpn_9051")
 
     def test_switch_server(self):
         """Full delete-recreate flow: capture MACs, delete, upload, reorder, reassign, bring up."""
@@ -374,13 +374,13 @@ class TestOpenVPNStrategy:
         }
 
         # Mock from_mac_tokens returning devices assigned to the old rule
-        self.router.from_mac_tokens.return_value = [
+        self.router.policy.from_mac_tokens.return_value = [
             "AA:BB:CC:DD:EE:01",
             "AA:BB:CC:DD:EE:02",
         ]
 
         # Mock existing rules for section-order capture
-        self.router.get_flint_vpn_rules.return_value = [
+        self.router.policy.get_flint_vpn_rules.return_value = [
             {"rule_name": "fvpn_rule_9001", "enabled": "1"},
             {"rule_name": "fvpn_rule_ovpn_9051", "enabled": "1"},
             {"rule_name": "fvpn_rule_9002", "enabled": "0"},
@@ -392,10 +392,10 @@ class TestOpenVPNStrategy:
         )
 
         # 1. Captured MACs from old rule
-        self.router.from_mac_tokens.assert_called_once_with("fvpn_rule_ovpn_9051")
+        self.router.policy.from_mac_tokens.assert_called_once_with("fvpn_rule_ovpn_9051")
 
         # 2. Deleted old config
-        self.router.delete_openvpn_config.assert_called_once_with(
+        self.router.openvpn.delete_openvpn_config.assert_called_once_with(
             "28216_9051", "fvpn_rule_ovpn_9051"
         )
 
@@ -411,22 +411,22 @@ class TestOpenVPNStrategy:
         )
 
         # 4. Uploaded new config
-        self.router.upload_openvpn_config.assert_called_once()
+        self.router.openvpn.upload_openvpn_config.assert_called_once()
 
         # 5. Reordered rules to preserve original position
-        self.router.reorder_vpn_rules.assert_called_once()
-        reorder_arg = self.router.reorder_vpn_rules.call_args[0][0]
+        self.router.policy.reorder_vpn_rules.assert_called_once()
+        reorder_arg = self.router.policy.reorder_vpn_rules.call_args[0][0]
         # New rule should be at index 1 (where old one was)
         assert reorder_arg[1] == "fvpn_rule_ovpn_9051"
 
         # 6. Re-attached devices
-        assert self.router.set_device_vpn.call_count == 2
-        assigned_macs = [c[0][0] for c in self.router.set_device_vpn.call_args_list]
+        assert self.router.devices.set_device_vpn.call_count == 2
+        assigned_macs = [c[0][0] for c in self.router.devices.set_device_vpn.call_args_list]
         assert "aa:bb:cc:dd:ee:01" in assigned_macs
         assert "aa:bb:cc:dd:ee:02" in assigned_macs
 
         # 7. Tunnel was enabled, so bring_tunnel_up should be called
-        self.router.bring_tunnel_up.assert_called_once()
+        self.router.tunnel.bring_tunnel_up.assert_called_once()
 
         # Returns new router_info (not None, unlike WG in-place)
         assert new_ri is not None
@@ -444,8 +444,8 @@ class TestOpenVPNStrategy:
             "name": "OVPNProfile",
             "server": {"protocol": "openvpn-udp"},
         }
-        self.router.from_mac_tokens.return_value = []
-        self.router.get_flint_vpn_rules.return_value = [
+        self.router.policy.from_mac_tokens.return_value = []
+        self.router.policy.get_flint_vpn_rules.return_value = [
             {"rule_name": "fvpn_rule_ovpn_9051", "enabled": "0"},
         ]
 
@@ -454,7 +454,7 @@ class TestOpenVPNStrategy:
             DEFAULT_OPTIONS, old_ri,
         )
 
-        self.router.bring_tunnel_up.assert_not_called()
+        self.router.tunnel.bring_tunnel_up.assert_not_called()
 
     def test_switch_server_raises_without_client_uci_id(self):
         profile = {"name": "Test", "server": {}}
@@ -476,8 +476,8 @@ class TestOpenVPNStrategy:
             "name": "OVPNProfile",
             "server": {"protocol": "openvpn-udp"},
         }
-        self.router.from_mac_tokens.side_effect = Exception("SSH error")
-        self.router.get_flint_vpn_rules.return_value = [
+        self.router.policy.from_mac_tokens.side_effect = Exception("SSH error")
+        self.router.policy.get_flint_vpn_rules.return_value = [
             {"rule_name": "fvpn_rule_ovpn_9051", "enabled": "0"},
         ]
 
@@ -487,13 +487,13 @@ class TestOpenVPNStrategy:
             DEFAULT_OPTIONS, old_ri,
         )
         assert new_ri is not None
-        self.router.set_device_vpn.assert_not_called()
+        self.router.devices.set_device_vpn.assert_not_called()
 
     def test_get_health(self):
         router_info = {"rule_name": "fvpn_rule_ovpn_9051"}
         health = self.strategy.get_health(self.router, router_info)
 
-        self.router.get_tunnel_health.assert_called_once_with("fvpn_rule_ovpn_9051")
+        self.router.tunnel.get_tunnel_health.assert_called_once_with("fvpn_rule_ovpn_9051")
         assert health == "green"
 
 
@@ -536,7 +536,7 @@ class TestProtonWGStrategy:
         )
 
         # Should upload via proton_wg path with socket_type
-        self.router.upload_proton_wg_config.assert_called_once_with(
+        self.router.proton_wg.upload_proton_wg_config.assert_called_once_with(
             profile_name="TCPProfile",
             private_key="test_private_key",
             public_key="test_public_key",
@@ -559,27 +559,27 @@ class TestProtonWGStrategy:
         assert call_kwargs["transport"] == "tls"
 
         # Socket type should be "tls"
-        upload_kwargs = self.router.upload_proton_wg_config.call_args[1]
+        upload_kwargs = self.router.proton_wg.upload_proton_wg_config.call_args[1]
         assert upload_kwargs["socket_type"] == "tls"
 
     def test_connect(self):
         ri = self._sample_router_info()
         health = self.strategy_tcp.connect(self.router, ri)
 
-        self.router.start_proton_wg_tunnel.assert_called_once_with(
+        self.router.proton_wg.start_proton_wg_tunnel.assert_called_once_with(
             iface="protonwg0",
             mark="0x10000",
             table_num=100,
             tunnel_id=1,
         )
-        self.router.get_proton_wg_health.assert_called_once_with("protonwg0")
+        self.router.proton_wg.get_proton_wg_health.assert_called_once_with("protonwg0")
         assert health == "green"
 
     def test_disconnect(self):
         ri = self._sample_router_info()
         self.strategy_tcp.disconnect(self.router, ri)
 
-        self.router.stop_proton_wg_tunnel.assert_called_once_with(
+        self.router.proton_wg.stop_proton_wg_tunnel.assert_called_once_with(
             iface="protonwg0",
             mark="0x10000",
             table_num=100,
@@ -591,7 +591,7 @@ class TestProtonWGStrategy:
         self.strategy_tcp.delete(self.router, ri)
 
         # Stop is called first (best-effort)
-        self.router.stop_proton_wg_tunnel.assert_called_once_with(
+        self.router.proton_wg.stop_proton_wg_tunnel.assert_called_once_with(
             iface="protonwg0",
             mark="0x10000",
             table_num=100,
@@ -599,7 +599,7 @@ class TestProtonWGStrategy:
         )
 
         # Then delete
-        self.router.delete_proton_wg_config.assert_called_once_with(
+        self.router.proton_wg.delete_proton_wg_config.assert_called_once_with(
             iface="protonwg0",
             tunnel_id=1,
         )
@@ -607,11 +607,11 @@ class TestProtonWGStrategy:
     def test_delete_tolerates_stop_failure(self):
         """Best-effort stop: if stop raises, delete still proceeds."""
         ri = self._sample_router_info()
-        self.router.stop_proton_wg_tunnel.side_effect = Exception("tunnel not running")
+        self.router.proton_wg.stop_proton_wg_tunnel.side_effect = Exception("tunnel not running")
 
         # Should not raise
         self.strategy_tcp.delete(self.router, ri)
-        self.router.delete_proton_wg_config.assert_called_once()
+        self.router.proton_wg.delete_proton_wg_config.assert_called_once()
 
     def test_switch_server(self):
         profile = {
@@ -639,19 +639,14 @@ class TestProtonWGStrategy:
             custom_dns=None,
         )
 
-        # Should write the conf file and apply with wg setconf
-        self.router.write_file.assert_called_once()
-        conf_path_arg = self.router.write_file.call_args[0][0]
-        assert conf_path_arg == "/etc/protonwg/protonwg0.conf"
-
-        conf_content = self.router.write_file.call_args[0][1]
+        # Should call proton_wg.update_config_live with the conf content
+        self.router.proton_wg.update_config_live.assert_called_once()
+        call_args = self.router.proton_wg.update_config_live.call_args[0]
+        assert call_args[0] == "protonwg0"
+        conf_content = call_args[1]
         assert "PrivateKey = test_private_key" in conf_content
         assert "PublicKey = test_public_key" in conf_content
         assert "Endpoint = 1.2.3.4:51820" in conf_content
-
-        self.router.exec.assert_called_once_with(
-            "wg setconf protonwg0 /etc/protonwg/protonwg0.conf"
-        )
 
         # router_info is None (in-place update)
         assert new_ri is None
@@ -663,5 +658,5 @@ class TestProtonWGStrategy:
         ri = self._sample_router_info()
         health = self.strategy_tcp.get_health(self.router, ri)
 
-        self.router.get_proton_wg_health.assert_called_once_with("protonwg0")
+        self.router.proton_wg.get_proton_wg_health.assert_called_once_with("protonwg0")
         assert health == "green"

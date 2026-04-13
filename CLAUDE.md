@@ -8,7 +8,8 @@ All project documentation lives in `docs/`:
 
 - [docs/project-overview.md](docs/project-overview.md) — Features, architecture, environment, dependencies
 - [docs/terminology.md](docs/terminology.md) — Domain glossary (Group, Device, Rule, Peer, Server Scope, etc.)
-- [docs/backend-modules.md](docs/backend-modules.md) — Backend module descriptions and key methods
+- [docs/backend-structure.md](docs/backend-structure.md) — Package layout, dependency graph, import conventions, where to put new code
+- [docs/backend-modules.md](docs/backend-modules.md) — Detailed module descriptions per package
 - [docs/frontend.md](docs/frontend.md) — Svelte components, stores, API client
 - [docs/rest-api.md](docs/rest-api.md) — All REST API endpoints
 - [docs/router-reference.md](docs/router-reference.md) — Config naming, limits, tunnel lifecycle, proton-wg, MediaTek constraints
@@ -23,6 +24,8 @@ All project documentation lives in `docs/`:
 - [docs/proton-wg-internals.md](docs/proton-wg-internals.md) — process targeting, mangle ordering, tunnel ID allocation, firewall reload safety
 - [docs/smart-protocol.md](docs/smart-protocol.md) — SSE-tick design, RLock threading, cancel semantics, protocol restrictions
 - [docs/server-switch-internals.md](docs/server-switch-internals.md) — WG hot-swap vs OVPN teardown, cert handling, latency probe constraints
+- [docs/tunnel-strategy-internals.md](docs/tunnel-strategy-internals.md) — Strategy pattern design, protocol behaviour matrix, how to add a new protocol
+- [docs/router-layer-internals.md](docs/router-layer-internals.md) — Three-layer router architecture (SSH + tools + facades), constructor injection, testing patterns
 - [docs/proton-api-gotchas.md](docs/proton-api-gotchas.md) — persistent vs session certs, cert deletion limitation, library attribute renames, OVPN username suffixes
 - [docs/source-of-truth.md](docs/source-of-truth.md) — full field tables, JSON schema, sync mechanisms, ipset naming
 

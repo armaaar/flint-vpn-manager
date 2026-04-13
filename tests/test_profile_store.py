@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-import profile_store as ps
+import persistence.profile_store as ps
 
 
 @pytest.fixture

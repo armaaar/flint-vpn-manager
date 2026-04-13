@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import MagicMock, patch
 
-from latency_probe import (
+from proton_vpn.latency_probe import (
     _parse_probe_output,
     _tcp_connect_ms,
     probe_servers_via_router,
@@ -101,7 +101,7 @@ class TestProbeServersLocal:
     def test_empty_servers(self):
         assert probe_servers_local([]) == {}
 
-    @patch("latency_probe._tcp_connect_ms")
+    @patch("proton_vpn.latency_probe._tcp_connect_ms")
     def test_parallel_probing(self, mock_tcp):
         mock_tcp.side_effect = [25.0, None, 80.0]
         servers = [
@@ -119,7 +119,7 @@ class TestProbeServersLocal:
 
 
 class TestTcpConnectMs:
-    @patch("latency_probe.socket.socket")
+    @patch("proton_vpn.latency_probe.socket.socket")
     def test_successful_connect(self, mock_socket_cls):
         mock_sock = MagicMock()
         mock_socket_cls.return_value = mock_sock
@@ -129,7 +129,7 @@ class TestTcpConnectMs:
         mock_sock.connect.assert_called_once_with(("1.2.3.4", 443))
         mock_sock.close.assert_called_once()
 
-    @patch("latency_probe.socket.socket")
+    @patch("proton_vpn.latency_probe.socket.socket")
     def test_timeout(self, mock_socket_cls):
         import socket
         mock_sock = MagicMock()
@@ -138,7 +138,7 @@ class TestTcpConnectMs:
         result = _tcp_connect_ms("1.2.3.4", 443, 2.0)
         assert result is None
 
-    @patch("latency_probe.socket.socket")
+    @patch("proton_vpn.latency_probe.socket.socket")
     def test_connection_refused(self, mock_socket_cls):
         mock_sock = MagicMock()
         mock_sock.connect.side_effect = OSError("Connection refused")

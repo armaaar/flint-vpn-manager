@@ -9,8 +9,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import profile_store as ps
-from device_tracker import DeviceTracker
+import persistence.profile_store as ps
+from background.device_tracker import DeviceTracker
 
 
 @pytest.fixture
@@ -22,8 +22,8 @@ def tmp_store(tmp_path, monkeypatch):
 
 def _mock_router(leases=None, vpn_assignments=None):
     router = MagicMock()
-    router.get_dhcp_leases.return_value = leases or []
-    router.get_device_assignments.return_value = vpn_assignments or {}
+    router.devices.get_dhcp_leases.return_value = leases or []
+    router.devices.get_device_assignments.return_value = vpn_assignments or {}
     return router
 
 
