@@ -95,10 +95,11 @@ def _default_device(mac: str, profile_id=None) -> dict:
     }
 
 
-def _build_ip_to_network_map(router) -> dict:
-    """Build {ip_string: network_label} from LAN access networks.
+def _build_ip_to_network_map(router, leases=None) -> dict:
+    """Build {ip_string: {"label": ..., "zone": ...}} from LAN access networks.
 
-    Best-effort — returns empty dict on failure.
+    Best-effort — returns empty dict on failure.  Pass *leases* to avoid a
+    duplicate SSH call when the caller already has them.
     """
     import ipaddress
     try:
@@ -109,23 +110,25 @@ def _build_ip_to_network_map(router) -> dict:
     for n in networks:
         subnet_str = n.get("subnet", "")
         label = " / ".join(s["name"] for s in n.get("ssids", []) if s.get("name")) or n.get("zone", "")
+        zone_id = n.get("id", "")
         if subnet_str:
             try:
-                subnets.append((ipaddress.IPv4Network(subnet_str, strict=False), label))
+                subnets.append((ipaddress.IPv4Network(subnet_str, strict=False), label, zone_id))
             except ValueError:
                 pass
     result = {}
     try:
-        leases = router.get_dhcp_leases()
+        if leases is None:
+            leases = router.get_dhcp_leases()
         for lease in leases:
             ip_str = lease.get("ip", "")
             if not ip_str:
                 continue
             try:
                 ip = ipaddress.IPv4Address(ip_str)
-                for net, label in subnets:
+                for net, label, zone_id in subnets:
                     if ip in net:
-                        result[ip_str] = label
+                        result[ip_str] = {"label": label, "zone": zone_id}
                         break
             except ValueError:
                 continue
@@ -1762,14 +1765,16 @@ class VPNService:
             if mac not in devices:
                 devices[mac] = _default_device(mac, pid)
 
-        # Resolve device IP → network name
-        network_map = _build_ip_to_network_map(self.router)
+        # Resolve device IP → network name (reuse leases to avoid duplicate SSH call)
+        network_map = _build_ip_to_network_map(self.router, leases=leases)
 
         out = []
         for mac, d in sorted(devices.items()):
             d["display_name"] = d.get("label") or d.get("hostname") or mac
             d["last_seen"] = None  # legacy field, no longer tracked
-            d["network"] = network_map.get(d.get("ip", ""), "")
+            net_info = network_map.get(d.get("ip", ""), {})
+            d["network"] = net_info.get("label", "")
+            d["network_zone"] = net_info.get("zone", "")
             out.append(d)
         return out
 

@@ -25,7 +25,7 @@
       {/if}
     </div>
     <div class="device-meta">
-      {device.ip || device.mac}
+      {device.ip || device.mac.toUpperCase()}
       {#if device.iface}&middot; {device.iface}{/if}
       {#if online && (device.rx_speed || device.tx_speed)}
         &middot; ↓{formatSpeed(device.rx_speed)} ↑{formatSpeed(device.tx_speed)}

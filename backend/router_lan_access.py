@@ -448,15 +448,17 @@ class RouterLanAccess:
         ]
         batch = "\n".join(lines) + "\n"
         self._ssh.write_file("/tmp/fvpn_uci_batch.txt", batch)
+        # Step 1: apply UCI config (stays connected)
         self._ssh.exec(
             "uci batch < /tmp/fvpn_uci_batch.txt && "
             "uci commit wireless && uci commit network && "
             "uci commit firewall && uci commit dhcp && "
-            "rm -f /tmp/fvpn_uci_batch.txt && "
-            "wifi reload 2>/dev/null && "
-            "/etc/init.d/firewall reload >/dev/null 2>&1 && "
-            "/etc/init.d/dnsmasq reload >/dev/null 2>&1; true"
+            "rm -f /tmp/fvpn_uci_batch.txt; "
+            f"ifup fvpn_{zone_id} 2>/dev/null; true"
         )
+        # Step 2: reload WiFi driver (drops WiFi → kills SSH).
+        # Run detached so the command survives our SSH disconnect.
+        self._reload_wifi_driver()
 
     def delete_network(self, zone_id: str) -> None:
         """Delete a FlintVPN-created network and all its UCI sections."""
@@ -477,14 +479,50 @@ class RouterLanAccess:
                     cmds.append(f"uci -q delete {config}.{section}")
         if not cmds:
             return
+
+        # Decrement BssidNum in .dat files
+        bssid_num = self._get_bssid_num()
+        if bssid_num > 2:  # never go below 2 (main + guest)
+            new_num = bssid_num - 1
+            for path in self._DAT_PATHS:
+                cmds.append(f"sed -i 's/^BssidNum={bssid_num}/BssidNum={new_num}/' {path}")
+
         cmds.extend([
             "uci commit wireless", "uci commit network",
             "uci commit firewall", "uci commit dhcp",
-            "wifi reload 2>/dev/null",
-            "/etc/init.d/firewall reload >/dev/null 2>&1",
-            "/etc/init.d/dnsmasq reload >/dev/null 2>&1; true",
         ])
         self._ssh.exec(" ; ".join(cmds))
+        # Reload WiFi driver to remove interfaces (drops WiFi → kills SSH)
+        self._reload_wifi_driver()
+
+    def _reload_wifi_driver(self) -> None:
+        """Reload the MediaTek WiFi kernel module to pick up BssidNum changes.
+
+        MediaTek's mt_wifi reads BssidNum from .dat files only at module probe
+        time. Adding/removing SSIDs requires unloading and reloading the module.
+        This drops ALL WiFi connections for ~10-15 seconds.
+
+        The command runs detached (& disown) so it survives our SSH disconnect
+        (since WiFi going down kills the SSH session).
+        """
+        reload_script = (
+            "wifi down 2>/dev/null; "
+            "rmmod mtk_warp_proxy 2>/dev/null; "
+            "rmmod mt_wifi 2>/dev/null; "
+            "sleep 1; "
+            "insmod mt_wifi 2>/dev/null; "
+            "insmod mtk_warp_proxy 2>/dev/null; "
+            "sleep 1; "
+            "wifi up 2>/dev/null; "
+            "/etc/init.d/firewall reload >/dev/null 2>&1; "
+            "/etc/init.d/dnsmasq reload >/dev/null 2>&1"
+        )
+        try:
+            self._ssh.exec(
+                f"sh -c '{reload_script}' </dev/null >/dev/null 2>&1 &"
+            )
+        except Exception:
+            pass  # expected — WiFi drop kills SSH before command returns
 
     def _get_bssid_num(self) -> int:
         """Read current BssidNum from the 5G .dat file."""

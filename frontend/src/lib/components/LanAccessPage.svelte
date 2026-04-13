@@ -1,6 +1,7 @@
 <script>
   import { api } from '../api.js';
   import { devices, showToast } from '../stores/app.js';
+  import { isOnline } from '../device-utils.js';
   import { createEventDispatcher, onMount } from 'svelte';
   import ExceptionModal from './ExceptionModal.svelte';
   import DeviceModal from './DeviceModal.svelte';
@@ -13,9 +14,21 @@
   let loading = true;
   let savingRules = false;
   let expandedZone = null;
-  let networkDevices = {};
   let showExceptionModal = false;
   let pendingRules = [];
+
+  // Derive per-network device lists reactively from the global devices store (SSE-updated)
+  $: networkDevices = (() => {
+    const byZone = {};
+    for (const d of $devices) {
+      const zone = d.network_zone;
+      if (zone) {
+        if (!byZone[zone]) byZone[zone] = [];
+        byZone[zone].push(d);
+      }
+    }
+    return byZone;
+  })();
 
   // Create form
   let showCreateForm = false;
@@ -26,6 +39,27 @@
 
   // Delete
   let deleting = null;
+
+  // Per-action loading states
+  let togglingIsolation = null;   // zone id
+  let togglingEnabled = null;     // zone id
+  let savingSsid = null;          // ssid section
+  let removingException = null;   // exception id
+
+  // WiFi warning confirmation
+  let wifiWarning = null; // { message, onConfirm }
+
+  function confirmWifiAction(message, onConfirm) {
+    wifiWarning = { message, onConfirm };
+  }
+
+  function dismissWarning() { wifiWarning = null; }
+
+  async function acceptWarning() {
+    const fn = wifiWarning.onConfirm;
+    wifiWarning = null;
+    await fn();
+  }
 
   // Device modal — track by MAC so it stays reactive to store updates
   let selectedMac = null;
@@ -51,17 +85,6 @@
     }
   };
 
-  const loadDevices = async (zoneId) => {
-    if (networkDevices[zoneId]) return;
-    try {
-      const data = await api.getNetworkDevices(zoneId);
-      networkDevices[zoneId] = data.devices || [];
-      networkDevices = networkDevices;
-    } catch (e) {
-      showToast(e.message, true);
-    }
-  };
-
   const toggleExpand = (zoneId) => {
     if (expandedZone === zoneId) {
       expandedZone = null;
@@ -70,7 +93,6 @@
       const network = networks.find(n => n.id === zoneId);
       if (network) ensureSsidEdits(network);
       networks = networks;
-      loadDevices(zoneId);
     }
   };
 
@@ -97,38 +119,59 @@
     }
   };
 
-  const toggleIsolation = async (network) => {
+  const _doToggleIsolation = async (network) => {
+    togglingIsolation = network.id;
     const newState = !network.isolation;
     try {
       await api.setIsolation(network.id, newState);
       network.isolation = newState;
       networks = networks;
-      showToast(`${newState ? 'Isolation enabled' : 'Isolation disabled'} — WiFi clients may briefly reconnect`);
+      showToast(`${newState ? 'Isolation enabled' : 'Isolation disabled'}`);
     } catch (e) {
       showToast(e.message, true);
+    } finally {
+      togglingIsolation = null;
     }
   };
+  const toggleIsolation = (network) => {
+    const bands = network.ssids.filter(s => !s.disabled).map(s => s.band).join(' & ');
+    confirmWifiAction(
+      `This will briefly disconnect WiFi clients on ${bands || 'all bands'} of "${ssidLabel(network)}".`,
+      () => _doToggleIsolation(network),
+    );
+  };
 
-  const toggleEnabled = async (network) => {
+  const _doToggleEnabled = async (network) => {
+    togglingEnabled = network.id;
     const newState = !network.enabled;
     try {
       await api.updateNetwork(network.id, { enabled: newState });
       network.enabled = newState;
       networks = networks;
-      showToast(`Network ${newState ? 'enabled' : 'disabled'} — WiFi will briefly reconnect`);
+      showToast(`Network ${newState ? 'enabled' : 'disabled'}`);
     } catch (e) {
       showToast(e.message, true);
+    } finally {
+      togglingEnabled = null;
     }
   };
+  const toggleEnabled = (network) => {
+    const action = network.enabled ? 'Disabling' : 'Enabling';
+    confirmWifiAction(
+      `${action} will briefly disconnect WiFi clients on both bands of "${ssidLabel(network)}".`,
+      () => _doToggleEnabled(network),
+    );
+  };
 
-  const updateSsid = async (network, ssid) => {
+  const _doUpdateSsid = async (network, ssid) => {
     const settings = {};
     if (ssid.editName !== ssid.name) settings.ssid = ssid.editName;
-    if (ssid.editPassword.length > 0) settings.key = ssid.editPassword;
+    if (ssid.editPassword !== (ssid.password || '')) settings.key = ssid.editPassword;
     if (ssid.editHidden !== ssid.hidden) settings.hidden = ssid.editHidden;
     if (ssid.editEncryption !== ssid.encryption) settings.encryption = ssid.editEncryption;
     if (ssid.editDisabled !== ssid.disabled) settings.disabled = ssid.editDisabled;
     if (Object.keys(settings).length === 0) return;
+    savingSsid = ssid.section;
     try {
       await api.updateNetwork(network.id, { ssids: [{ section: ssid.section, ...settings }] });
       if (settings.ssid) ssid.name = settings.ssid;
@@ -136,25 +179,30 @@
       if ('hidden' in settings) ssid.hidden = settings.hidden;
       if ('encryption' in settings) ssid.encryption = settings.encryption;
       if ('disabled' in settings) ssid.disabled = settings.disabled;
+      ssid.editPassword = '';
       networks = networks;
-      showToast('WiFi settings updated — clients may briefly reconnect');
+      showToast('WiFi settings updated');
     } catch (e) {
       showToast(e.message, true);
+    } finally {
+      savingSsid = null;
     }
   };
+  const updateSsid = (network, ssid) => {
+    confirmWifiAction(
+      `This will briefly disconnect WiFi clients on ${ssid.band} of "${ssidLabel(network)}".`,
+      () => _doUpdateSsid(network, ssid),
+    );
+  };
 
-  const createNetwork = async () => {
-    if (!createName || !createPassword || createPassword.length < 8) {
-      showToast('Name and password (8+ chars) required', true);
-      return;
-    }
+  const _doCreateNetwork = async () => {
     creating = true;
     try {
       await api.createNetwork({ name: createName, password: createPassword, isolation: createIsolation });
       showCreateForm = false;
       createName = '';
       createPassword = '';
-      showToast('Network created — WiFi reloading');
+      showToast('Network created');
       await loadData();
     } catch (e) {
       showToast(e.message, true);
@@ -162,8 +210,18 @@
       creating = false;
     }
   };
+  const createNetwork = () => {
+    if (!createName || !createPassword || createPassword.length < 8) {
+      showToast('Name and password (8+ chars) required', true);
+      return;
+    }
+    confirmWifiAction(
+      'Creating a network requires reloading the WiFi driver. ALL WiFi clients on ALL bands will disconnect for ~15 seconds.',
+      _doCreateNetwork,
+    );
+  };
 
-  const deleteNetwork = async (zoneId) => {
+  const _doDeleteNetwork = async (zoneId) => {
     deleting = zoneId;
     try {
       await api.deleteNetwork(zoneId);
@@ -176,25 +234,50 @@
       deleting = null;
     }
   };
+  const deleteNetwork = (zoneId) => {
+    const net = networks.find(n => n.id === zoneId);
+    const label = net ? ssidLabel(net) : zoneId;
+    confirmWifiAction(
+      `Deleting "${label}" requires reloading the WiFi driver. ALL WiFi clients on ALL bands will disconnect for ~15 seconds.`,
+      () => _doDeleteNetwork(zoneId),
+    );
+  };
 
-  const handleAddException = async (data) => {
+  let editingException = null; // exception being edited
+
+  const handleSaveException = async (data) => {
+    const isEdit = !!editingException;
     try {
+      // Add new first, then delete old — so we never lose the exception on error
       const res = await api.addException(data);
+      if (isEdit) {
+        await api.removeException(editingException.id);
+        exceptions = exceptions.filter(e => e.id !== editingException.id);
+      }
       exceptions = [...exceptions, res.exception];
       showExceptionModal = false;
-      showToast('Exception added');
+      editingException = null;
+      showToast(isEdit ? 'Exception updated' : 'Exception added');
     } catch (e) {
       showToast(e.message, true);
     }
   };
 
+  const editException = (exc) => {
+    editingException = exc;
+    showExceptionModal = true;
+  };
+
   const removeException = async (id) => {
+    removingException = id;
     try {
       await api.removeException(id);
       exceptions = exceptions.filter(e => e.id !== id);
       showToast('Exception removed');
     } catch (e) {
       showToast(e.message, true);
+    } finally {
+      removingException = null;
     }
   };
 
@@ -220,17 +303,18 @@
     for (const ssid of network.ssids) {
       if (!('editName' in ssid)) {
         ssid.editName = ssid.name;
-        ssid.editPassword = '';
+        ssid.editPassword = ssid.password || '';
         ssid.editHidden = ssid.hidden;
         ssid.editEncryption = ssid.encryption;
         ssid.editDisabled = ssid.disabled;
+        ssid.showPassword = false;
       }
     }
   };
 
   const ssidDirty = (ssid) =>
     ssid.editName !== ssid.name ||
-    ssid.editPassword.length > 0 ||
+    ssid.editPassword !== (ssid.password || '') ||
     ssid.editHidden !== ssid.hidden ||
     ssid.editEncryption !== ssid.encryption ||
     ssid.editDisabled !== ssid.disabled;
@@ -240,6 +324,10 @@
   <div class="page-header">
     <button class="btn-back" on:click={() => dispatch('back')}>← Back</button>
     <h2>Networks</h2>
+    <div style="flex:1"></div>
+    <button class="btn-outline btn-sm" on:click={loadData} disabled={loading}>
+      {#if loading}<span class="spinner-inline"></span>{:else}↻ Refresh{/if}
+    </button>
   </div>
 
   {#if loading}
@@ -259,7 +347,7 @@
             <span class="badge" class:badge-green={!network.isolation} class:badge-red={network.isolation}>
               {network.isolation ? 'Isolated' : 'Free talk'}
             </span>
-            <span class="badge badge-count">{network.device_count} devices</span>
+            <span class="badge badge-count">{(networkDevices[network.id] || []).length} devices</span>
           </div>
           <span class="chevron">{expandedZone === network.id ? '▼' : '▶'}</span>
         </div>
@@ -270,14 +358,19 @@
             <div class="toggles-row">
               {#if network.id !== 'lan'}
                 <div class="option-item">
-                  <input type="checkbox" id="net-en-{network.id}" checked={network.enabled} on:change={() => toggleEnabled(network)}>
-                  <label for="net-en-{network.id}">Enabled</label>
+                  <input type="checkbox" id="net-en-{network.id}" checked={network.enabled}
+                         on:change={() => toggleEnabled(network)} disabled={togglingEnabled === network.id}>
+                  <label for="net-en-{network.id}">
+                    {#if togglingEnabled === network.id}<span class="spinner-inline"></span>{/if}
+                    Enabled
+                  </label>
                 </div>
               {/if}
               <div class="option-item">
                 <input type="checkbox" id="net-iso-{network.id}" checked={network.isolation}
-                       on:change={() => toggleIsolation(network)} disabled={!network.enabled}>
+                       on:change={() => toggleIsolation(network)} disabled={!network.enabled || togglingIsolation === network.id}>
                 <label for="net-iso-{network.id}">
+                  {#if togglingIsolation === network.id}<span class="spinner-inline"></span>{/if}
                   Device isolation
                   <span class="opt-hint">— {network.isolation ? 'devices cannot see each other' : 'devices communicate freely'}</span>
                 </label>
@@ -308,7 +401,13 @@
                       </div>
                       <div class="form-group">
                         <label>Password</label>
-                        <input type="text" bind:value={ssid.editPassword} placeholder="Leave empty to keep current" autocomplete="off">
+                        <div class="password-field">
+                          <input type={ssid.showPassword ? 'text' : 'password'} bind:value={ssid.editPassword} autocomplete="off">
+                          <button type="button" class="password-toggle" on:click={() => { ssid.showPassword = !ssid.showPassword; networks = networks; }}
+                                  title={ssid.showPassword ? 'Hide password' : 'Show password'}>
+                            {ssid.showPassword ? '🙈' : '👁'}
+                          </button>
+                        </div>
                       </div>
                       <div class="form-group">
                         <label>Security</label>
@@ -325,7 +424,9 @@
                       </div>
                     </div>
                     {#if ssidDirty(ssid)}
-                      <button class="btn-primary btn-sm" on:click={() => updateSsid(network, ssid)}>Save {ssid.band}</button>
+                      <button class="btn-primary btn-sm" on:click={() => updateSsid(network, ssid)} disabled={savingSsid === ssid.section}>
+                        {savingSsid === ssid.section ? 'Saving...' : `Save ${ssid.band}`}
+                      </button>
                     {/if}
                   </div>
                 {/each}
@@ -370,20 +471,18 @@
 
             <!-- Devices grouped by connection -->
             <div class="devices-section">
-              <h4>Devices ({networkDevices[network.id]?.length || 0})</h4>
-              {#if !networkDevices[network.id]}
-                <div class="loading-sm">Loading...</div>
-              {:else if networkDevices[network.id].length === 0}
+              <h4>Devices ({(networkDevices[network.id] || []).length})</h4>
+              {#if (networkDevices[network.id] || []).length === 0}
                 <div class="empty-sm">No devices on this network</div>
               {:else}
-                {#each groupDevices(networkDevices[network.id]) as [group, devices]}
+                {#each groupDevices(networkDevices[network.id]) as [group, devs]}
                   <div class="device-group-label">{group}</div>
                   <div class="device-list">
-                    {#each devices as device}
+                    {#each devs as device}
                       <button class="device-row" on:click={() => selectDevice(device.mac)}>
-                        <span class="device-dot" class:online={device.online}></span>
+                        <span class="device-dot" class:online={isOnline(device)}></span>
                         <span class="device-name">{device.display_name}</span>
-                        <span class="device-meta">{device.ip} · {device.mac}</span>
+                        <span class="device-meta">{device.ip} · {device.mac.toUpperCase()}</span>
                         <span class="device-arrow">›</span>
                       </button>
                     {/each}
@@ -428,7 +527,7 @@
     <div class="exceptions-section">
       <div class="section-header">
         <h3>Exceptions ({exceptions.length})</h3>
-        <button class="btn-outline btn-sm" on:click={() => { showExceptionModal = true; }}>+ Add Exception</button>
+        <button class="btn-outline btn-sm" on:click={() => { editingException = null; showExceptionModal = true; }}>+ Add Exception</button>
       </div>
       {#if exceptions.length === 0}
         <p class="empty-sm">No exceptions. Exceptions allow specific devices to communicate across blocked networks.</p>
@@ -439,7 +538,10 @@
               <span class="exc-label">{exc.label || `${exc.from_ip} → ${exc.to_ip}`}</span>
               <span class="exc-direction">{exc.direction === 'both' ? '⟷' : exc.direction === 'outbound' ? '→' : '←'}</span>
               <span class="exc-ips">{exc.from_ip} — {exc.to_ip}</span>
-              <button class="exc-delete" on:click={() => removeException(exc.id)} title="Remove">✕</button>
+              <button class="exc-edit" on:click={() => editException(exc)} title="Edit">✎</button>
+              <button class="exc-delete" on:click={() => removeException(exc.id)} title="Remove" disabled={removingException === exc.id}>
+                {removingException === exc.id ? '⏳' : '✕'}
+              </button>
             </div>
           {/each}
         </div>
@@ -449,13 +551,32 @@
 </div>
 
 {#if showExceptionModal}
-  <ExceptionModal {networks} {networkDevices}
-    on:save={(e) => handleAddException(e.detail)}
-    on:close={() => { showExceptionModal = false; }}
-    on:loadDevices={(e) => loadDevices(e.detail)} />
+  <ExceptionModal {networks} {networkDevices} exception={editingException}
+    on:save={(e) => handleSaveException(e.detail)}
+    on:close={() => { showExceptionModal = false; editingException = null; }} />
 {/if}
 
 <DeviceModal device={selectedDevice} on:close={() => selectedMac = null} on:reload={loadData} />
+
+{#if wifiWarning}
+<div class="modal-overlay active" on:click|self={dismissWarning}>
+  <div class="modal wifi-warning-modal">
+    <div class="modal-header">
+      <h2>WiFi Restart Required</h2>
+      <button class="modal-close" on:click={dismissWarning}>&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="wifi-warning-icon">&#9888;</div>
+      <p class="wifi-warning-text">{wifiWarning.message}</p>
+      <p class="wifi-warning-hint">Devices will automatically reconnect once the restart completes.</p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-outline" on:click={dismissWarning}>Cancel</button>
+      <button class="btn-primary" on:click={acceptWarning}>Continue</button>
+    </div>
+  </div>
+</div>
+{/if}
 
 <style>
   .lan-page { max-width: 800px; margin: 0 auto; padding: 20px; }
@@ -546,5 +667,21 @@
   .exc-direction { font-size: 1rem; }
   .exc-ips { color: var(--fg3); font-size: .75rem; font-family: var(--font-mono); }
   .exc-delete { background: none; border: none; color: var(--fg3); cursor: pointer; font-size: .9rem; padding: 2px 6px; }
+  .exc-edit { background: none; border: none; color: var(--fg3); cursor: pointer; font-size: .9rem; padding: 2px 6px; }
+  .exc-edit:hover { color: var(--accent); }
   .exc-delete:hover { color: var(--red); }
+  .exc-delete:disabled { opacity: .5; cursor: not-allowed; }
+
+  .spinner-inline { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .6s linear infinite; vertical-align: middle; margin-right: 4px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .password-field { display: flex; align-items: center; gap: 0; position: relative; }
+  .password-field input { flex: 1; padding-right: 36px; }
+  .password-toggle { position: absolute; right: 4px; background: none; border: none; cursor: pointer; font-size: 1rem; padding: 4px 6px; color: var(--fg3); line-height: 1; }
+  .password-toggle:hover { color: var(--fg); }
+
+  .wifi-warning-modal { max-width: 420px; }
+  .wifi-warning-icon { font-size: 2rem; text-align: center; margin-bottom: 8px; color: var(--amber); }
+  .wifi-warning-text { font-size: .9rem; line-height: 1.5; margin: 0 0 8px; }
+  .wifi-warning-hint { font-size: .8rem; color: var(--fg3); margin: 0; }
 </style>

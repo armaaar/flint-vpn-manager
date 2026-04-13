@@ -58,7 +58,7 @@
 
       <!-- Info grid -->
       <div class="info-grid">
-        <span class="info-label">MAC Address</span><span>{device.mac}</span>
+        <span class="info-label">MAC Address</span><span>{device.mac.toUpperCase()}</span>
         <span class="info-label">IP Address</span><span>{device.ip || 'Unknown'}</span>
         <span class="info-label">Hostname</span><span>{device.hostname || 'Not detected'}</span>
         <span class="info-label">Status</span>

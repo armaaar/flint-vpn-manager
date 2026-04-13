@@ -121,7 +121,18 @@ class LanAccessService:
         if not password or len(password) < 8:
             raise ValueError("Password must be at least 8 characters")
 
-        zone_id = re.sub(r'[^a-z0-9]', '_', name.lower())[:12]
+        # fw3 zone name limit is 11 chars; zone name = "fvpn_" + zone_id → max 6
+        zone_id = re.sub(r'[^a-z0-9]', '_', name.lower()).strip('_')[:6]
+        if not zone_id:
+            raise ValueError("Network name must contain at least one alphanumeric character")
+        # Ensure uniqueness
+        existing = {n["id"] for n in self.router.lan_access.get_networks()}
+        base = zone_id
+        n = 1
+        while f"fvpn_{zone_id}" in existing:
+            suffix = str(n)
+            zone_id = base[:6 - len(suffix)] + suffix
+            n += 1
         subnet_ip = self._pick_subnet()
         self.router.lan_access.create_network(zone_id, name, password, subnet_ip, isolation)
         log.info(f"Created network '{name}' (zone=fvpn_{zone_id}, subnet={subnet_ip}/24)")
@@ -203,6 +214,26 @@ class LanAccessService:
 
         return {"success": True, "zone": zone_id, "isolation": enabled}
 
+    def _ip_to_zone(self, ip_or_subnet: str) -> str:
+        """Resolve an IP or subnet string to its zone ID, or '' if unknown."""
+        networks = self.router.lan_access.get_networks()
+        for n in networks:
+            subnet_str = n.get("subnet", "")
+            if not subnet_str:
+                continue
+            try:
+                subnet = ipaddress.IPv4Network(subnet_str, strict=False)
+                # Direct subnet match (for "entire network" exceptions)
+                if ip_or_subnet == subnet_str:
+                    return n["id"]
+                # Single IP match
+                if "/" not in ip_or_subnet:
+                    if ipaddress.IPv4Address(ip_or_subnet) in subnet:
+                        return n["id"]
+            except ValueError:
+                continue
+        return ""
+
     # ── Device Exceptions ─────────────────────────────────────────────
 
     def get_exceptions(self) -> list:
@@ -223,6 +254,12 @@ class LanAccessService:
         }
         if not exc["from_ip"] or not exc["to_ip"]:
             raise ValueError("from_ip and to_ip are required")
+
+        # Same-network exceptions are useless — traffic stays within the bridge
+        from_zone = self._ip_to_zone(exc["from_ip"])
+        to_zone = self._ip_to_zone(exc["to_ip"])
+        if from_zone and to_zone and from_zone == to_zone:
+            raise ValueError("Exceptions only apply between different networks")
 
         config = sm.get_config()
         la = config.setdefault("lan_access", {})

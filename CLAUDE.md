@@ -22,7 +22,7 @@ A local web dashboard for managing ProtonVPN WireGuard and OpenVPN profiles on a
 - **Custom DNS**: per-profile DNS override (e.g. Pi-hole, AdGuard) instead of Proton's default resolver
 - **Alternative routing**: DNS-over-HTTPS transport fallback for API calls when Proton servers are blocked (censored networks)
 - **DNS Ad Blocker**: per-group DNS-level ad/tracker/malware blocking via second dnsmasq instance with community blocklists (OISD). Stacks with NetShield.
-- **LAN access control**: per-network isolation and cross-network access rules with device exceptions, enforced via separate subnets and fw3 zone forwarding
+- **LAN access control**: create/delete networks, per-network isolation, cross-network access rules with device exceptions, enforced via separate subnets and fw3 zone forwarding
 - **NetShield status**: prominent protection-level display on group cards (active indicator when connected)
 - **Location/IP check**: sidebar widget showing current public IP, country, and ISP as seen by ProtonVPN
 - **Active sessions**: view all connected VPN sessions on the Proton account with exit IP and protocol
@@ -121,7 +121,7 @@ Key rules:
 Main server. Thin routing layer that delegates to `VPNService`. All API endpoints, SSE stream. Backup-to-router and auto-restore-on-unlock helpers.
 
 ### `vpn_service.py` — Business logic
-Core orchestrator. `VPNService` owns `build_profile_list`, profile CRUD, `switch_server`, `change_protocol`, `change_type`, `connect_profile`, `disconnect_profile`, `reorder_profiles`, device assignment. No Flask dependency.
+Core orchestrator. `VPNService` owns `build_profile_list`, profile CRUD, `switch_server`, `change_protocol`, `change_type`, `connect_profile`, `disconnect_profile`, `reorder_profiles`, device assignment. Adds `network_zone` (zone ID like `"fvpn_iot"`) alongside `network` (display label) to each device for SSE-reactive network device lists. No Flask dependency.
 
 ### `noint_sync.py` — NoInternet WAN block enforcement
 Manages the `fvpn_noint_ips` ipset + firewall rule that blocks WAN access for NoInternet groups. Extracted from the old `lan_sync.py`. Key functions: `sync_noint_to_router()`, `wipe_noint()`.
@@ -151,10 +151,10 @@ Pure functions. Ranking: Proton `score` (lower = better) → blacklist filter �
 Daemon thread, `_poll_loop` every 60s. Four jobs: (1) server data refresh (~15min loads, ~3h full list), (2) server optimization (daily window, `MIN_DWELL_HOURS=6` cooldown), (3) cert renewal (daily, within 30 days of expiry, independent of auto-optimize), (4) blocklist update (daily, downloads community blocklist and uploads to router).
 
 ### `router_lan_access.py` — Router facade for cross-network access control
-Discovers networks from UCI `wireless`/`network`/`firewall` config, builds a list of zones with SSIDs, subnets, device counts, and isolation state. Manages fw3 zone `forwarding` entries for cross-network traffic rules, toggles per-SSID AP isolation via `wireless.*.isolate`, and applies per-device iptables ACCEPT rules in the `forwarding_rule` chain (with a firewall include script at `/etc/fvpn/lan_access_rules.sh` for reboot persistence). Key methods: `get_networks()`, `get_zone_forwardings()`, `set_zone_forwarding()`, `set_wifi_isolation()`, `apply_device_exceptions()`, `cleanup_exceptions()`.
+Discovers networks from UCI `wireless`/`network`/`firewall` config, builds a list of zones with SSIDs, subnets, device counts, and isolation state. Manages fw3 zone `forwarding` entries for cross-network traffic rules, toggles per-SSID AP isolation via `wireless.*.isolate`, and applies per-device iptables ACCEPT rules in the `forwarding_rule` chain (with a firewall include script at `/etc/fvpn/lan_access_rules.sh` for reboot persistence). Network creation/deletion uses `_reload_wifi_driver()` which unloads and reloads the `mt_wifi` kernel module — required because MediaTek's driver reads `BssidNum` from `.dat` files only at module load time (see [MediaTek WiFi Driver Constraints](#mediatek-wifi-driver-constraints)). Key methods: `get_networks()`, `get_zone_forwardings()`, `set_zone_forwarding()`, `set_wifi_isolation()`, `create_network()`, `delete_network()`, `apply_device_exceptions()`, `cleanup_exceptions()`.
 
 ### `lan_access_service.py` — LAN access business logic
-Orchestrates `RouterLanAccess` (SSH/UCI) with `config.json` persistence. Separate from `VPNService` because LAN access and VPN routing are orthogonal concerns. Methods: `get_lan_overview()` (networks + access rules + exceptions), `get_network_devices()` (devices by zone/subnet), `update_access_rules()` (zone forwarding changes), `set_isolation()` (AP isolation toggle), `add_exception()` / `remove_exception()` (device-level iptables rules), `reapply_all()` (boot recovery). Exceptions are persisted in `config.json` under `lan_access.exceptions` and re-applied on unlock.
+Orchestrates `RouterLanAccess` (SSH/UCI) with `config.json` persistence. Separate from `VPNService` because LAN access and VPN routing are orthogonal concerns. Zone IDs are truncated to 6 characters (fw3 zone name limit is 11 chars; `fvpn_` prefix takes 5) with collision handling. Methods: `get_lan_overview()` (networks + access rules + exceptions), `get_network_devices()` (devices by zone/subnet), `create_network()` / `delete_network()` (full network lifecycle with WiFi driver reload), `update_access_rules()` (zone forwarding changes), `set_isolation()` (AP isolation toggle), `add_exception()` / `remove_exception()` (device-level iptables rules), `reapply_all()` (boot recovery). Exceptions are persisted in `config.json` under `lan_access.exceptions` and re-applied on unlock.
 
 ### `router_adblock.py` — DNS ad-block infrastructure on the router
 Manages a second dnsmasq instance (port 5353) with community blocklists. Devices in adblock-enabled groups have their DNS redirected via iptables REDIRECT from port 53 to 5353. The blocking dnsmasq forwards non-blocked queries to the main dnsmasq on 127.0.0.1:53. Uses `fvpn_adblock_macs` hash:mac ipset for per-group MAC matching. Self-healing: checks and provisions on demand. Firewall include script ensures rules survive router reboot.
@@ -189,7 +189,7 @@ Built with Svelte 5 + Vite. Source in `frontend/src/`, builds to `static/`.
 | `DeviceModal.svelte` | Device settings: custom name, device type (synced to router gl-client), group assignment |
 | `GroupModal.svelte` | Unified create/edit group modal. Same field order in both modes: type → protocol → VPN options → name → icon/color → guest. Create mode opens ServerPicker for VPN groups. Edit mode handles protocol change, type change (VPN ↔ NoVPN ↔ NoInternet), and VPN option regeneration on Save. |
 | `ServerPicker.svelte` | 3-level server browser: Country → City → Server. Filters, scope selector. Per-server star (favourite) and ban (blacklist) toggles. "Test latency" button probes from router and shows color-coded ms badges (green <50ms, yellow <150ms, red >=150ms). Blacklisted servers dimmed + strikethrough + sorted last. Favourites sorted first. |
-| `LanAccessPage.svelte` | Top-level page (`#lan-access`): network cards (collapsible) with isolation toggle, cross-network access rules table (inbound/outbound per zone pair), device list per network, exceptions section |
+| `LanAccessPage.svelte` | Top-level page (`#lan-access`): network cards (collapsible) with isolation toggle, create/delete network, cross-network access rules table (inbound/outbound per zone pair), SSE-reactive device list per network (derived from global `$devices` store via `network_zone` field), exceptions section. Shows WiFi restart warning modals before disruptive actions (driver reload for create/delete, `wifi reload` for enable/disable/isolation/SSID changes). |
 | `ExceptionModal.svelte` | Modal for adding device exceptions: From/To pickers (device or entire network), direction selector (both/outbound/inbound) |
 | `EmojiPicker.svelte` | Categorized emoji grid with search |
 | `ColorPicker.svelte` | Color selection for card accent |
@@ -223,6 +223,8 @@ POST/DELETE /api/settings/server-preferences/blacklist|favourites/:id → toggle
 GET/DELETE /api/logs[/:name]            → log viewer
 GET  /api/lan-access/networks          → discovered networks (zones, SSIDs, subnets, device counts)
 GET  /api/lan-access/networks/:zone/devices → devices in a specific network
+POST /api/lan-access/networks          → create a new network (zone, bridge, SSID, subnet, firewall)
+DELETE /api/lan-access/networks/:zone  → delete a network and all its resources
 PUT  /api/lan-access/rules             → update cross-network zone forwarding rules
 PUT  /api/lan-access/isolation/:zone   → toggle WiFi AP isolation for a network
 GET/POST /api/lan-access/exceptions    → list / add device exceptions
@@ -266,6 +268,33 @@ DELETE /api/lan-access/exceptions/:id  → remove a device exception
 - **proton-wg**: `wg setconf` on the live interface.
 
 All protocols: capture devices from the OLD rule's `from_mac` BEFORE any teardown (VPN device assignments are router-canonical), then re-add them to the new rule after switch.
+
+### MediaTek WiFi driver constraints
+
+**Critical**: MediaTek's `mt_wifi` kernel module reads `BssidNum` from `.dat` files ONLY at module load time. `wifi reload` and `wifi down/up` do NOT reload the module, so new wireless interfaces (e.g. `ra2`, `rax2`) are never created by those commands alone.
+
+**Solution**: `router_lan_access.py`'s `_reload_wifi_driver()` performs a full driver reload:
+`wifi down` → `rmmod mtk_warp_proxy` → `rmmod mt_wifi` → `insmod mt_wifi` → `insmod mtk_warp_proxy` → `wifi up` → firewall/dnsmasq reload
+
+- Runs detached (`&`) via SSH so it survives the SSH disconnect (WiFi drop kills the SSH session)
+- Causes **~15s WiFi outage for ALL clients on ALL bands** — unavoidable on MediaTek hardware
+- Required only for network creation/deletion; other WiFi operations (enable/disable, SSID settings, isolation toggle) only need `wifi reload` which briefly reconnects the affected band(s)
+
+**`.dat` file paths** (active on Flint 2 / MT7986):
+- `/etc/wireless/mediatek/mt7986-ax6000.dbdc.b0.dat` (2.4G radio)
+- `/etc/wireless/mediatek/mt7986-ax6000.dbdc.b1.dat` (5G radio)
+- Referenced by `/etc/wireless/l1profile.dat`. Other `.dat` files in that directory are for different models and are NOT used.
+- Max `BssidNum` is typically 4 per radio (`ra0`–`ra3`, `rax0`–`rax3`) on MT7986.
+
+### fw3 zone name limit (11 characters)
+
+**Critical**: fw3 silently ignores zones with names longer than 11 characters. No error, no warning — just no firewall rules, no NAT, no internet for that zone.
+
+FlintVPN zone name format: `fvpn_` (5 chars) + `zone_id` → `zone_id` max 6 chars. `lan_access_service.py` truncates zone_id to 6 chars and handles collisions.
+
+### VPN routing across bridges
+
+VPN `route_policy` mangle chain matches `br-+` (bridge wildcard), so MAC-based ipset routing works for devices on ANY network bridge (`br-lan`, `br-guest`, `br-fvpn_*`). No special handling needed when creating new networks.
 
 ### Router limits
 - **5 WireGuard UDP tunnels** (`wgclient1`–`wgclient5`, marks `0x1000`–`0x5000`, vpn-client)
