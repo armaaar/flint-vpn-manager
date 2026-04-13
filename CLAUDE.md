@@ -77,8 +77,9 @@ Surface Go 2 (this machine)          GL.iNet Flint 2 Router
 **Every piece of state lives at exactly one source.** Read [docs/source-of-truth.md](docs/source-of-truth.md) for the full schema, field tables, and sync mechanisms.
 
 Key rules:
-- **Router-canonical**: tunnel health, kill switch, profile name, device→VPN assignments, device info — always read live, never cached locally
+- **Router-canonical**: tunnel health, kill switch, profile name, device→VPN assignments (kernel WG + OpenVPN), device info — always read live, never cached locally
 - **Proton-canonical**: server name/country/city/load/score — refreshed every ~15min (loads) / ~3h (full list)
+- **Local+Router** (`profile_store.json` + ipset): proton-wg device assignments — persisted locally in `device_assignments` for recovery after ipset flush, and applied to router ipsets. Local store is source of truth; router ipsets are derived.
 - **Local-only** (`profile_store.json`): color, icon, server_scope, options, wg_key, cert_expiry, non-VPN assignments
 - VPN profiles have **no** `name`, `status`, or `kill_switch` field locally
 - `display_order` is local (unified across all profile types); router section order is synced for routing priority only
@@ -121,7 +122,7 @@ Key rules:
 Main server. Thin routing layer that delegates to `VPNService`. All API endpoints, SSE stream. Backup-to-router and auto-restore-on-unlock helpers.
 
 ### `vpn_service.py` — Business logic
-Core orchestrator. `VPNService` owns `build_profile_list`, profile CRUD, `switch_server`, `change_protocol`, `change_type`, `connect_profile`, `disconnect_profile`, `reorder_profiles`, device assignment. Adds `network_zone` (zone ID like `"fvpn_iot"`) alongside `network` (display label) to each device for SSE-reactive network device lists. No Flask dependency.
+Core orchestrator. `VPNService` owns `build_profile_list`, profile CRUD, `switch_server`, `change_protocol`, `change_type`, `connect_profile`, `disconnect_profile`, `reorder_profiles`, device assignment. Adds `network_zone` (zone ID like `"fvpn_iot"`) alongside `network` (display label) to each device for SSE-reactive network device lists. proton-wg device assignments are persisted locally (`profile_store.json` `device_assignments`) and reconciled to router ipsets via `_reconcile_proton_wg_ipset_members()` after every kernel WG/OVPN connect/disconnect (because `vpn-client restart` flushes all `src_mac_*` ipsets). No Flask dependency.
 
 ### `noint_sync.py` — NoInternet WAN block enforcement
 Manages the `fvpn_noint_ips` ipset + firewall rule that blocks WAN access for NoInternet groups. Extracted from the old `lan_sync.py`. Key functions: `sync_noint_to_router()`, `wipe_noint()`.
@@ -131,6 +132,9 @@ Thin synchronous wrapper around `proton-vpn-api-core`. Login (with 2FA), server 
 
 ### `router_api.py` — Router SSH management
 SSH-based API (Paramiko + key auth) for the Flint 2. Manages WG/OVPN configs via UCI, route policy rules, ipset membership, firewall rules, DHCP leases, gl-clients metadata. Helpers: `get_flint_vpn_rules`, `get_device_assignments`, `get_tunnel_health`, `get_kill_switch`, `get_profile_name`, `rename_profile`, `reorder_vpn_rules`, `heal_anonymous_rule_section`, `from_mac_tokens` (for case-preserving del_list). FlintVPN UCI helpers: `fvpn_uci_apply`, `fvpn_ipset_membership`. Also `read_file`/`write_file` for disaster-recovery backup, `get_router_fingerprint` for restore fingerprint check.
+
+### `router_devices.py` — Device discovery and online detection
+Discovers devices from DHCP leases + `ubus call gl-clients`. For devices on custom bridges (`br-fvpn_*`), online status comes from the ARP neighbor table (`ip neigh show` — `REACHABLE`/`STALE` = online) because `gl-clients` only tracks devices on `br-lan`. WiFi band detection uses `iwinfo` interface names (`ra*` = 2.4G, `rax*` = 5G), which overrides stale `gl-clients` data.
 
 ### `profile_store.py` — Local JSON persistence
 Atomic JSON read/write for the slim local store (UI metadata + non-VPN assignments). `_sanitize_mac_keys()` strips legacy fields on every save so post-refactor data is automatically cleaned up. WireGuard VPN profiles additionally store `wg_key` (base64 Ed25519 private key for persistent cert management) and `cert_expiry` (Unix timestamp).
@@ -151,7 +155,7 @@ Pure functions. Ranking: Proton `score` (lower = better) → blacklist filter �
 Daemon thread, `_poll_loop` every 60s. Four jobs: (1) server data refresh (~15min loads, ~3h full list), (2) server optimization (daily window, `MIN_DWELL_HOURS=6` cooldown), (3) cert renewal (daily, within 30 days of expiry, independent of auto-optimize), (4) blocklist update (daily, downloads community blocklist and uploads to router).
 
 ### `router_lan_access.py` — Router facade for cross-network access control
-Discovers networks from UCI `wireless`/`network`/`firewall` config, builds a list of zones with SSIDs, subnets, device counts, and isolation state. **VPN tunnel zones** (`wgclient*`, `ovpnclient*`, `protonwg*`, `wgserver*`, `ovpnserver*`) are filtered out — they are VPN tunnel interfaces, not real LAN networks, and must never appear on the Networks page or in access rules. Manages fw3 zone `forwarding` entries for cross-network traffic rules, toggles per-SSID AP isolation via `wireless.*.isolate`, and applies per-device iptables ACCEPT rules in the `forwarding_rule` chain (with a firewall include script at `/etc/fvpn/lan_access_rules.sh` for reboot persistence). Network creation/deletion uses `_reload_wifi_driver()` which unloads and reloads the `mt_wifi` kernel module — required because MediaTek's driver reads `BssidNum` from `.dat` files only at module load time (see [MediaTek WiFi Driver Constraints](#mediatek-wifi-driver-constraints)). Key methods: `get_networks()`, `get_zone_forwardings()`, `set_zone_forwarding()`, `set_wifi_isolation()`, `create_network()`, `delete_network()`, `apply_device_exceptions()`, `cleanup_exceptions()`.
+Discovers networks from UCI `wireless`/`network`/`firewall` config, builds a list of zones with SSIDs, subnets, device counts, and isolation state. **VPN tunnel zones** (`wgclient*`, `ovpnclient*`, `protonwg*`, `wgserver*`, `ovpnserver*`) are filtered out — they are VPN tunnel interfaces, not real LAN networks, and must never appear on the Networks page or in access rules. Manages fw3 zone `forwarding` entries for cross-network traffic rules, toggles per-SSID AP isolation via `wireless.*.isolate`, and applies per-device iptables ACCEPT rules in the `forwarding_rule` chain (with a firewall include script at `/etc/fvpn/lan_access_rules.sh` for reboot persistence). Network creation/deletion uses `_reload_wifi_driver()` which unloads and reloads the `mt_wifi` kernel module — required because MediaTek's driver reads `BssidNum` from `.dat` files only at module load time (see [MediaTek WiFi Driver Constraints](#mediatek-wifi-driver-constraints)). Key methods: `get_networks()`, `get_zone_forwardings()`, `set_zone_forwarding()`, `set_wifi_isolation()`, `create_network()`, `delete_network()`, `apply_device_exceptions()`, `cleanup_exceptions()`. **Known minor issue**: `apply_device_exceptions()` and `_write_firewall_include()` can create duplicate `fvpn_lan_exc` jump rules and fwmark ACCEPT rules in `forwarding_rule` chain on repeated calls. Cosmetic only — rules are idempotent.
 
 ### `lan_access_service.py` — LAN access business logic
 Orchestrates `RouterLanAccess` (SSH/UCI) with `config.json` persistence. Separate from `VPNService` because LAN access and VPN routing are orthogonal concerns. Zone IDs are truncated to 6 characters (fw3 zone name limit is 11 chars; `fvpn_` prefix takes 5) with collision handling. Methods: `get_lan_overview()` (networks + access rules + exceptions), `get_network_devices()` (devices by zone/subnet), `create_network()` / `delete_network()` (full network lifecycle with WiFi driver reload), `update_access_rules()` (zone forwarding changes), `set_isolation()` (AP isolation toggle), `add_exception()` / `remove_exception()` (device-level iptables rules), `reapply_all()` (boot recovery). Exceptions are persisted in `config.json` under `lan_access.exceptions` and re-applied on unlock.
@@ -237,7 +241,7 @@ DELETE /api/lan-access/exceptions/:id  → remove a device exception
 
 ### SAFE commands (OK to run via SSH):
 - `uci show/get/set/add_list/del_list/delete/commit/reorder/rename` — config reads/writes
-- `/etc/init.d/vpn-client restart` — only when no tunnels are stuck connecting
+- `/etc/init.d/vpn-client restart` — only when no tunnels are stuck connecting. **Side effect**: flushes ALL `src_mac_*` ipsets, including proton-wg ones managed by FlintVPN. `_reconcile_proton_wg_ipset_members()` in `vpn_service.py` re-adds proton-wg MACs from local store after every kernel WG/OVPN connect/disconnect. `reconcile_proton_wg_ipsets()` runs on app unlock for full recovery (creates ipsets + rebuilds mangle rules).
 - `ipset add/del` — MAC-assignment ipsets
 - `/etc/init.d/firewall reload` — safe (~0.22s, WG survives). **NOT** `firewall restart` (re-runs rtp2.sh). See [docs/proton-wg-internals.md](docs/proton-wg-internals.md).
 - `wg show`, `ifstatus`, `ipset list`, `iptables -L -n`, `ubus call gl-clients list/status`, `cat`, `grep`, `ls`, `ps` — read-only
@@ -296,6 +300,8 @@ FlintVPN zone name format: `fvpn_` (5 chars) + `zone_id` → `zone_id` max 6 cha
 
 VPN `route_policy` mangle chain matches `br-+` (bridge wildcard), so MAC-based ipset routing works for devices on ANY network bridge (`br-lan`, `br-guest`, `br-fvpn_*`). No special handling needed when creating new networks.
 
+**Zone forwarding for VPN traffic**: Custom network zones (`fvpn_*`) only forward to `wan` by default, not to VPN tunnel zones. A global `iptables -I forwarding_rule -m mark ! --mark 0x0/0xf000 -j ACCEPT` rule allows all fwmark-marked traffic from any zone to reach VPN tunnels. Covers all protocols (WG UDP `0x1000`-`0x5000`, WG TCP/TLS `0x6000`/`0x7000`/`0x9000`/`0xf000`, OVPN `0xa000`-`0xe000`, WAN `0x8000`). Written in `lan_access_rules.sh` for reboot persistence.
+
 ### Router limits
 - **5 WireGuard UDP tunnels** (`wgclient1`–`wgclient5`, marks `0x1000`–`0x5000`, vpn-client)
 - **4 WireGuard TCP/TLS tunnels** (`protonwg0`–`protonwg3`, marks `0x6000`/`0x7000`/`0x9000`/`0xf000`, FlintVPN)
@@ -336,9 +342,11 @@ proton-wg (TCP/TLS): FlintVPN → protonwg0-3  → fwmark 0x6000,0x7000,0x9000,0
 OpenVPN:            vpn-client → ovpnclient1-5 → fwmark 0xa000-0xe000
 ```
 
-Key differences from kernel WG: no route_policy rule, no vpn-client, kill switch always on (blackhole route), device assignment via ipset add (not `uci add_list from_mac`), slot allocation checks both live interfaces AND config files.
+Key differences from kernel WG: no route_policy rule, no vpn-client, kill switch always on (blackhole route), device assignment via ipset add (not `uci add_list from_mac`) + local store persistence, slot allocation checks both live interfaces AND config files.
 
 Config files: `/etc/fvpn/protonwg/<iface>.{conf,env}`, `mangle_rules.sh` (firewall include), `/etc/init.d/fvpn-protonwg` (boot persistence).
+
+**Mangle rules must include ALL configured tunnels**, not just those with live interfaces. The ipset-based matching works regardless of interface state. Skipping down tunnels produces empty `mangle_rules.sh` that persists and breaks routing after firewall reload. `_rebuild_proton_wg_mangle_rules()` also creates ipsets (`ipset create ... hash:mac -exist`) before the iptables rules that reference them, and these create commands are included in the persisted script.
 
 See [docs/proton-wg-internals.md](docs/proton-wg-internals.md) for process targeting, mangle ordering, tunnel ID allocation, and other critical constraints.
 
