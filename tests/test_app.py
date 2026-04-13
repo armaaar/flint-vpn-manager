@@ -45,11 +45,17 @@ def tmp_data(tmp_path):
 def client(tmp_data):
     """Flask test client with mocked router/proton APIs."""
     import app as flask_app
+    from service_registry import registry
 
     flask_app.app.config["TESTING"] = True
-    flask_app._session_unlocked = False
-    flask_app._router_api = MagicMock()
-    flask_app._proton_api = MagicMock()
+    registry.session_unlocked = False
+    registry.router = MagicMock()
+    registry.proton = MagicMock()
+    registry.service = None
+
+    # Expose registry fields as app_mod attributes for backward-compatible
+    # test access (e.g., app_mod._reg.router, app_mod._reg.session_unlocked).
+    flask_app._reg = registry
 
     with flask_app.app.test_client() as c:
         yield c, flask_app
@@ -60,11 +66,12 @@ def unlocked_client(client):
     """Test client with session pre-unlocked."""
     from vpn_service import VPNService
     c, app_mod = client
+    reg = app_mod._reg
     # Setup secrets first
     sm.setup("user", "pass", "rpass", "master")
-    app_mod._session_unlocked = True
+    reg.session_unlocked = True
     # Create the service wrapping the same mock objects the tests configure
-    app_mod._service = VPNService(app_mod._router_api, app_mod._proton_api)
+    reg.service = VPNService(reg.router, reg.proton)
     return c, app_mod
 
 
@@ -84,7 +91,7 @@ class TestStatusEndpoint:
         c, app_mod = unlocked_client
         mock_proton = MagicMock()
         mock_proton.is_logged_in = True
-        app_mod._proton_api = mock_proton
+        app_mod._reg.proton = mock_proton
         resp = c.get("/api/status")
         assert resp.json["status"] == "unlocked"
 
@@ -205,8 +212,8 @@ class TestConnectDisconnect:
     def test_connect_returns_health_from_router(self, unlocked_client):
         c, app_mod = unlocked_client
         self._make_vpn_profile(app_mod)
-        app_mod._router_api.bring_tunnel_up.return_value = None
-        app_mod._router_api.get_tunnel_health.return_value = "connecting"
+        app_mod._reg.router.bring_tunnel_up.return_value = None
+        app_mod._reg.router.get_tunnel_health.return_value = "connecting"
 
         resp = c.post("/api/profiles/test-vpn-1/connect")
         assert resp.status_code == 200
@@ -216,8 +223,8 @@ class TestConnectDisconnect:
     def test_connect_does_not_write_status_to_store(self, unlocked_client):
         c, app_mod = unlocked_client
         self._make_vpn_profile(app_mod)
-        app_mod._router_api.bring_tunnel_up.return_value = None
-        app_mod._router_api.get_tunnel_health.return_value = "green"
+        app_mod._reg.router.bring_tunnel_up.return_value = None
+        app_mod._reg.router.get_tunnel_health.return_value = "green"
 
         c.post("/api/profiles/test-vpn-1/connect")
         stored = ps.get_profile("test-vpn-1")
@@ -227,8 +234,8 @@ class TestConnectDisconnect:
         """Strategy.connect() treats bring_up + health as atomic; health failure propagates."""
         c, app_mod = unlocked_client
         self._make_vpn_profile(app_mod)
-        app_mod._router_api.bring_tunnel_up.return_value = None
-        app_mod._router_api.get_tunnel_health.side_effect = Exception("ssh fail")
+        app_mod._reg.router.bring_tunnel_up.return_value = None
+        app_mod._reg.router.get_tunnel_health.side_effect = Exception("ssh fail")
 
         resp = c.post("/api/profiles/test-vpn-1/connect")
         assert resp.status_code == 500
@@ -237,7 +244,7 @@ class TestConnectDisconnect:
     def test_connect_returns_error_when_bring_up_fails(self, unlocked_client):
         c, app_mod = unlocked_client
         self._make_vpn_profile(app_mod)
-        app_mod._router_api.bring_tunnel_up.side_effect = Exception("up failed")
+        app_mod._reg.router.bring_tunnel_up.side_effect = Exception("up failed")
 
         resp = c.post("/api/profiles/test-vpn-1/connect")
         assert resp.status_code == 500
@@ -248,7 +255,7 @@ class TestConnectDisconnect:
     def test_disconnect_returns_red_health(self, unlocked_client):
         c, app_mod = unlocked_client
         self._make_vpn_profile(app_mod)
-        app_mod._router_api.bring_tunnel_down.return_value = None
+        app_mod._reg.router.bring_tunnel_down.return_value = None
 
         resp = c.post("/api/profiles/test-vpn-1/disconnect")
         assert resp.status_code == 200
@@ -258,7 +265,7 @@ class TestConnectDisconnect:
     def test_disconnect_does_not_write_status_to_store(self, unlocked_client):
         c, app_mod = unlocked_client
         self._make_vpn_profile(app_mod)
-        app_mod._router_api.bring_tunnel_down.return_value = None
+        app_mod._reg.router.bring_tunnel_down.return_value = None
 
         c.post("/api/profiles/test-vpn-1/disconnect")
         stored = ps.get_profile("test-vpn-1")
@@ -268,7 +275,7 @@ class TestConnectDisconnect:
         """Stage 2: api_disconnect must not crash when bring_tunnel_down throws."""
         c, app_mod = unlocked_client
         self._make_vpn_profile(app_mod)
-        app_mod._router_api.bring_tunnel_down.side_effect = Exception("down failed")
+        app_mod._reg.router.bring_tunnel_down.side_effect = Exception("down failed")
 
         resp = c.post("/api/profiles/test-vpn-1/disconnect")
         assert resp.status_code == 500
@@ -294,15 +301,15 @@ class TestConnectDisconnect:
                 },
             }],
         })
-        app_mod._router_api.get_flint_vpn_rules.return_value = [{
+        app_mod._reg.router.get_flint_vpn_rules.return_value = [{
             "rule_name": "fvpn_rule_9001",
             "name": "Legacy",
             "killswitch": "1",
             "via_type": "wireguard",
             "peer_id": "9001",
         }]
-        app_mod._router_api.get_device_assignments.return_value = {}
-        app_mod._router_api.get_tunnel_health.return_value = "red"
+        app_mod._reg.router.get_device_assignments.return_value = {}
+        app_mod._reg.router.get_tunnel_health.return_value = "red"
 
         resp = c.get("/api/profiles")
         assert resp.status_code == 200
@@ -314,15 +321,15 @@ class TestConnectDisconnect:
     def test_get_profiles_loading_health_on_router_error(self, unlocked_client):
         c, app_mod = unlocked_client
         self._make_vpn_profile(app_mod)
-        app_mod._router_api.get_flint_vpn_rules.return_value = [{
+        app_mod._reg.router.get_flint_vpn_rules.return_value = [{
             "rule_name": "fvpn_rule_9001",
             "name": "Test VPN",
             "killswitch": "1",
             "via_type": "wireguard",
             "peer_id": "9001",
         }]
-        app_mod._router_api.get_device_assignments.return_value = {}
-        app_mod._router_api.get_tunnel_health.side_effect = Exception("ssh fail")
+        app_mod._reg.router.get_device_assignments.return_value = {}
+        app_mod._reg.router.get_tunnel_health.side_effect = Exception("ssh fail")
 
         resp = c.get("/api/profiles")
         for p in resp.json:
@@ -374,15 +381,15 @@ class TestKillSwitchLive:
     def test_get_profiles_returns_live_kill_switch_from_router(self, unlocked_client):
         c, app_mod = unlocked_client
         self._make_vpn_profile()
-        app_mod._router_api.get_flint_vpn_rules.return_value = [{
+        app_mod._reg.router.get_flint_vpn_rules.return_value = [{
             "rule_name": "fvpn_rule_9001",
             "name": "KS Test",
             "killswitch": "1",
             "via_type": "wireguard",
             "peer_id": "9001",
         }]
-        app_mod._router_api.get_device_assignments.return_value = {}
-        app_mod._router_api.get_tunnel_health.return_value = "green"
+        app_mod._reg.router.get_device_assignments.return_value = {}
+        app_mod._reg.router.get_tunnel_health.return_value = "green"
 
         resp = c.get("/api/profiles")
         assert resp.status_code == 200
@@ -392,15 +399,15 @@ class TestKillSwitchLive:
     def test_get_profiles_kill_switch_false_when_disabled_on_router(self, unlocked_client):
         c, app_mod = unlocked_client
         self._make_vpn_profile()
-        app_mod._router_api.get_flint_vpn_rules.return_value = [{
+        app_mod._reg.router.get_flint_vpn_rules.return_value = [{
             "rule_name": "fvpn_rule_9001",
             "name": "KS Test",
             "killswitch": "0",
             "via_type": "wireguard",
             "peer_id": "9001",
         }]
-        app_mod._router_api.get_device_assignments.return_value = {}
-        app_mod._router_api.get_tunnel_health.return_value = "green"
+        app_mod._reg.router.get_device_assignments.return_value = {}
+        app_mod._reg.router.get_tunnel_health.return_value = "green"
 
         resp = c.get("/api/profiles")
         vpn = [p for p in resp.json if p["type"] == "vpn"][0]
@@ -409,11 +416,11 @@ class TestKillSwitchLive:
     def test_update_kill_switch_writes_to_router(self, unlocked_client):
         c, app_mod = unlocked_client
         self._make_vpn_profile()
-        app_mod._router_api.get_kill_switch.return_value = False
+        app_mod._reg.router.get_kill_switch.return_value = False
 
         resp = c.put("/api/profiles/ks-vpn-1", json={"kill_switch": False})
         assert resp.status_code == 200
-        app_mod._router_api.set_kill_switch.assert_called_with("fvpn_rule_9001", False)
+        app_mod._reg.router.set_kill_switch.assert_called_with("fvpn_rule_9001", False)
         # Response reflects the live router value
         assert resp.json["kill_switch"] is False
         # Local store was not polluted with kill_switch
@@ -423,10 +430,10 @@ class TestKillSwitchLive:
     def test_update_kill_switch_to_true(self, unlocked_client):
         c, app_mod = unlocked_client
         self._make_vpn_profile()
-        app_mod._router_api.get_kill_switch.return_value = True
+        app_mod._reg.router.get_kill_switch.return_value = True
 
         c.put("/api/profiles/ks-vpn-1", json={"kill_switch": True})
-        app_mod._router_api.set_kill_switch.assert_called_with("fvpn_rule_9001", True)
+        app_mod._reg.router.set_kill_switch.assert_called_with("fvpn_rule_9001", True)
 
 
 class TestProfileNameLive:
@@ -458,15 +465,15 @@ class TestProfileNameLive:
     def test_get_profiles_overrides_name_with_router_value(self, unlocked_client):
         c, app_mod = unlocked_client
         self._make_vpn_profile()
-        app_mod._router_api.get_flint_vpn_rules.return_value = [{
+        app_mod._reg.router.get_flint_vpn_rules.return_value = [{
             "rule_name": "fvpn_rule_9001",
             "name": "Live Router Name",
             "killswitch": "1",
             "via_type": "wireguard",
             "peer_id": "9001",
         }]
-        app_mod._router_api.get_device_assignments.return_value = {}
-        app_mod._router_api.get_tunnel_health.return_value = "green"
+        app_mod._reg.router.get_device_assignments.return_value = {}
+        app_mod._reg.router.get_tunnel_health.return_value = "green"
 
         resp = c.get("/api/profiles")
         vpn = [p for p in resp.json if p["type"] == "vpn"][0]
@@ -476,14 +483,14 @@ class TestProfileNameLive:
         c, app_mod = unlocked_client
         self._make_vpn_profile()
         # Router rule exists but has no name set
-        app_mod._router_api.get_flint_vpn_rules.return_value = [{
+        app_mod._reg.router.get_flint_vpn_rules.return_value = [{
             "rule_name": "fvpn_rule_9001",
             "killswitch": "1",
             "via_type": "wireguard",
             "peer_id": "9001",
         }]
-        app_mod._router_api.get_device_assignments.return_value = {}
-        app_mod._router_api.get_tunnel_health.return_value = "green"
+        app_mod._reg.router.get_device_assignments.return_value = {}
+        app_mod._reg.router.get_tunnel_health.return_value = "green"
 
         resp = c.get("/api/profiles")
         vpn = [p for p in resp.json if p["type"] == "vpn"][0]
@@ -493,13 +500,13 @@ class TestProfileNameLive:
     def test_update_profile_name_calls_router_rename_for_wg(self, unlocked_client):
         c, app_mod = unlocked_client
         self._make_vpn_profile(vpn_protocol="wireguard")
-        app_mod._router_api.get_kill_switch.return_value = True
-        app_mod._router_api.get_profile_name.return_value = "Renamed"
+        app_mod._reg.router.get_kill_switch.return_value = True
+        app_mod._reg.router.get_profile_name.return_value = "Renamed"
 
         resp = c.put("/api/profiles/name-vpn-1", json={"name": "Renamed"})
         assert resp.status_code == 200
-        app_mod._router_api.rename_profile.assert_called_once()
-        call_kwargs = app_mod._router_api.rename_profile.call_args.kwargs
+        app_mod._reg.router.rename_profile.assert_called_once()
+        call_kwargs = app_mod._reg.router.rename_profile.call_args.kwargs
         assert call_kwargs["rule_name"] == "fvpn_rule_9001"
         assert call_kwargs["new_name"] == "Renamed"
         assert call_kwargs["peer_id"] == "9001"
@@ -509,13 +516,13 @@ class TestProfileNameLive:
     def test_update_profile_name_calls_router_rename_for_ovpn(self, unlocked_client):
         c, app_mod = unlocked_client
         self._make_vpn_profile(vpn_protocol="openvpn")
-        app_mod._router_api.get_kill_switch.return_value = True
-        app_mod._router_api.get_profile_name.return_value = "OVPN New"
+        app_mod._reg.router.get_kill_switch.return_value = True
+        app_mod._reg.router.get_profile_name.return_value = "OVPN New"
 
         resp = c.put("/api/profiles/name-vpn-1", json={"name": "OVPN New"})
         assert resp.status_code == 200
-        app_mod._router_api.rename_profile.assert_called_once()
-        call_kwargs = app_mod._router_api.rename_profile.call_args.kwargs
+        app_mod._reg.router.rename_profile.assert_called_once()
+        call_kwargs = app_mod._reg.router.rename_profile.call_args.kwargs
         assert call_kwargs["rule_name"] == "fvpn_rule_ovpn_9051"
         assert call_kwargs["client_uci_id"] == "28216_9051"
         assert call_kwargs["peer_id"] == ""
@@ -534,7 +541,7 @@ class TestProfileNameLive:
             }],
         })
         c.put("/api/profiles/novpn-1", json={"name": "Renamed Direct"})
-        app_mod._router_api.rename_profile.assert_not_called()
+        app_mod._reg.router.rename_profile.assert_not_called()
         # Local store should be updated for non-VPN
         assert ps.get_profile("novpn-1")["name"] == "Renamed Direct"
 
@@ -547,9 +554,9 @@ class TestBuildProfileList:
         rules = rules or []
         assignments = assignments or {}
         health_map = health_map or {}
-        app_mod._router_api.get_flint_vpn_rules.return_value = rules
-        app_mod._router_api.get_device_assignments.return_value = assignments
-        app_mod._router_api.get_tunnel_health.side_effect = lambda r: health_map.get(r, "loading")
+        app_mod._reg.router.get_flint_vpn_rules.return_value = rules
+        app_mod._reg.router.get_device_assignments.return_value = assignments
+        app_mod._reg.router.get_tunnel_health.side_effect = lambda r: health_map.get(r, "loading")
 
     def test_get_profiles_uses_router_rules_as_source(self, unlocked_client):
         c, app_mod = unlocked_client
@@ -701,22 +708,22 @@ class TestServerResolutionLive:
         })
 
     def _setup_router(self, app_mod):
-        app_mod._router_api.get_flint_vpn_rules.return_value = [{
+        app_mod._reg.router.get_flint_vpn_rules.return_value = [{
             "rule_name": "fvpn_rule_9001",
             "name": "X",
             "killswitch": "1",
             "via_type": "wireguard",
             "peer_id": "9001",
         }]
-        app_mod._router_api.get_device_assignments.return_value = {}
-        app_mod._router_api.get_tunnel_health.return_value = "green"
+        app_mod._reg.router.get_device_assignments.return_value = {}
+        app_mod._reg.router.get_tunnel_health.return_value = "green"
 
     def test_get_profiles_resolves_server_from_proton(self, unlocked_client):
         c, app_mod = unlocked_client
         self._make_vpn_profile()
         self._setup_router(app_mod)
 
-        app_mod._proton_api.is_logged_in = True
+        app_mod._reg.proton.is_logged_in = True
         live_server = {
             "id": "srv-abc",
             "name": "DE#999",
@@ -725,8 +732,8 @@ class TestServerResolutionLive:
             "city": "Berlin",
             "load": 42,
         }
-        app_mod._proton_api.server_to_dict.return_value = live_server
-        app_mod._proton_api.get_server_by_id.return_value = MagicMock()  # truthy
+        app_mod._reg.proton.server_to_dict.return_value = live_server
+        app_mod._reg.proton.get_server_by_id.return_value = MagicMock()  # truthy
 
         resp = c.get("/api/profiles")
         vpn = [p for p in resp.json if p["type"] == "vpn"][0]
@@ -735,7 +742,7 @@ class TestServerResolutionLive:
         assert vpn["server"]["load"] == 42
         # Endpoint preserved from cache (not in Proton logical server)
         assert vpn["server"]["endpoint"] == "1.2.3.4:51820"
-        app_mod._proton_api.get_server_by_id.assert_called_with("srv-abc")
+        app_mod._reg.proton.get_server_by_id.assert_called_with("srv-abc")
 
     def test_get_profiles_falls_back_to_cache_when_proton_logged_out(self, unlocked_client):
         c, app_mod = unlocked_client
@@ -747,7 +754,7 @@ class TestServerResolutionLive:
         })
         self._setup_router(app_mod)
 
-        app_mod._proton_api.is_logged_in = False
+        app_mod._reg.proton.is_logged_in = False
 
         resp = c.get("/api/profiles")
         vpn = [p for p in resp.json if p["type"] == "vpn"][0]
@@ -764,8 +771,8 @@ class TestServerResolutionLive:
         })
         self._setup_router(app_mod)
 
-        app_mod._proton_api.is_logged_in = True
-        app_mod._proton_api.get_server_by_id.return_value = None
+        app_mod._reg.proton.is_logged_in = True
+        app_mod._reg.proton.get_server_by_id.return_value = None
 
         resp = c.get("/api/profiles")
         vpn = [p for p in resp.json if p["type"] == "vpn"][0]
@@ -817,14 +824,14 @@ class TestDeviceAssignmentsLive:
             }],
             "device_assignments": {},
         })
-        app_mod._router_api.get_flint_vpn_rules.return_value = [{
+        app_mod._reg.router.get_flint_vpn_rules.return_value = [{
             "rule_name": "fvpn_rule_9001",
             "name": "X",
             "peer_id": "9001",
             "via_type": "wireguard",
             "group_id": "1957",
         }]
-        app_mod._router_api.get_device_assignments.return_value = {
+        app_mod._reg.router.get_device_assignments.return_value = {
             "aa:bb:cc:dd:ee:ff": "fvpn_rule_9001"
         }
         resp = c.get("/api/devices")
@@ -841,13 +848,13 @@ class TestDeviceAssignmentsLive:
             }],
             "device_assignments": {"aa:bb:cc:dd:ee:ff": "novpn-1"},
         })
-        app_mod._router_api.get_dhcp_leases.return_value = [
+        app_mod._reg.router.get_dhcp_leases.return_value = [
             {"mac": "aa:bb:cc:dd:ee:ff", "ip": "192.168.8.10", "hostname": "test"}
         ]
-        app_mod._router_api.get_client_details.return_value = {}
-        app_mod._router_api.get_flint_vpn_rules.return_value = []
-        app_mod._router_api.get_device_assignments.return_value = {}
-        app_mod._service.invalidate_device_cache()
+        app_mod._reg.router.get_client_details.return_value = {}
+        app_mod._reg.router.get_flint_vpn_rules.return_value = []
+        app_mod._reg.router.get_device_assignments.return_value = {}
+        app_mod._reg.service.invalidate_device_cache()
         resp = c.get("/api/devices")
         macs = {d["mac"]: d.get("profile_id") for d in resp.json}
         assert macs.get("aa:bb:cc:dd:ee:ff") == "novpn-1"
@@ -863,11 +870,11 @@ class TestDeviceAssignmentsLive:
                                 "peer_id": "9001", "vpn_protocol": "wireguard"},
             }],
         })
-        app_mod._router_api.get_device_assignments.return_value = {}
+        app_mod._reg.router.get_device_assignments.return_value = {}
         resp = c.put("/api/devices/aa:bb:cc:dd:ee:ff/profile",
                      json={"profile_id": "vpn-1"})
         assert resp.status_code == 200
-        app_mod._router_api.set_device_vpn.assert_called_with(
+        app_mod._reg.router.set_device_vpn.assert_called_with(
             "aa:bb:cc:dd:ee:ff", "fvpn_rule_9001"
         )
         # Local store should NOT have a VPN assignment
@@ -883,14 +890,14 @@ class TestDeviceAssignmentsLive:
                 "color": "#888", "icon": "🌐", "is_guest": False,
             }],
         })
-        app_mod._router_api.get_device_assignments.return_value = {}
+        app_mod._reg.router.get_device_assignments.return_value = {}
         c.put("/api/devices/aa:bb:cc:dd:ee:ff/profile",
               json={"profile_id": "novpn-1"})
         # Local store should have the assignment
         stored = ps.load()
         assert stored["device_assignments"].get("aa:bb:cc:dd:ee:ff") == "novpn-1"
         # Router VPN setter should NOT be called
-        app_mod._router_api.set_device_vpn.assert_not_called()
+        app_mod._reg.router.set_device_vpn.assert_not_called()
 
     def test_unassign_device_clears_router_and_local(self, unlocked_client):
         c, app_mod = unlocked_client
@@ -898,12 +905,12 @@ class TestDeviceAssignmentsLive:
             **ps._EMPTY_STORE,
             "device_assignments": {"aa:bb:cc:dd:ee:ff": "novpn-1"},
         })
-        app_mod._router_api.get_device_assignments.return_value = {
+        app_mod._reg.router.get_device_assignments.return_value = {
             "aa:bb:cc:dd:ee:ff": "fvpn_rule_9001"
         }
         c.put("/api/devices/aa:bb:cc:dd:ee:ff/profile",
               json={"profile_id": None})
-        app_mod._router_api.remove_device_from_all_vpn.assert_called_with("aa:bb:cc:dd:ee:ff")
+        app_mod._reg.router.remove_device_from_all_vpn.assert_called_with("aa:bb:cc:dd:ee:ff")
         stored = ps.load()
         # Sticky-None: KEY exists with value None so the device tracker
         # won't auto-reassign on the next unlock/restart.
@@ -917,7 +924,7 @@ class TestDeviceAssignmentsLive:
         c, app_mod = unlocked_client
         ps.save(ps._EMPTY_STORE)  # No local entry for the MAC
         # Router says the device is in a VPN rule
-        app_mod._router_api.get_device_assignments.return_value = {
+        app_mod._reg.router.get_device_assignments.return_value = {
             "aa:bb:cc:dd:ee:ff": "fvpn_rule_9001"
         }
         c.put("/api/devices/aa:bb:cc:dd:ee:ff/profile",
@@ -942,13 +949,13 @@ class TestDeviceAssignmentsLive:
             }],
             "device_assignments": {"aa:bb:cc:dd:ee:ff": None},
         })
-        app_mod._router_api.get_device_assignments.return_value = {}
+        app_mod._reg.router.get_device_assignments.return_value = {}
         c.put("/api/devices/aa:bb:cc:dd:ee:ff/profile",
               json={"profile_id": "vpn-1"})
         stored = ps.load()
         # Local entry dropped (router is the source for VPN assignments)
         assert "aa:bb:cc:dd:ee:ff" not in stored["device_assignments"]
-        app_mod._router_api.set_device_vpn.assert_called_with(
+        app_mod._reg.router.set_device_vpn.assert_called_with(
             "aa:bb:cc:dd:ee:ff", "fvpn_rule_9001"
         )
 
@@ -968,12 +975,12 @@ class TestDeviceEndpoints:
         c, app_mod = unlocked_client
         # Stage 8: device list comes live from router. With empty router state,
         # the list is empty.
-        app_mod._router_api.get_dhcp_leases.return_value = []
-        app_mod._router_api.get_client_details.return_value = {}
-        app_mod._router_api.get_flint_vpn_rules.return_value = []
-        app_mod._router_api.get_device_assignments.return_value = {}
+        app_mod._reg.router.get_dhcp_leases.return_value = []
+        app_mod._reg.router.get_client_details.return_value = {}
+        app_mod._reg.router.get_flint_vpn_rules.return_value = []
+        app_mod._reg.router.get_device_assignments.return_value = {}
         # Make sure cache is fresh
-        app_mod._service.invalidate_device_cache()
+        app_mod._reg.service.invalidate_device_cache()
         resp = c.get("/api/devices")
         assert resp.json == []
 
@@ -984,18 +991,18 @@ class TestDeviceEndpoints:
         pid = create.json["id"]
 
         # Mock router as empty so the device shows up via local-assignment surfacing
-        app_mod._router_api.get_dhcp_leases.return_value = [
+        app_mod._reg.router.get_dhcp_leases.return_value = [
             {"mac": "aa:bb:cc:dd:ee:ff", "ip": "192.168.8.100", "hostname": "TestDev"}
         ]
-        app_mod._router_api.get_client_details.return_value = {}
-        app_mod._router_api.get_flint_vpn_rules.return_value = []
-        app_mod._router_api.get_device_assignments.return_value = {}
-        app_mod._service.invalidate_device_cache()
+        app_mod._reg.router.get_client_details.return_value = {}
+        app_mod._reg.router.get_flint_vpn_rules.return_value = []
+        app_mod._reg.router.get_device_assignments.return_value = {}
+        app_mod._reg.service.invalidate_device_cache()
 
         resp = c.put("/api/devices/aa:bb:cc:dd:ee:ff/profile", json={"profile_id": pid})
         assert resp.json["success"] is True
 
-        app_mod._service.invalidate_device_cache()
+        app_mod._reg.service.invalidate_device_cache()
         devices = c.get("/api/devices").json
         dev = next(d for d in devices if d["mac"] == "aa:bb:cc:dd:ee:ff")
         assert dev["profile_id"] == pid
@@ -1075,7 +1082,7 @@ class TestDeviceLabelEndpoint:
     def test_set_label_writes_to_router(self, unlocked_client):
         c, app_mod = unlocked_client
         # Mock the gl-client lookup
-        app_mod._router_api.exec.return_value = "client_42"
+        app_mod._reg.router.exec.return_value = "client_42"
         resp = c.put("/api/devices/aa:bb:cc:dd:ee:ff/label", json={
             "label": "My TV", "device_class": "television"
         })
@@ -1083,7 +1090,7 @@ class TestDeviceLabelEndpoint:
         assert resp.json["label"] == "My TV"
         # Verify the router was called with the alias write
         all_calls = " | ".join(
-            str(call) for call in app_mod._router_api.exec.call_args_list
+            str(call) for call in app_mod._reg.router.exec.call_args_list
         )
         assert "alias='My TV'" in all_calls
         assert "class='television'" in all_calls
@@ -1093,12 +1100,12 @@ class TestDeviceLabelEndpoint:
 
     def test_clear_label_writes_empty_alias_to_router(self, unlocked_client):
         c, app_mod = unlocked_client
-        app_mod._router_api.exec.return_value = "client_42"
+        app_mod._reg.router.exec.return_value = "client_42"
         resp = c.put("/api/devices/aa:bb:cc:dd:ee:ff/label", json={"label": ""})
         assert resp.json["success"] is True
         assert resp.json["label"] == ""
         all_calls = " | ".join(
-            str(call) for call in app_mod._router_api.exec.call_args_list
+            str(call) for call in app_mod._reg.router.exec.call_args_list
         )
         assert "alias=''" in all_calls
 
@@ -1159,15 +1166,15 @@ class TestBackupAndRestore:
         c, app_mod = unlocked_client
         # Configure mocks: router fingerprint is a string (not MagicMock) so
         # the backup wrapper can JSON-serialize it.
-        app_mod._router_api.get_router_fingerprint.return_value = "aa:bb:cc:11:22:33"
-        app_mod._router_api.write_file.reset_mock()
+        app_mod._reg.router.get_router_fingerprint.return_value = "aa:bb:cc:11:22:33"
+        app_mod._reg.router.write_file.reset_mock()
         # Backup wrapper writes via router.write_file
         ps.save({**ps._EMPTY_STORE, "profiles": [
             {"id": "p1", "type": "no_vpn", "name": "Test",
              "color": "#000", "icon": "🔒", "is_guest": False},
         ]})
         # write_file should have been called with the backup path
-        write_calls = app_mod._router_api.write_file.call_args_list
+        write_calls = app_mod._reg.router.write_file.call_args_list
         assert any(
             call.args[0] == ROUTER_BACKUP_PATH for call in write_calls
         )
@@ -1183,7 +1190,7 @@ class TestBackupAndRestore:
 
     def test_backup_failure_does_not_break_save(self, unlocked_client):
         c, app_mod = unlocked_client
-        app_mod._router_api.write_file.side_effect = RuntimeError("ssh down")
+        app_mod._reg.router.write_file.side_effect = RuntimeError("ssh down")
         # Save should still succeed even though backup fails
         ps.save({**ps._EMPTY_STORE, "profiles": [
             {"id": "p2", "type": "no_vpn", "name": "Test2",
@@ -1214,10 +1221,10 @@ class TestBackupAndRestore:
                 "device_lan_overrides": {},
             },
         }
-        app_mod._router_api.read_file.return_value = json.dumps(backup)
-        app_mod._router_api.get_router_fingerprint.return_value = "aa:bb:cc:11:22:33"
+        app_mod._reg.router.read_file.return_value = json.dumps(backup)
+        app_mod._reg.router.get_router_fingerprint.return_value = "aa:bb:cc:11:22:33"
 
-        check_and_auto_restore(app_mod._router_api)
+        check_and_auto_restore(app_mod._reg.router)
 
         loaded = ps.load()
         assert any(p["id"] == "restored-id" for p in loaded["profiles"])
@@ -1238,11 +1245,11 @@ class TestBackupAndRestore:
                                    "is_guest": False}],
                      "device_assignments": {}, "device_lan_overrides": {}},
         }
-        app_mod._router_api.read_file.return_value = json.dumps(backup)
+        app_mod._reg.router.read_file.return_value = json.dumps(backup)
         # Different fingerprint
-        app_mod._router_api.get_router_fingerprint.return_value = "ff:ee:dd:cc:bb:aa"
+        app_mod._reg.router.get_router_fingerprint.return_value = "ff:ee:dd:cc:bb:aa"
 
-        check_and_auto_restore(app_mod._router_api)
+        check_and_auto_restore(app_mod._reg.router)
 
         # Local store should still be missing (no restore)
         assert not ps.STORE_FILE.exists()
@@ -1269,17 +1276,17 @@ class TestBackupAndRestore:
                                    "is_guest": False}],
                      "device_assignments": {}, "device_lan_overrides": {}},
         }
-        app_mod._router_api.read_file.return_value = json.dumps(backup)
-        app_mod._router_api.get_router_fingerprint.return_value = "aa:bb:cc:11:22:33"
-        app_mod._router_api.write_file.reset_mock()
+        app_mod._reg.router.read_file.return_value = json.dumps(backup)
+        app_mod._reg.router.get_router_fingerprint.return_value = "aa:bb:cc:11:22:33"
+        app_mod._reg.router.write_file.reset_mock()
 
-        check_and_auto_restore(app_mod._router_api)
+        check_and_auto_restore(app_mod._reg.router)
 
         # Local should still be the local-newer version
         loaded = ps.load()
         assert any(p["id"] == "local-newer" for p in loaded["profiles"])
         # Self-heal should have called write_file with backup path
-        write_calls = app_mod._router_api.write_file.call_args_list
+        write_calls = app_mod._reg.router.write_file.call_args_list
         assert any(
             call.args[0] == ROUTER_BACKUP_PATH for call in write_calls
         )
@@ -1288,9 +1295,9 @@ class TestBackupAndRestore:
         c, app_mod = unlocked_client
         if ps.STORE_FILE.exists():
             ps.STORE_FILE.unlink()
-        app_mod._router_api.read_file.return_value = None
+        app_mod._reg.router.read_file.return_value = None
         # Should not raise, should not restore
-        check_and_auto_restore(app_mod._router_api)
+        check_and_auto_restore(app_mod._reg.router)
         assert not ps.STORE_FILE.exists()
 
 
@@ -1325,29 +1332,29 @@ class TestProtonWgConnectDisconnect:
     def test_connect_calls_start_proton_wg_tunnel(self, unlocked_client):
         c, app_mod = unlocked_client
         self._make_proton_wg_profile(app_mod)
-        app_mod._router_api.start_proton_wg_tunnel.return_value = None
-        app_mod._router_api.get_proton_wg_health.return_value = "green"
+        app_mod._reg.router.start_proton_wg_tunnel.return_value = None
+        app_mod._reg.router.get_proton_wg_health.return_value = "green"
 
         resp = c.post("/api/profiles/test-pwg-1/connect")
         assert resp.status_code == 200
         assert resp.json["health"] == "green"
-        app_mod._router_api.start_proton_wg_tunnel.assert_called_once_with(
+        app_mod._reg.router.start_proton_wg_tunnel.assert_called_once_with(
             iface="protonwg0", mark="0x6000", table_num=1006, tunnel_id=303,
         )
         # Should NOT call bring_tunnel_up (that's for kernel WG / OVPN)
-        app_mod._router_api.bring_tunnel_up.assert_not_called()
+        app_mod._reg.router.bring_tunnel_up.assert_not_called()
 
     def test_disconnect_calls_stop_proton_wg_tunnel(self, unlocked_client):
         c, app_mod = unlocked_client
         self._make_proton_wg_profile(app_mod)
-        app_mod._router_api.stop_proton_wg_tunnel.return_value = None
+        app_mod._reg.router.stop_proton_wg_tunnel.return_value = None
 
         resp = c.post("/api/profiles/test-pwg-1/disconnect")
         assert resp.status_code == 200
-        app_mod._router_api.stop_proton_wg_tunnel.assert_called_once_with(
+        app_mod._reg.router.stop_proton_wg_tunnel.assert_called_once_with(
             iface="protonwg0", mark="0x6000", table_num=1006, tunnel_id=303,
         )
-        app_mod._router_api.bring_tunnel_down.assert_not_called()
+        app_mod._reg.router.bring_tunnel_down.assert_not_called()
 
     def test_kernel_wg_still_uses_bring_tunnel_up(self, unlocked_client):
         """Kernel WG (UDP) profiles must NOT go through proton-wg path."""
@@ -1364,13 +1371,13 @@ class TestProtonWgConnectDisconnect:
                 },
             }],
         })
-        app_mod._router_api.bring_tunnel_up.return_value = None
-        app_mod._router_api.get_tunnel_health.return_value = "green"
+        app_mod._reg.router.bring_tunnel_up.return_value = None
+        app_mod._reg.router.get_tunnel_health.return_value = "green"
 
         resp = c.post("/api/profiles/test-udp-1/connect")
         assert resp.status_code == 200
-        app_mod._router_api.bring_tunnel_up.assert_called_once()
-        app_mod._router_api.start_proton_wg_tunnel.assert_not_called()
+        app_mod._reg.router.bring_tunnel_up.assert_called_once()
+        app_mod._reg.router.start_proton_wg_tunnel.assert_not_called()
 
     def test_openvpn_still_uses_bring_tunnel_up(self, unlocked_client):
         """OpenVPN profiles must NOT go through proton-wg path."""
@@ -1387,27 +1394,27 @@ class TestProtonWgConnectDisconnect:
                 },
             }],
         })
-        app_mod._router_api.bring_tunnel_up.return_value = None
-        app_mod._router_api.get_tunnel_health.return_value = "green"
+        app_mod._reg.router.bring_tunnel_up.return_value = None
+        app_mod._reg.router.get_tunnel_health.return_value = "green"
 
         resp = c.post("/api/profiles/test-ovpn-1/connect")
         assert resp.status_code == 200
-        app_mod._router_api.bring_tunnel_up.assert_called_once()
-        app_mod._router_api.start_proton_wg_tunnel.assert_not_called()
+        app_mod._reg.router.bring_tunnel_up.assert_called_once()
+        app_mod._reg.router.start_proton_wg_tunnel.assert_not_called()
 
     def test_delete_proton_wg_calls_stop_and_delete(self, unlocked_client):
         """Deleting a proton-wg profile must call stop + delete, not delete_wireguard_config."""
         c, app_mod = unlocked_client
         self._make_proton_wg_profile(app_mod)
-        app_mod._router_api.stop_proton_wg_tunnel.return_value = None
-        app_mod._router_api.delete_proton_wg_config.return_value = None
+        app_mod._reg.router.stop_proton_wg_tunnel.return_value = None
+        app_mod._reg.router.delete_proton_wg_config.return_value = None
 
         resp = c.delete("/api/profiles/test-pwg-1")
         assert resp.status_code == 200
-        app_mod._router_api.stop_proton_wg_tunnel.assert_called_once()
-        app_mod._router_api.delete_proton_wg_config.assert_called_once()
+        app_mod._reg.router.stop_proton_wg_tunnel.assert_called_once()
+        app_mod._reg.router.delete_proton_wg_config.assert_called_once()
         # Should NOT call kernel WG delete
-        app_mod._router_api.delete_wireguard_config.assert_not_called()
+        app_mod._reg.router.delete_wireguard_config.assert_not_called()
 
     def test_delete_kernel_wg_still_uses_delete_wireguard_config(self, unlocked_client):
         c, app_mod = unlocked_client
@@ -1423,12 +1430,12 @@ class TestProtonWgConnectDisconnect:
                 },
             }],
         })
-        app_mod._router_api.delete_wireguard_config.return_value = None
+        app_mod._reg.router.delete_wireguard_config.return_value = None
 
         resp = c.delete("/api/profiles/test-udp-1")
         assert resp.status_code == 200
-        app_mod._router_api.delete_wireguard_config.assert_called_once()
-        app_mod._router_api.stop_proton_wg_tunnel.assert_not_called()
+        app_mod._reg.router.delete_wireguard_config.assert_called_once()
+        app_mod._reg.router.stop_proton_wg_tunnel.assert_not_called()
 
     def test_update_proton_wg_skips_kill_switch_and_rename(self, unlocked_client):
         """proton-wg profiles: kill_switch is always on, rename is local-only."""
@@ -1442,8 +1449,8 @@ class TestProtonWgConnectDisconnect:
         assert resp.status_code == 200
         assert resp.json["kill_switch"] is True  # Always on for proton-wg
         # Should NOT call router for rename or kill switch
-        app_mod._router_api.rename_profile.assert_not_called()
-        app_mod._router_api.set_kill_switch.assert_not_called()
+        app_mod._reg.router.rename_profile.assert_not_called()
+        app_mod._reg.router.set_kill_switch.assert_not_called()
 
     def test_wg_key_stored_for_proton_wg_profiles(self, unlocked_client):
         """wg_key and cert_expiry must be stored for all WG types including TCP/TLS."""
@@ -1457,16 +1464,16 @@ class TestProtonWgConnectDisconnect:
         """Device assignment for proton-wg must use ipset add, not set_device_vpn."""
         c, app_mod = unlocked_client
         self._make_proton_wg_profile(app_mod)
-        app_mod._router_api.remove_device_from_all_vpn.return_value = None
-        app_mod._router_api.exec.return_value = ""
+        app_mod._reg.router.remove_device_from_all_vpn.return_value = None
+        app_mod._reg.router.exec.return_value = ""
 
         resp = c.put("/api/devices/aa:bb:cc:dd:ee:ff/profile", json={
             "profile_id": "test-pwg-1",
         })
         assert resp.status_code == 200
         # Should call exec for ipset, not set_device_vpn
-        app_mod._router_api.set_device_vpn.assert_not_called()
+        app_mod._reg.router.set_device_vpn.assert_not_called()
         # Verify ipset commands were called
-        exec_calls = [str(c) for c in app_mod._router_api.exec.call_args_list]
+        exec_calls = [str(c) for c in app_mod._reg.router.exec.call_args_list]
         assert any("ipset create src_mac_303" in s for s in exec_calls)
         assert any("ipset add src_mac_303" in s for s in exec_calls)

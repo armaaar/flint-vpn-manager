@@ -28,6 +28,15 @@ from consts import (
     PROTO_WIREGUARD_TLS,
 )
 from tunnel_strategy import get_strategy
+from protocol_limits import (
+    MAX_WG_GROUPS, MAX_OVPN_GROUPS, MAX_PWG_GROUPS,
+    check_protocol_slot, require_protocol_slot,
+)
+from ipset_ops import IpsetOps
+from smart_protocol import SmartProtocolManager
+from device_service import DeviceService
+from profile_keys import local_router_key, router_rule_key
+from profile_healer import ProfileHealer
 
 log = logging.getLogger("flintvpn")
 
@@ -58,83 +67,10 @@ class NotLoggedInError(Exception):
 # ── Module-level helpers ─────────────────────────────────────────────────────
 
 
-def _local_router_key(local_profile: dict) -> tuple:
-    """Stable key for matching a local profile to a router rule.
-
-    Uses (vpn_protocol, peer_id) for WG and (vpn_protocol, client_id) for OVPN.
-    For proton-wg (wireguard-tcp/tls), uses (protocol, tunnel_name) since they
-    don't have peer_id (managed outside vpn-client).
-    """
-    ri = local_profile.get("router_info") or {}
-    vpn_protocol = ri.get("vpn_protocol", PROTO_WIREGUARD)
-    if vpn_protocol.startswith("wireguard-"):
-        # proton-wg: keyed by tunnel_name (protonwg0, protonwg1, etc.)
-        return (vpn_protocol, ri.get("tunnel_name", ""))
-    if vpn_protocol == PROTO_OPENVPN:
-        cid = str(ri.get("client_id", "")).lstrip("peer_").lstrip("client_")
-        return (PROTO_OPENVPN, cid)
-    pid = str(ri.get("peer_id", "")).lstrip("peer_").lstrip("client_")
-    return (PROTO_WIREGUARD, pid)
-
-
-def _router_rule_key(rule: dict) -> tuple:
-    """Stable key for a router rule (matches _local_router_key)."""
-    via = rule.get("via_type", PROTO_WIREGUARD)
-    if via == PROTO_OPENVPN:
-        return (PROTO_OPENVPN, str(rule.get("client_id", "")))
-    return (PROTO_WIREGUARD, str(rule.get("peer_id", "")))
-
-
-def _default_device(mac: str, profile_id=None) -> dict:
-    """Return a device dict with all fields initialized to defaults."""
-    return {
-        "mac": mac, "ip": "", "hostname": "", "label": "",
-        "device_class": "", "profile_id": profile_id, "router_online": False,
-        "iface": "", "rx_speed": 0, "tx_speed": 0, "total_rx": 0,
-        "total_tx": 0, "signal_dbm": None, "link_speed_mbps": None,
-    }
-
-
-def _build_ip_to_network_map(router, leases=None) -> dict:
-    """Build {ip_string: {"label": ..., "zone": ...}} from LAN access networks.
-
-    Best-effort — returns empty dict on failure.  Pass *leases* to avoid a
-    duplicate SSH call when the caller already has them.
-    """
-    import ipaddress
-    try:
-        networks = router.lan_access.get_networks()
-    except Exception:
-        return {}
-    subnets = []
-    for n in networks:
-        subnet_str = n.get("subnet", "")
-        label = " / ".join(s["name"] for s in n.get("ssids", []) if s.get("name")) or n.get("zone", "")
-        zone_id = n.get("id", "")
-        if subnet_str:
-            try:
-                subnets.append((ipaddress.IPv4Network(subnet_str, strict=False), label, zone_id))
-            except ValueError:
-                pass
-    result = {}
-    try:
-        if leases is None:
-            leases = router.get_dhcp_leases()
-        for lease in leases:
-            ip_str = lease.get("ip", "")
-            if not ip_str:
-                continue
-            try:
-                ip = ipaddress.IPv4Address(ip_str)
-                for net, label, zone_id in subnets:
-                    if ip in net:
-                        result[ip_str] = {"label": label, "zone": zone_id}
-                        break
-            except ValueError:
-                continue
-    except Exception:
-        pass
-    return result
+# Backward-compatible aliases for imports from other modules / tests.
+# Canonical implementations live in profile_keys.py.
+_local_router_key = local_router_key
+_router_rule_key = router_rule_key
 
 
 # ── Standalone backup / restore functions ────────────────────────────────────
@@ -297,21 +233,24 @@ class VPNService:
     of returning HTTP responses.
     """
 
-    MAX_WG_GROUPS = 5
-    MAX_OVPN_GROUPS = 5
-    MAX_PWG_GROUPS = 4  # proton-wg TCP/TLS: limited by fwmark address space
+    # Kept as class attrs for backward compatibility (tests reference VPNService.MAX_WG_GROUPS).
+    # Canonical values live in protocol_limits.py.
+    MAX_WG_GROUPS = MAX_WG_GROUPS
+    MAX_OVPN_GROUPS = MAX_OVPN_GROUPS
+    MAX_PWG_GROUPS = MAX_PWG_GROUPS
 
     def __init__(self, router, proton, strategies: dict = None):
         self.router = router
         self.proton = proton
         self.strategies = strategies or {}  # {protocol_str: TunnelStrategy}
+        self._ipset = IpsetOps(router)
+        self._devices = DeviceService(router, self._ipset)
+        self._healer = ProfileHealer(self._ipset)
         self._switch_locks = {}
-        self._device_cache = {"data": None, "ts": 0.0}
-        self._DEVICE_CACHE_TTL = 5
-        # Smart Protocol: in-memory state for pending retries.
-        # {profile_id: {started_at, chain, attempt_idx, original_proto}}
-        self._smart_pending = {}
-        self._smart_lock = threading.Lock()
+        self._smart = SmartProtocolManager(
+            change_protocol_fn=self.change_protocol,
+            get_switch_lock_fn=lambda pid: self._switch_locks.setdefault(pid, threading.RLock()),
+        )
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -364,74 +303,8 @@ class VPNService:
     # ── Self-Heal ────────────────────────────────────────────────────────────
 
     def _heal_duplicate_tunnel_ids(self, store_data: dict, router) -> None:
-        """Fix proton-wg profiles that share a tunnel_id due to reboot-time races.
-
-        _next_tunnel_id() checks live ipsets on the router, but ipsets vanish on
-        reboot.  If two profiles were created between reboots, the second may have
-        received the same tunnel_id, causing device assignments to bleed between
-        groups.  This method detects collisions and allocates fresh IDs.
-        """
-        seen = set()
-        for p in store_data.get("profiles", []):
-            ri = p.get("router_info") or {}
-            tid = ri.get("tunnel_id")
-            if tid is not None and not ri.get("vpn_protocol", "").startswith("wireguard-"):
-                seen.add(tid)
-
-        for p in store_data.get("profiles", []):
-            ri = p.get("router_info") or {}
-            if not ri.get("vpn_protocol", "").startswith("wireguard-"):
-                continue
-            tid = ri.get("tunnel_id")
-            if tid is None:
-                continue
-            if tid not in seen:
-                seen.add(tid)
-                continue
-            self._reassign_tunnel_id(store_data, p, ri, tid, router)
-            seen.add(ri["tunnel_id"])
-
-    def _reassign_tunnel_id(self, store_data, profile, ri, old_tid, router):
-        """Allocate a fresh tunnel_id for a proton-wg profile and update router state."""
-        try:
-            new_tid = router._next_tunnel_id()
-        except RuntimeError:
-            log.error("No free tunnel_id to heal duplicate %d", old_tid)
-            return
-
-        iface = ri.get("tunnel_name", "")
-        old_ipset = ri.get("ipset_name", f"src_mac_{old_tid}")
-        new_ipset = f"src_mac_{new_tid}"
-        log.warning(
-            "Healing duplicate tunnel_id %d for profile %s (%s) -> %d",
-            old_tid, profile.get("id", "?")[:8], iface, new_tid,
-        )
-
-        # Create new ipset and migrate any existing MACs
-        router.exec(f"ipset create {new_ipset} hash:mac -exist")
-        try:
-            members = router.exec(
-                f"ipset list {old_ipset} 2>/dev/null | "
-                f"awk 'p{{print}} /^Members:/{{p=1}}'"
-            ).strip()
-            for mac_line in members.splitlines():
-                mac_val = mac_line.strip()
-                if mac_val:
-                    router.exec(f"ipset add {new_ipset} {mac_val} -exist")
-        except Exception:
-            pass
-
-        # Update .env file on router
-        if iface:
-            env_path = f"{router.PROTON_WG_DIR}/{iface}.env"
-            router.exec(
-                f"sed -i 's/^FVPN_TUNNEL_ID=.*/FVPN_TUNNEL_ID={new_tid}/' {env_path}; "
-                f"sed -i 's/^FVPN_IPSET=.*/FVPN_IPSET={new_ipset}/' {env_path}"
-            )
-
-        ri["tunnel_id"] = new_tid
-        ri["ipset_name"] = new_ipset
-        ps.save(store_data)
+        """Fix proton-wg tunnel ID collisions — delegates to ProfileHealer."""
+        self._healer.heal_duplicate_tunnel_ids(store_data, router)
 
     # ── Profile List ─────────────────────────────────────────────────────────
 
@@ -632,32 +505,9 @@ class VPNService:
         is_proton_wg = vpn_protocol in (PROTO_WIREGUARD_TCP, PROTO_WIREGUARD_TLS)
         wg_transport = {PROTO_WIREGUARD_TCP: "tcp", PROTO_WIREGUARD_TLS: "tls"}.get(vpn_protocol, "udp")
 
-        # Enforce VPN group limits per protocol
+        # Enforce VPN group limits per protocol (centralized in protocol_limits.py)
         if profile_type == PROFILE_TYPE_VPN:
-            existing_profiles = ps.get_profiles()
-            if is_proton_wg:
-                count = len([p for p in existing_profiles if p["type"] == PROFILE_TYPE_VPN
-                             and p.get("router_info", {}).get("vpn_protocol", "").startswith("wireguard-")])
-                if count >= self.MAX_PWG_GROUPS:
-                    raise LimitExceededError(
-                        f"Cannot create more than {self.MAX_PWG_GROUPS} WireGuard TCP/TLS groups "
-                        "(limited by router fwmark address space)."
-                    )
-            elif vpn_protocol == PROTO_WIREGUARD:
-                count = len([p for p in existing_profiles if p["type"] == PROFILE_TYPE_VPN
-                             and p.get("router_info", {}).get("vpn_protocol") == PROTO_WIREGUARD])
-                if count >= self.MAX_WG_GROUPS:
-                    raise LimitExceededError(
-                        f"Cannot create more than {self.MAX_WG_GROUPS} WireGuard UDP groups. "
-                        "Try WireGuard TCP/TLS or OpenVPN instead."
-                    )
-            elif vpn_protocol == PROTO_OPENVPN:
-                count = len([p for p in existing_profiles if p.get("router_info", {}).get("vpn_protocol") == PROTO_OPENVPN])
-                if count >= self.MAX_OVPN_GROUPS:
-                    raise LimitExceededError(
-                        f"Cannot create more than {self.MAX_OVPN_GROUPS} OpenVPN groups. "
-                        "Try WireGuard instead, or delete an existing OpenVPN group."
-                    )
+            require_protocol_slot(vpn_protocol)
 
         router_info = None
         server_info = None
@@ -915,28 +765,8 @@ class VPNService:
         is_proton_wg = vpn_protocol in (PROTO_WIREGUARD_TCP, PROTO_WIREGUARD_TLS)
         wg_transport = {PROTO_WIREGUARD_TCP: "tcp", PROTO_WIREGUARD_TLS: "tls"}.get(vpn_protocol, "udp")
 
-        # Check limits
-        existing = ps.get_profiles()
-        if is_proton_wg:
-            count = len([p for p in existing
-                         if p["type"] == PROFILE_TYPE_VPN
-                         and p.get("router_info", {}).get("vpn_protocol", "").startswith("wireguard-")
-                         and p["id"] != profile_id])
-            if count >= self.MAX_PWG_GROUPS:
-                raise LimitExceededError(f"WireGuard TCP/TLS limit reached ({self.MAX_PWG_GROUPS})")
-        elif vpn_protocol == PROTO_WIREGUARD:
-            count = len([p for p in existing
-                         if p["type"] == PROFILE_TYPE_VPN
-                         and p.get("router_info", {}).get("vpn_protocol") == PROTO_WIREGUARD
-                         and p["id"] != profile_id])
-            if count >= self.MAX_WG_GROUPS:
-                raise LimitExceededError(f"WireGuard UDP limit reached ({self.MAX_WG_GROUPS})")
-        elif vpn_protocol == PROTO_OPENVPN:
-            count = len([p for p in existing
-                         if p.get("router_info", {}).get("vpn_protocol") == PROTO_OPENVPN
-                         and p["id"] != profile_id])
-            if count >= self.MAX_OVPN_GROUPS:
-                raise LimitExceededError(f"OpenVPN limit reached ({self.MAX_OVPN_GROUPS})")
+        # Check limits (centralized in protocol_limits.py)
+        require_protocol_slot(vpn_protocol, exclude_profile_id=profile_id)
 
         # Create tunnel
         server = self.proton.get_server_by_id(server_id)
@@ -961,8 +791,7 @@ class VPNService:
             try:
                 if is_proton_wg:
                     ipset_name = router_info.get("ipset_name", f"src_mac_{router_info.get('tunnel_id', 0)}")
-                    self.router.exec(f"ipset create {ipset_name} hash:mac -exist")
-                    self.router.exec(f"ipset add {ipset_name} {mac} -exist")
+                    self._ipset.ensure_and_add(ipset_name, mac)
                 else:
                     self.router.set_device_vpn(mac, router_info["rule_name"])
             except Exception as e:
@@ -1150,38 +979,15 @@ class VPNService:
                 if not is_ovpn_transport_change:
                     raise ValueError("Protocol is already " + old_proto)
 
-            # Check limits for the new protocol (don't count current profile)
-            existing = ps.get_profiles()
-            if is_new_proton_wg:
-                count = len([p for p in existing
-                             if p["type"] == PROFILE_TYPE_VPN
-                             and p.get("router_info", {}).get("vpn_protocol", "").startswith("wireguard-")
-                             and p["id"] != profile_id])
-                if count >= self.MAX_PWG_GROUPS:
-                    raise LimitExceededError(f"WireGuard TCP/TLS limit reached ({self.MAX_PWG_GROUPS})")
-            elif new_vpn_protocol == PROTO_WIREGUARD:
-                count = len([p for p in existing
-                             if p["type"] == PROFILE_TYPE_VPN
-                             and p.get("router_info", {}).get("vpn_protocol") == PROTO_WIREGUARD
-                             and p["id"] != profile_id])
-                if count >= self.MAX_WG_GROUPS:
-                    raise LimitExceededError(f"WireGuard UDP limit reached ({self.MAX_WG_GROUPS})")
-            elif new_vpn_protocol == PROTO_OPENVPN:
-                count = len([p for p in existing
-                             if p.get("router_info", {}).get("vpn_protocol") == PROTO_OPENVPN
-                             and p["id"] != profile_id])
-                if count >= self.MAX_OVPN_GROUPS:
-                    raise LimitExceededError(f"OpenVPN limit reached ({self.MAX_OVPN_GROUPS})")
+            # Check limits for the new protocol (centralized in protocol_limits.py)
+            require_protocol_slot(new_vpn_protocol, exclude_profile_id=profile_id)
 
             # 1. Capture assigned devices before teardown
             assigned_macs = []
             if is_old_proton_wg:
                 ipset_name = old_ri.get("ipset_name", f"src_mac_{old_ri.get('tunnel_id', 0)}")
                 try:
-                    members = self.router.exec(
-                        f"ipset list {ipset_name} 2>/dev/null | awk 'p{{print}} /^Members:/{{p=1}}'"
-                    ).strip()
-                    assigned_macs = [m.strip().lower() for m in members.splitlines() if m.strip()]
+                    assigned_macs = [m.lower() for m in self._ipset.list_members(ipset_name)]
                 except Exception as e:
                     log.warning(f"change_protocol: failed to read ipset {ipset_name}: {e}")
             elif old_ri.get("rule_name"):
@@ -1223,8 +1029,7 @@ class VPNService:
                 try:
                     if is_new_proton_wg:
                         new_ipset = new_ri.get("ipset_name", f"src_mac_{new_ri.get('tunnel_id', 0)}")
-                        self.router.exec(f"ipset create {new_ipset} hash:mac -exist")
-                        self.router.exec(f"ipset add {new_ipset} {mac} -exist")
+                        self._ipset.ensure_and_add(new_ipset, mac)
                     else:
                         self.router.set_device_vpn(mac, new_ri["rule_name"])
                 except Exception as e:
@@ -1264,24 +1069,7 @@ class VPNService:
 
     # ── Tunnel Control ───────────────────────────────────────────────────────
 
-    # ── Smart Protocol ──────────────────────────────────────────────────────
-    #
-    # Non-blocking protocol fallback. connect_profile() returns immediately;
-    # tick_smart_protocol() is called every SSE tick (10s) to monitor pending
-    # retries and switch protocols when a tunnel doesn't establish.
-
-    # Smart Protocol fallback order: WireGuard variants first (faster, same
-    # cert/key, zero-flicker switch), then progressively harder-to-block
-    # protocols, ending with OpenVPN (requires full teardown + recreate).
-    SMART_PROTOCOL_CHAIN = [
-        (PROTO_WIREGUARD, "udp"),
-        (PROTO_WIREGUARD_TCP, "tcp"),
-        (PROTO_WIREGUARD_TLS, "tls"),
-        (PROTO_OPENVPN, "udp"),
-        (PROTO_OPENVPN, "tcp"),
-    ]
-
-    SMART_CONNECT_TIMEOUT = 45  # seconds before trying next protocol
+    # ── Smart Protocol (delegates to SmartProtocolManager) ─────────────────
 
     def connect_profile(self, profile_id):
         """Bring a VPN profile's tunnel up. Returns immediately.
@@ -1320,203 +1108,25 @@ class VPNService:
 
             # Register for smart protocol monitoring if enabled
             opts = profile.get("options") or {}
-            if opts.get("smart_protocol") and profile_id not in self._smart_pending:
-                self._smart_register(profile_id, proto)
+            if opts.get("smart_protocol") and not self._smart.is_pending(profile_id):
+                self._smart.register(profile_id, proto)
 
             return {"success": True, "health": health}
         except Exception as e:
             log.error(f"Failed to connect profile '{profile['name']}': {e}", exc_info=True)
             raise
 
-    def _smart_register(self, profile_id, current_proto):
-        """Register a profile for smart protocol monitoring."""
-        chain = [
-            (p, t) for p, t in self.SMART_PROTOCOL_CHAIN
-            if p != current_proto
-        ]
-        # Tor and Secure Core servers are WireGuard-only on Proton —
-        # exclude OpenVPN from the fallback chain for these profiles
-        profile = ps.get_profile(profile_id)
-        if profile:
-            features = (profile.get("server_scope") or {}).get("features") or {}
-            if features.get("tor") or features.get("secure_core"):
-                chain = [(p, t) for p, t in chain if p != PROTO_OPENVPN]
-        with self._smart_lock:
-            self._smart_pending[profile_id] = {
-                "started_at": time.time(),
-                "chain": chain,
-                "attempt_idx": -1,  # -1 = still on original protocol
-                "original_proto": current_proto,
-            }
-
     def _smart_cancel(self, profile_id):
         """Cancel smart protocol monitoring for a profile."""
-        with self._smart_lock:
-            self._smart_pending.pop(profile_id, None)
-
-    def _smart_has_slot(self, profile_id, proto):
-        """Check if there's an available slot for a protocol."""
-        existing = ps.get_profiles()
-        if proto == PROTO_WIREGUARD:
-            count = len([p for p in existing
-                         if p["type"] == PROFILE_TYPE_VPN
-                         and p.get("router_info", {}).get("vpn_protocol") == PROTO_WIREGUARD
-                         and p["id"] != profile_id])
-            return count < self.MAX_WG_GROUPS
-        if proto in (PROTO_WIREGUARD_TCP, PROTO_WIREGUARD_TLS):
-            count = len([p for p in existing
-                         if p["type"] == PROFILE_TYPE_VPN
-                         and (p.get("router_info", {}).get("vpn_protocol") or "").startswith("wireguard-")
-                         and p["id"] != profile_id])
-            return count < self.MAX_PWG_GROUPS
-        if proto == PROTO_OPENVPN:
-            count = len([p for p in existing
-                         if p.get("router_info", {}).get("vpn_protocol") == PROTO_OPENVPN
-                         and p["id"] != profile_id])
-            return count < self.MAX_OVPN_GROUPS
-        return False
+        self._smart.cancel(profile_id)
 
     def tick_smart_protocol(self):
-        """Called every SSE tick (~10s). Check pending smart protocol retries.
-
-        For each pending profile:
-        - If connected (green/amber): done, remove from pending.
-        - If still connecting and timeout not reached: wait.
-        - If timeout reached: disconnect, switch to next protocol, connect.
-        - If all protocols exhausted: remove from pending, log warning.
-        """
-        with self._smart_lock:
-            pending_ids = list(self._smart_pending)
-        if not pending_ids:
-            return
-
-        for profile_id in pending_ids:
-            state = self._smart_pending.get(profile_id)
-            if state is None:
-                continue  # Cancelled by disconnect_profile between snapshot and access
-            profile = ps.get_profile(profile_id)
-            if not profile or profile.get("type") != PROFILE_TYPE_VPN:
-                self._smart_cancel(profile_id)
-                continue
-
-            ri = profile.get("router_info", {})
-            if not ri.get("rule_name"):
-                self._smart_cancel(profile_id)
-                continue
-
-            proto = ri.get("vpn_protocol", PROTO_WIREGUARD)
-            try:
-                strategy = get_strategy(proto)
-                health = strategy.get_health(self.router, ri)
-            except Exception:
-                continue  # SSH error — retry next tick
-
-            if health in ("green", "amber"):
-                log.info(f"Smart Protocol: {profile_id} connected on {proto}")
-                self._smart_cancel(profile_id)
-                continue
-
-            elapsed = time.time() - state["started_at"]
-            if elapsed < self.SMART_CONNECT_TIMEOUT:
-                continue  # Still waiting for current protocol
-
-            # Timeout — try next protocol. Use per-profile switch lock to
-            # prevent concurrent SSE tabs from double-switching.
-            lock = self._switch_locks.setdefault(profile_id, threading.RLock())
-            if not lock.acquire(blocking=False):
-                continue  # Another thread (SSE tab or user action) is switching this profile
-
-            try:
-                # Re-check under lock: user may have disconnected/deleted
-                with self._smart_lock:
-                    if profile_id not in self._smart_pending:
-                        continue
-
-                state["attempt_idx"] += 1
-                idx = state["attempt_idx"]
-
-                # Skip protocols without available slots
-                while idx < len(state["chain"]):
-                    next_proto, _ = state["chain"][idx]
-                    if self._smart_has_slot(profile_id, next_proto):
-                        break
-                    idx += 1
-                    state["attempt_idx"] = idx
-
-                if idx >= len(state["chain"]):
-                    log.warning(f"Smart Protocol: all protocols exhausted for {profile_id}")
-                    self._smart_cancel(profile_id)
-                    continue
-
-                next_proto, next_transport = state["chain"][idx]
-                log.info(f"Smart Protocol: switching {profile_id} from {proto} to {next_proto}")
-
-                # Clear port + custom_dns — ports differ per protocol, and
-                # custom DNS only works with kernel WireGuard (UCI-managed)
-                profile = ps.get_profile(profile_id)
-                if not profile:
-                    self._smart_cancel(profile_id)
-                    continue
-                opts = dict(profile.get("options") or {})
-                opts.pop("port", None)
-                if next_proto != PROTO_WIREGUARD:
-                    opts.pop("custom_dns", None)
-                ps.update_profile(profile_id, options=opts)
-
-                # change_protocol handles disconnect + teardown + recreate.
-                # We hold _switch_locks[profile_id] (RLock), so change_protocol's
-                # acquire will succeed (reentrant).
-                self.change_protocol(
-                    profile_id, next_proto,
-                    ovpn_protocol=next_transport if next_proto == PROTO_OPENVPN else "udp",
-                )
-
-                # Connect with new protocol
-                profile = ps.get_profile(profile_id)
-                if not profile:
-                    self._smart_cancel(profile_id)
-                    continue
-                new_ri = profile.get("router_info", {})
-                new_strategy = get_strategy(next_proto)
-                new_strategy.connect(self.router, new_ri)
-
-                # Reset timer for the new protocol attempt
-                with self._smart_lock:
-                    if profile_id in self._smart_pending:
-                        self._smart_pending[profile_id]["started_at"] = time.time()
-            except Exception as e:
-                log.warning(f"Smart Protocol: failed for {profile_id}: {e}")
-                with self._smart_lock:
-                    if profile_id in self._smart_pending:
-                        self._smart_pending[profile_id]["started_at"] = time.time()
-            finally:
-                lock.release()
+        """Called every SSE tick (~10s). Delegates to SmartProtocolManager."""
+        self._smart.tick(self.router)
 
     def get_smart_protocol_status(self):
-        """Return smart protocol retry status for SSE streaming.
-
-        Returns:
-            Dict of {profile_id: {attempting, attempt, total, elapsed}}.
-        """
-        with self._smart_lock:
-            snapshot = dict(self._smart_pending)
-        result = {}
-        for pid, state in snapshot.items():
-            idx = state["attempt_idx"]
-            chain = state["chain"]
-            if idx < 0:
-                attempting = state["original_proto"]
-            elif idx < len(chain):
-                attempting = chain[idx][0]
-            else:
-                attempting = None
-            result[pid] = {
-                "attempting": attempting,
-                "attempt": max(idx + 2, 1),  # +1 for original, +1 for 0-index
-                "total": len(chain) + 1,
-                "elapsed": int(time.time() - state["started_at"]),
-            }
-        return result
+        """Return smart protocol retry status for SSE streaming."""
+        return self._smart.get_status()
 
     def disconnect_profile(self, profile_id):
         """Bring a VPN profile's tunnel down.
@@ -1640,316 +1250,51 @@ class VPNService:
 
     # ── Device Assignment Resolution ─────────────────────────────────────────
 
+    # ── Device operations (delegate to DeviceService) ─────────────────────
+
     def _resolve_device_assignments(self, store_data: dict) -> dict:
-        """Return {mac: profile_id} merging router VPN assignments + local non-VPN.
-
-        VPN assignments come from router.from_mac (canonical). Matching is by
-        stable (vpn_protocol, peer_id|client_id) key -- survives section
-        renames by the GL.iNet UI.
-        Non-VPN/NoInternet assignments come from local profile_store.
-        """
-        # (protocol, id) -> local profile_id  AND  router_section_name -> local profile_id
-        key_to_pid = {}
-        rule_section_to_pid = {}
-        for p in store_data.get("profiles", []):
-            if p.get("type") == PROFILE_TYPE_VPN:
-                k = _local_router_key(p)
-                if k[1]:
-                    key_to_pid[k] = p["id"]
-                rn = (p.get("router_info") or {}).get("rule_name")
-                if rn:
-                    rule_section_to_pid[rn] = p["id"]
-
-        try:
-            rules = self.router.get_flint_vpn_rules()
-        except Exception:
-            rules = []
-        # router section name -> local profile_id, resolved via stable key
-        section_to_pid = {}
-        for rule in rules:
-            section = rule.get("rule_name", "")
-            if not section:
-                continue
-            key = _router_rule_key(rule)
-            pid = key_to_pid.get(key) or rule_section_to_pid.get(section)
-            if pid:
-                section_to_pid[section] = pid
-
-        try:
-            vpn_assignments_raw = self.router.get_device_assignments()
-        except Exception:
-            vpn_assignments_raw = {}
-
-        out = {}
-        for mac, section in vpn_assignments_raw.items():
-            pid = section_to_pid.get(section)
-            if pid:
-                out[mac] = pid
-            # Else: orphan rule on router -- device shows as unassigned
-
-        # proton-wg profiles: read ipset membership directly
-        for p in store_data.get("profiles", []):
-            ri = p.get("router_info") or {}
-            if not ri.get("vpn_protocol", "").startswith("wireguard-"):
-                continue
-            ipset_name = ri.get("ipset_name", f"src_mac_{ri.get('tunnel_id', 0)}")
-            try:
-                members = self.router.exec(
-                    f"ipset list {ipset_name} 2>/dev/null | awk 'p{{print}} /^Members:/{{p=1}}'"
-                ).strip()
-                for mac_line in members.splitlines():
-                    mac_val = mac_line.strip().lower()
-                    if mac_val:
-                        out[mac_val] = p["id"]
-            except Exception:
-                pass
-
-        # Non-VPN: local store
-        for mac, pid in store_data.get("device_assignments", {}).items():
-            if pid is None:
-                continue
-            for p in store_data.get("profiles", []):
-                if p.get("id") == pid and p.get("type") != PROFILE_TYPE_VPN:
-                    out[mac] = pid
-                    break
-        return out
-
-    # ── Device List ──────────────────────────────────────────────────────────
+        """Return {mac: profile_id} — delegates to DeviceService."""
+        return self._devices.resolve_assignments(store_data)
 
     def build_devices_live(self) -> list:
-        """Build the device list from live router data.
-
-        Sources:
-          - DHCP leases (router /tmp/dhcp.leases): mac, ip, hostname
-          - GL.iNet client tracking (ubus call gl-clients list): online, speeds,
-            signal, alias (= user-set label), device_class
-          - Router from_mac lists: VPN profile assignment (via _resolve_device_assignments)
-          - Local store: non-VPN profile assignment + LAN access overrides
-
-        Hostname / IP / online / class / label / speeds are NEVER cached on disk.
-        Display name precedence: gl-client.alias > DHCP hostname > MAC.
-        """
-        router = self.router
-        try:
-            leases = router.get_dhcp_leases()
-        except Exception:
-            leases = []
-        try:
-            client_details = router.get_client_details()
-        except Exception:
-            client_details = {}
-
-        store_data = ps.load()
-        assignment_map = self._resolve_device_assignments(store_data)
-
-        devices = {}
-        for lease in leases:
-            mac = lease["mac"].lower()
-            d = _default_device(mac, assignment_map.get(mac))
-            d["ip"] = lease.get("ip", "")
-            d["hostname"] = lease.get("hostname", "")
-            devices[mac] = d
-
-        for mac, details in client_details.items():
-            mac = mac.lower()
-            d = devices.setdefault(mac, _default_device(mac, assignment_map.get(mac)))
-            d["router_online"] = bool(details.get("online", False))
-            d["device_class"] = details.get("device_class", "")
-            d["label"] = details.get("alias", "")  # router-canonical custom label
-            d["rx_speed"] = details.get("rx_speed", 0)
-            d["tx_speed"] = details.get("tx_speed", 0)
-            d["total_rx"] = details.get("total_rx", 0)
-            d["total_tx"] = details.get("total_tx", 0)
-            d["signal_dbm"] = details.get("signal_dbm")
-            d["link_speed_mbps"] = details.get("link_speed_mbps")
-            d["iface"] = details.get("iface", "")
-            if details.get("ip") and not d.get("ip"):
-                d["ip"] = details["ip"]
-            # gl-clients exposes a 'name' field (mDNS/Bonjour discovered hostname)
-            # for devices not currently in DHCP leases. Use it as a hostname fallback
-            # so offline / recently-departed devices still display their name.
-            if not d.get("hostname") and details.get("name"):
-                d["hostname"] = details["name"]
-
-        # Router-only MACs (e.g. assigned via SSH but never seen via DHCP)
-        for mac, pid in assignment_map.items():
-            if mac not in devices:
-                devices[mac] = _default_device(mac, pid)
-
-        # Resolve device IP → network name (reuse leases to avoid duplicate SSH call)
-        network_map = _build_ip_to_network_map(self.router, leases=leases)
-
-        out = []
-        for mac, d in sorted(devices.items()):
-            d["display_name"] = d.get("label") or d.get("hostname") or mac
-            d["last_seen"] = None  # legacy field, no longer tracked
-            net_info = network_map.get(d.get("ip", ""), {})
-            d["network"] = net_info.get("label", "")
-            d["network_zone"] = net_info.get("zone", "")
-            out.append(d)
-        return out
+        """Build device list from live router data — delegates to DeviceService."""
+        return self._devices.build_devices_live()
 
     def get_devices_cached(self) -> list:
-        """5-second TTL wrapper around build_devices_live to throttle SSH calls."""
-        now = time.time()
-        if self._device_cache["data"] is not None and (now - self._device_cache["ts"]) < self._DEVICE_CACHE_TTL:
-            return self._device_cache["data"]
-        self._device_cache["data"] = self.build_devices_live()
-        self._device_cache["ts"] = now
-        return self._device_cache["data"]
+        """5-second TTL device cache — delegates to DeviceService."""
+        return self._devices.get_devices_cached()
 
     def invalidate_device_cache(self):
         """Invalidate the in-memory device cache."""
-        self._device_cache["data"] = None
-        self._device_cache["ts"] = 0.0
-
-    # ── Device Assignment ────────────────────────────────────────────────────
+        self._devices.invalidate_cache()
 
     def assign_device(self, mac, profile_id):
-        """Assign a device to a profile.
-
-        VPN assignments are written ONLY to the router (source of truth).
-        Non-VPN/NoInternet assignments are written to local profile_store.
-
-        Raises:
-            ValueError: If the MAC address is invalid.
-            NotFoundError: If the target profile is not found.
-        """
-        mac = ps.validate_mac(mac)
-
-        store_data = ps.load()
-
-        # Always clear any router VPN rule containing this MAC (idempotent).
-        # NoInternet membership is handled by the LAN sync at the end (single
-        # ipset, derived from local assignments).
-        try:
-            self.router.remove_device_from_all_vpn(mac)
-        except Exception as e:
-            log.warning(f"remove_device_from_all_vpn({mac}) failed: {e}")
-
-        # Apply new assignment
-        if profile_id:
-            new_profile = ps.get_profile(profile_id)
-            if not new_profile:
-                raise NotFoundError("Profile not found")
-
-            if new_profile["type"] == PROFILE_TYPE_VPN and new_profile.get("router_info"):
-                ri = new_profile["router_info"]
-                proto = ri.get("vpn_protocol", PROTO_WIREGUARD)
-                # Router is the source for VPN assignments. Drop any local
-                # entry so we don't double-track (and so a future unassign
-                # can write a fresh sticky-None marker).
-                if mac in store_data.get("device_assignments", {}):
-                    del store_data["device_assignments"][mac]
-                    ps.save(store_data)
-                if proto.startswith("wireguard-"):
-                    # proton-wg: add MAC to ipset directly (no route_policy rule).
-                    # Also persist locally — ipsets are ephemeral and lost on
-                    # firewall reload / app restart. Local store is the backup.
-                    ipset_name = ri.get("ipset_name", f"src_mac_{ri.get('tunnel_id', 0)}")
-                    self.router.exec(f"ipset create {ipset_name} hash:mac -exist")
-                    self.router.exec(f"ipset add {ipset_name} {mac} -exist")
-                    ps.assign_device(mac, profile_id)
-                else:
-                    # Kernel WG / OpenVPN: use route_policy rule
-                    self.router.set_device_vpn(mac, ri["rule_name"])
-            else:
-                # no_vpn / no_internet -- local store; LAN sync below applies the
-                # router-side execution (NoInternet ipset membership).
-                ps.assign_device(mac, profile_id)
-        else:
-            # Explicit unassign. Write a sticky-None marker so the device tracker
-            # won't auto-reassign this MAC to the guest group on the next unlock
-            # or restart (the in-memory _known_macs set is wiped on every fresh
-            # tracker instance, so the local store is the only durable signal).
-            ps.assign_device(mac, None)
-
-        target = ps.get_profile(profile_id)["name"] if profile_id and ps.get_profile(profile_id) else "Unassigned"
-        log.info(f"Device {mac} assigned to '{target}'")
-
-        # Single sync handles both LAN access (per-group ipsets) and NoInternet
-        # (the global fvpn_noint_ips ipset).
-        try:
-            self.sync_noint_to_router()
-        except Exception as e:
-            log.warning(f"LAN sync after assignment failed: {e}")
-
-        self.sync_adblock_to_router()
-
-        # Invalidate the device cache so the next /api/devices call sees the new assignment
-        self.invalidate_device_cache()
-
-    # ── Device Label ─────────────────────────────────────────────────────────
+        """Assign a device to a profile — delegates to DeviceService."""
+        self._devices.assign_device(
+            mac, profile_id,
+            sync_noint_fn=self.sync_noint_to_router,
+            sync_adblock_fn=self.sync_adblock_to_router,
+        )
 
     def set_device_label(self, mac, label, device_class=""):
-        """Set a custom label and/or device class for a device.
-
-        gl-client.alias and gl-client.class are router-canonical.
-        No local cache write -- build_devices_live reads them from the router live.
-        """
-        mac_upper = mac.upper()
-        existing = self.router.exec(
-            f"uci show gl-client 2>/dev/null | grep -B1 \"mac='{mac_upper}'\" | "
-            "grep '=client' | head -1 | cut -d. -f2 | cut -d= -f1"
-        ).strip()
-        if existing:
-            section = existing
-        else:
-            self.router.exec(f"uci add gl-client client")
-            section = self.router.exec(
-                "uci show gl-client 2>/dev/null | grep '=client' | tail -1 | "
-                "cut -d. -f2 | cut -d= -f1"
-            ).strip()
-            self.router.exec(f"uci set gl-client.{section}.mac='{mac_upper}'")
-
-        cmds = [f"uci set gl-client.{section}.alias='{label}'"]
-        if device_class:
-            cmds.append(f"uci set gl-client.{section}.class='{device_class}'")
-        cmds.append("uci commit gl-client")
-        self.router.exec(" && ".join(cmds))
-
-        # Invalidate cache so next device query picks up the change
-        self.invalidate_device_cache()
+        """Set a custom label / device class — delegates to DeviceService."""
+        self._devices.set_device_label(mac, label, device_class)
 
     # ── proton-wg ipset reconciliation ──────────────────────────────────────
 
     def _reconcile_proton_wg_ipset_members(self):
         """Re-add proton-wg device MACs to their ipsets from local store.
 
-        Called after vpn-client restart, which flushes ALL src_mac_* ipsets
-        (including proton-wg ones managed by FlintVPN, not vpn-client).
-        Lightweight: only does ipset add, no mangle rebuild.
+        Delegates to IpsetOps. Called after vpn-client restart.
         """
-        store_data = ps.load()
-        for p in store_data.get("profiles", []):
-            ri = p.get("router_info") or {}
-            if not ri.get("vpn_protocol", "").startswith("wireguard-"):
-                continue
-            tunnel_id = ri.get("tunnel_id", 0)
-            ipset_name = ri.get("ipset_name", f"src_mac_{tunnel_id}")
-            for mac, pid in store_data.get("device_assignments", {}).items():
-                if pid == p["id"]:
-                    self.router.exec(f"ipset add {ipset_name} {mac} -exist")
+        self._ipset.reconcile_proton_wg_members()
 
     def reconcile_proton_wg_ipsets(self):
-        """Ensure proton-wg ipsets exist for running tunnels and rebuild mangle rules.
+        """Ensure proton-wg ipsets exist, populate, and rebuild mangle rules.
 
-        Ipsets are ephemeral — they vanish on firewall reload or app restart.
-        This recreates them from device assignments in the local store and
-        rebuilds the mangle rules script. Called on app unlock.
+        Delegates to IpsetOps. Called on app unlock.
         """
-        store_data = ps.load()
-        for p in store_data.get("profiles", []):
-            ri = p.get("router_info") or {}
-            if not ri.get("vpn_protocol", "").startswith("wireguard-"):
-                continue
-            tunnel_id = ri.get("tunnel_id", 0)
-            ipset_name = ri.get("ipset_name", f"src_mac_{tunnel_id}")
-            self.router.exec(f"ipset create {ipset_name} hash:mac -exist")
-            for mac, pid in store_data.get("device_assignments", {}).items():
-                if pid == p["id"]:
-                    self.router.exec(f"ipset add {ipset_name} {mac} -exist")
-        self.router._rebuild_proton_wg_mangle_rules()
+        self._ipset.reconcile_proton_wg_full()
 
     # ── LAN Access Control ───────────────────────────────────────────────────
 

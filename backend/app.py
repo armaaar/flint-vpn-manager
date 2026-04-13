@@ -30,6 +30,7 @@ from vpn_service import (
     NotLoggedInError, backup_local_state_to_router, check_and_auto_restore,
     ROUTER_BACKUP_PATH, BACKUP_FORMAT_VERSION,
 )
+from service_registry import registry as _registry
 
 import pathlib as _pathlib
 _PROJECT_ROOT = _pathlib.Path(__file__).resolve().parent.parent
@@ -71,59 +72,39 @@ access_handler = logging.FileHandler(ACCESS_LOG)
 access_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
 access_logger.addHandler(access_handler)
 
-# ── Global State ──────────────────────────────────────────────────────────────
-
-_proton_api: Optional[ProtonAPI] = None
-_router_api: Optional[RouterAPI] = None
-_service: Optional[VPNService] = None
-_session_unlocked = False
-
-SSH_KEY_PATH = "/home/armaaar/.ssh/id_ed25519"
+# ── Global State (backed by ServiceRegistry) ─────────────────────────────────
+#
+# The canonical state lives in service_registry.registry. Module-level
+# properties are kept for backward compatibility with tests that set
+# app._session_unlocked, app._router_api, etc. directly.
 
 
 def _get_proton():
-    global _proton_api
-    if _proton_api is None:
-        _proton_api = ProtonAPI()
-    return _proton_api
+    return _registry.get_proton()
 
 
 def _get_router():
-    global _router_api
-    if _router_api is None:
-        config = sm.get_config()
-        _router_api = RouterAPI(
-            host=config.get("router_ip", "192.168.8.1"),
-            key_filename=SSH_KEY_PATH,
-        )
-    return _router_api
+    return _registry.get_router()
 
 
 def _get_service() -> VPNService:
-    """Return the VPNService instance. Raises if session is not unlocked."""
-    if _service is None:
-        raise RuntimeError("Service not initialized. Unlock first.")
-    return _service
+    return _registry.get_service()
 
 
 def require_unlocked(f):
     """Decorator that returns 401 if the session is locked."""
     @functools.wraps(f)
     def wrapper(*args, **kwargs):
-        if not _session_unlocked:
+        if not _registry.session_unlocked:
             return jsonify({"error": "Session locked. POST /api/unlock first."}), 401
         return f(*args, **kwargs)
     return wrapper
 
 
 def _invalidate_device_cache():
-    """Invalidate the in-memory device cache.
-
-    Thin wrapper that delegates to the service. Kept as a module-level
-    function for backward compatibility with tests that import it directly.
-    """
-    if _service is not None:
-        _service.invalidate_device_cache()
+    """Invalidate the in-memory device cache."""
+    if _registry.service is not None:
+        _registry.service.invalidate_device_cache()
 
 
 # ── Status / Setup / Unlock ───────────────────────────────────────────────────
@@ -133,7 +114,7 @@ def api_status():
     """App status: setup-needed, locked, or unlocked."""
     if not sm.is_setup():
         return jsonify({"status": "setup-needed"})
-    if not _session_unlocked:
+    if not _registry.session_unlocked:
         return jsonify({"status": "locked"})
     return jsonify({
         "status": "unlocked",
@@ -163,23 +144,22 @@ def api_setup():
 @app.route("/api/unlock", methods=["POST"])
 def api_unlock():
     """Unlock session with master password."""
-    global _session_unlocked, _service
     data = request.json
     if "master_password" not in data:
         return jsonify({"error": "master_password required"}), 400
 
     try:
         sm.unlock(data["master_password"])
-        _session_unlocked = True
+        _registry.session_unlocked = True
 
         # Create the VPN service
         router = _get_router()
         proton = _get_proton()
-        _service = VPNService(router, proton)
+        _registry.service = VPNService(router, proton)
 
         # Register backup callback so every save() pushes to router
         ps.register_save_callback(
-            lambda path: backup_local_state_to_router(_service.router, path)
+            lambda path: backup_local_state_to_router(_registry.service.router, path)
         )
 
         # Auto-restore local state from router backup if newer (silent disaster
@@ -202,13 +182,13 @@ def api_unlock():
         # Reconcile router LAN execution layer (UCI ipsets + rules) with the
         # restored / local intent.
         try:
-            _service.sync_noint_to_router()
+            _registry.service.sync_noint_to_router()
         except Exception as e:
             log.warning(f"NoInternet sync on unlock failed: {e}")
 
         # Reconcile proton-wg ipsets (ephemeral, lost on restart/reload)
         try:
-            _service.reconcile_proton_wg_ipsets()
+            _registry.service.reconcile_proton_wg_ipsets()
         except Exception as e:
             log.warning(f"proton-wg ipset reconciliation failed: {e}")
 
@@ -221,10 +201,10 @@ def api_unlock():
         # Start auto-optimizer
         try:
             start_optimizer(
-                get_proton=lambda: _service.proton,
-                get_router=lambda: _service.router,
-                switch_fn=_service.switch_server,
-                build_profile_list_fn=lambda r, d, proton=None: _service.build_profile_list(d),
+                get_proton=lambda: _registry.service.proton,
+                get_router=lambda: _registry.service.router,
+                switch_fn=_registry.service.switch_server,
+                build_profile_list_fn=lambda r, d, proton=None: _registry.service.build_profile_list(d),
             )
         except Exception as e:
             log.warning(f"Auto-optimizer start failed: {e}")
@@ -242,9 +222,7 @@ def api_lock():
     the auto-optimizer. The next request that needs an unlocked session will
     return 401 until /api/unlock is called again.
     """
-    global _session_unlocked, _service
-    _session_unlocked = False
-    _service = None
+    _registry.reset()
     try:
         stop_tracker()
     except Exception as e:
@@ -807,7 +785,7 @@ def api_stream():
     - Tunnel health per VPN profile (green/amber/red)
     - Device count changes
     """
-    if not _session_unlocked:
+    if not _registry.session_unlocked:
         return Response("data: {\"error\": \"locked\"}\n\n", mimetype="text/event-stream", status=401)
 
     def generate():
@@ -967,10 +945,9 @@ def api_update_settings():
 
     # Reset router API if IP changed
     if "router_ip" in data:
-        global _router_api
-        _router_api = None
-        if _service is not None:
-            _service.router = _get_router()
+        _registry.router = None
+        if _registry.service is not None:
+            _registry.service.router = _get_router()
 
     return jsonify(config)
 
