@@ -1,26 +1,25 @@
 /** Global reactive stores for the app. */
 import { writable, derived } from 'svelte/store';
+import type { Profile, Device, SSEEvent, SmartProtocolStatus, ToastMessage, AppStatus } from '../types';
+import { api } from '../api';
 
-export const appStatus = writable('loading'); // 'loading' | 'setup-needed' | 'locked' | 'unlocked'
-export const profiles = writable([]);
-export const devices = writable([]);
-export const protonLoggedIn = writable(false);
-export const toastMessage = writable(null); // { text, error }
-export const movingDevices = writable(new Set()); // MACs of devices being reassigned
-export const smartProtocolStatus = writable({}); // {profile_id: {attempting, attempt, total, elapsed}}
+export const appStatus = writable<AppStatus>('loading');
+export const profiles = writable<Profile[]>([]);
+export const devices = writable<Device[]>([]);
+export const protonLoggedIn = writable<boolean>(false);
+export const toastMessage = writable<ToastMessage | null>(null);
+export const movingDevices = writable<Set<string>>(new Set());
+export const smartProtocolStatus = writable<Record<string, SmartProtocolStatus>>({});
 
 // SSE connection
-let sseSource = null;
+let sseSource: EventSource | null = null;
 
-export function startSSE() {
+export function startSSE(): void {
   if (sseSource) sseSource.close();
   sseSource = new EventSource('/api/stream');
-  sseSource.onmessage = (e) => {
+  sseSource.onmessage = (e: MessageEvent) => {
     try {
-      const data = JSON.parse(e.data);
-      // Tunnel health, kill switch, and profile names are pulled live from the
-      // router every tick. No local cache: the UI displays whatever the SSE
-      // event reports.
+      const data: SSEEvent = JSON.parse(e.data);
       if (data.tunnel_health || data.kill_switch || data.profile_names) {
         profiles.update(list => {
           if (data.tunnel_health) {
@@ -60,20 +59,27 @@ export function startSSE() {
   };
 }
 
-export function stopSSE() {
+export function stopSSE(): void {
   if (sseSource) { sseSource.close(); sseSource = null; }
 }
 
-export function showToast(text, error = false) {
+export function showToast(text: string, error = false): void {
   toastMessage.set({ text, error });
   setTimeout(() => toastMessage.set(null), 3500);
 }
 
-// Derived stores
-export const unassignedDevices = derived(devices, $d => $d.filter(d => !d.profile_id));
+/** Reload profiles and devices from the API. Replaces duplicated fetch+set blocks. */
+export async function reloadData(): Promise<void> {
+  const [p, d] = await Promise.all([api.getProfiles(), api.getDevices()]);
+  profiles.set(p);
+  devices.set(d);
+}
 
-export function devicesForProfile(profileId) {
-  let result = [];
+// Derived stores
+export const unassignedDevices = derived(devices, ($d: Device[]) => $d.filter(d => !d.profile_id));
+
+export function devicesForProfile(profileId: string): Device[] {
+  let result: Device[] = [];
   devices.subscribe(d => { result = d.filter(x => x.profile_id === profileId); })();
   return result;
 }

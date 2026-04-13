@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { get } from 'svelte/store';
-import { profiles, devices, appStatus, unassignedDevices, showToast, toastMessage } from '../lib/stores/app.js';
+import { profiles, devices, appStatus, unassignedDevices, showToast, toastMessage } from '../lib/stores/app';
 
 describe('appStatus store', () => {
   it('defaults to loading', () => {

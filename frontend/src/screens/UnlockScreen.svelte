@@ -1,24 +1,22 @@
-<script>
-  import { api } from '../api.js';
-  import { appStatus, profiles, devices, protonLoggedIn, startSSE, showToast } from '../stores/app.js';
+<script lang="ts">
+  import { api } from '../lib/api';
+  import { appStatus, protonLoggedIn, startSSE, reloadData } from '../lib/stores/app';
 
   let password = '';
   let error = '';
 
   async function doUnlock() {
     error = '';
-    const res = await api.unlock(password);
-    if (res.error) { error = res.error; return; }
+    await api.unlock(password);
     appStatus.set('unlocked');
     // Load initial data
-    const [p, d, st] = await Promise.all([api.getProfiles(), api.getDevices(), api.getStatus()]);
-    profiles.set(p);
-    devices.set(d);
+    await reloadData();
+    const st = await api.getStatus();
     protonLoggedIn.set(st.proton_logged_in || false);
     startSSE();
   }
 
-  function onKeydown(e) {
+  function onKeydown(e: KeyboardEvent) {
     if (e.key === 'Enter') doUnlock();
   }
 </script>

@@ -1,10 +1,11 @@
-<script>
-  import { deviceIcon, isOnline, isStale, isRandomMac } from '../device-utils.js';
-  import { timeAgo, formatSpeed } from '../format.js';
-  import { movingDevices } from '../stores/app.js';
+<script lang="ts">
+  import { deviceIcon, isOnline, isStale, isRandomMac } from '../../utils/device';
+  import { timeAgo, formatSpeed } from '../../utils/format';
+  import { movingDevices } from '../../stores/app';
   import { createEventDispatcher } from 'svelte';
+  import type { Device } from '../../types';
 
-  export let device;
+  export let device: Device;
   const dispatch = createEventDispatcher();
 
   $: online = isOnline(device);

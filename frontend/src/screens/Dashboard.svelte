@@ -1,15 +1,15 @@
 <script>
-  import { profiles, devices, unassignedDevices, protonLoggedIn, showToast, movingDevices } from '../stores/app.js';
-  import { api } from '../api.js';
-  import { deviceIcon, isRandomMac, isOnline } from '../device-utils.js';
+  import { profiles, devices, unassignedDevices, protonLoggedIn, showToast, movingDevices, reloadData } from '../lib/stores/app';
+  import { api } from '../lib/api';
+  import { deviceIcon, isRandomMac, isOnline } from '../lib/utils/device';
   import { dndzone } from 'svelte-dnd-action';
-  import GroupCard from './GroupCard.svelte';
-  import DeviceModal from './DeviceModal.svelte';
-  import GroupModal from './GroupModal.svelte';
-  import ServerPicker from './ServerPicker.svelte';
-  import SettingsPage from './SettingsPage.svelte';
-  import LanAccessPage from './LanAccessPage.svelte';
-  import LogsModal from './LogsModal.svelte';
+  import GroupCard from '../lib/components/groups/GroupCard.svelte';
+  import DeviceModal from '../lib/components/modals/DeviceModal.svelte';
+  import GroupModal from '../lib/components/groups/GroupModal.svelte';
+  import ServerPicker from '../lib/components/server/ServerPicker.svelte';
+  import SettingsPage from '../lib/components/settings/SettingsPage.svelte';
+  import LanAccessPage from '../lib/components/lan/LanAccessPage.svelte';
+  import LogsModal from '../lib/components/modals/LogsModal.svelte';
 
   let refreshing = false;
   let initialLoading = true;
@@ -89,9 +89,7 @@
   }
 
   async function reload() {
-    const [p, d] = await Promise.all([api.getProfiles(), api.getDevices()]);
-    profiles.set(p);
-    devices.set(d);
+    await reloadData();
   }
 
   function handleGroupDndConsider(e) {

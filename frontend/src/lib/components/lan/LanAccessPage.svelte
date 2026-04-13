@@ -1,10 +1,10 @@
 <script>
-  import { api } from '../api.js';
-  import { devices, showToast } from '../stores/app.js';
-  import { isOnline } from '../device-utils.js';
+  import { api } from '../../api';
+  import { devices, showToast } from '../../stores/app';
+  import { isOnline } from '../../utils/device';
   import { createEventDispatcher, onMount } from 'svelte';
   import ExceptionModal from './ExceptionModal.svelte';
-  import DeviceModal from './DeviceModal.svelte';
+  import DeviceModal from '../modals/DeviceModal.svelte';
 
   const dispatch = createEventDispatcher();
 

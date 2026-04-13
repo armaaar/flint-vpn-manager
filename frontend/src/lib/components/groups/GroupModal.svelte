@@ -1,9 +1,9 @@
 <script>
-  import { api } from '../api.js';
-  import { profiles, showToast } from '../stores/app.js';
-  import EmojiPicker from './EmojiPicker.svelte';
-  import ColorPicker from './ColorPicker.svelte';
-  import HelpTooltip from './HelpTooltip.svelte';
+  import { api } from '../../api';
+  import { profiles, showToast } from '../../stores/app';
+  import EmojiPicker from '../ui/EmojiPicker.svelte';
+  import ColorPicker from '../ui/ColorPicker.svelte';
+  import HelpTooltip from '../ui/HelpTooltip.svelte';
   import { createEventDispatcher } from 'svelte';
 
   /** For create mode: controls visibility. */

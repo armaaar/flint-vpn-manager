@@ -1,5 +1,5 @@
-<script>
-  import { toastMessage } from '../stores/app.js';
+<script lang="ts">
+  import { toastMessage } from '../../stores/app';
 </script>
 
 {#if $toastMessage}

@@ -1,6 +1,6 @@
-<script>
-  import { api } from '../api.js';
-  import { appStatus, showToast } from '../stores/app.js';
+<script lang="ts">
+  import { api } from '../lib/api';
+  import { appStatus, showToast } from '../lib/stores/app';
 
   let protonUser = '', protonPass = '', totp = '';
   let routerPass = '', routerIp = '192.168.8.1';
@@ -15,8 +15,8 @@
       proton_user: protonUser, proton_pass: protonPass,
       router_pass: routerPass, router_ip: routerIp,
       master_password: master,
-    });
-    if (res.error) { error = res.error; return; }
+    }) as Record<string, unknown>;
+    if (res.error) { error = res.error as string; return; }
     showToast('Setup complete!');
     appStatus.set('locked');
   }

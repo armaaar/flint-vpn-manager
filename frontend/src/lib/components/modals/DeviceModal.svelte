@@ -1,8 +1,8 @@
 <script>
-  import { api } from '../api.js';
-  import { profiles, showToast } from '../stores/app.js';
-  import { timeAgo, formatBytes, formatSpeed } from '../format.js';
-  import { isOnline, isRandomMac, DEVICE_TYPES, deviceTypeLabel } from '../device-utils.js';
+  import { api } from '../../api';
+  import { profiles, showToast } from '../../stores/app';
+  import { timeAgo, formatBytes, formatSpeed } from '../../utils/format';
+  import { isOnline, isRandomMac, DEVICE_TYPES, deviceTypeLabel } from '../../utils/device';
   import { createEventDispatcher } from 'svelte';
   export let device = null;
   const dispatch = createEventDispatcher();

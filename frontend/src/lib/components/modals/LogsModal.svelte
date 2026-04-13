@@ -1,6 +1,6 @@
 <script>
-  import { api } from '../api.js';
-  import { showToast } from '../stores/app.js';
+  import { api } from '../../api';
+  import { showToast } from '../../stores/app';
   import { createEventDispatcher } from 'svelte';
 
   export let visible = false;

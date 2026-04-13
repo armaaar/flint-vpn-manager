@@ -3,7 +3,7 @@ import {
   timeAgo, isOnline, isStale, isRandomMac,
   formatBytes, formatSpeed, deviceIcon, loadBarColor,
   DEVICE_TYPES, deviceTypeLabel, countryFlag, countryName,
-} from '../lib/utils.js';
+} from '../lib/utils/index';
 
 describe('timeAgo', () => {
   it('returns "never" for null', () => {

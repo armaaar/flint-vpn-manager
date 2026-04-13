@@ -1,11 +1,11 @@
 <script>
   import { onMount } from 'svelte';
-  import { api } from './lib/api.js';
-  import { appStatus, profiles, devices, protonLoggedIn, startSSE } from './lib/stores/app.js';
-  import SetupScreen from './lib/components/SetupScreen.svelte';
-  import UnlockScreen from './lib/components/UnlockScreen.svelte';
-  import Dashboard from './lib/components/Dashboard.svelte';
-  import Toast from './lib/components/Toast.svelte';
+  import { api } from './lib/api';
+  import { appStatus, profiles, devices, protonLoggedIn, startSSE } from './lib/stores/app';
+  import SetupScreen from './screens/SetupScreen.svelte';
+  import UnlockScreen from './screens/UnlockScreen.svelte';
+  import Dashboard from './screens/Dashboard.svelte';
+  import Toast from './lib/components/ui/Toast.svelte';
 
   onMount(async () => {
     const status = await api.getStatus();

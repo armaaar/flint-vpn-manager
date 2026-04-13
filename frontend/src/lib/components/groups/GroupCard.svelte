@@ -1,11 +1,13 @@
 <script>
-  import { devices, profiles, showToast, movingDevices, smartProtocolStatus } from '../stores/app.js';
-  import { api } from '../api.js';
-  import { isOnline, deviceIcon } from '../device-utils.js';
-  import { countryFlagUrl } from '../country.js';
+  import { devices, profiles, showToast, movingDevices, smartProtocolStatus, reloadData } from '../../stores/app';
+  import { api } from '../../api';
+  import { isOnline, deviceIcon } from '../../utils/device';
+  import { countryFlagUrl } from '../../utils/country';
+  import { derivedConnState, getStatusClass, getStatusLabel, getStatusBorderColor } from '../../utils/profile';
+  import { buildGradient } from '../../utils/color';
 
   import { dndzone } from 'svelte-dnd-action';
-  import DeviceRow from './DeviceRow.svelte';
+  import DeviceRow from '../devices/DeviceRow.svelte';
   import { createEventDispatcher } from 'svelte';
 
   export let profile;
@@ -61,9 +63,7 @@
     }
     if (newDevices.length > 0) {
       await new Promise(r => setTimeout(r, 0)); // let other finalize handlers run first
-      const [p, dList] = await Promise.all([api.getProfiles(), api.getDevices()]);
-      profiles.set(p);
-      devices.set(dList);
+      await reloadData();
       movingDevices.update(s => { newDevices.forEach(d => s.delete(d.mac)); return new Set(s); });
     }
   }
@@ -74,80 +74,10 @@
   $: connState = derivedConnState(profile);
   $: statusClass = getStatusClass(profile);
   $: statusLabel = getStatusLabel(profile);
-  $: headerGradient = buildGradient(profile);
+  $: headerGradient = buildGradient(profile, connState);
   $: statusBorderColor = getStatusBorderColor(profile);
   $: isTransitioning = connState === 'transitioning';
   $: smartStatus = $smartProtocolStatus[profile.id] || null;
-
-  function derivedConnState(p) {
-    if (p.type !== 'vpn') return p.type;
-    const h = p.health;
-    if (h === 'green' || h === 'amber') return 'connected';
-    if (h === 'connecting' || h === 'loading') return 'transitioning';
-    return 'disconnected';
-  }
-
-  function getStatusBorderColor(p) {
-    if (p.type !== 'vpn') return '#636e72'; // grey for No VPN / No Internet
-    const cs = derivedConnState(p);
-    if (cs === 'connected') return '#2ecc71'; // green
-    if (cs === 'transitioning') return '#f1c40f'; // yellow
-    return '#636e72'; // grey for disconnected
-  }
-
-  function getStatusClass(p) {
-    if (p.type === 'vpn') {
-      const cs = derivedConnState(p);
-      if (cs === 'connected') return 'connected';
-      if (cs === 'transitioning') return 'reconnecting';
-      return 'disconnected';
-    }
-    if (p.type === 'no_vpn') return 'novpn';
-    return 'nointernet';
-  }
-
-  function getStatusLabel(p) {
-    if (p.type === 'vpn') {
-      const h = p.health;
-      if (h === 'green' || h === 'amber') return 'CONNECTED';
-      if (h === 'connecting') return 'CONNECTING...';
-      if (h === 'loading') return 'CHECKING...';
-      return 'NOT CONNECTED';
-    }
-    if (p.type === 'no_vpn') return 'NO VPN';
-    return 'NO INTERNET';
-  }
-
-  function hexToHSL(hex) {
-    hex = hex.replace('#', '');
-    const r = parseInt(hex.substring(0, 2), 16) / 255;
-    const g = parseInt(hex.substring(2, 4), 16) / 255;
-    const b = parseInt(hex.substring(4, 6), 16) / 255;
-    const max = Math.max(r, g, b), min = Math.min(r, g, b);
-    let h, s, l = (max + min) / 2;
-    if (max === min) { h = s = 0; }
-    else {
-      const d = max - min;
-      s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-      if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
-      else if (max === g) h = ((b - r) / d + 2) / 6;
-      else h = ((r - g) / d + 4) / 6;
-    }
-    return [Math.round(h * 360), Math.round(s * 100), Math.round(l * 100)];
-  }
-
-  function buildGradient(p) {
-    const [h, s] = hexToHSL(p.color || '#00aaff');
-    let cs;
-    if (p.type === 'vpn') cs = derivedConnState(p);
-    else cs = p.type;
-    if (cs === 'connected') return `linear-gradient(135deg, hsl(${h},${Math.min(s,50)}%,18%) 0%, hsl(${h},${Math.min(s+10,85)}%,35%) 50%, hsl(${h},${Math.min(s+15,90)}%,50%) 100%)`;
-    if (cs === 'transitioning') return `linear-gradient(135deg, hsl(${h},${Math.min(s,30)}%,20%) 0%, hsl(${h},${Math.min(s,50)}%,32%) 50%, hsl(${h},${Math.min(s,55)}%,42%) 100%)`;
-    if (cs === 'no_vpn') return `linear-gradient(135deg, hsl(${h},${Math.min(s,40)}%,16%) 0%, hsl(${h},${Math.min(s,60)}%,30%) 50%, hsl(${h},${Math.min(s+10,70)}%,45%) 100%)`;
-    if (cs === 'no_internet') return `linear-gradient(135deg, hsl(${h},${Math.max(s-30,8)}%,14%) 0%, hsl(${h},${Math.max(s-20,12)}%,22%) 50%, hsl(${h},${Math.max(s-10,15)}%,30%) 100%)`;
-    // disconnected — desaturated
-    return `linear-gradient(135deg, hsl(${h},${Math.max(s-30,5)}%,14%) 0%, hsl(${h},${Math.max(s-20,8)}%,22%) 50%, hsl(${h},${Math.max(s-10,12)}%,30%) 100%)`;
-  }
 
   async function connect() {
     if (!profile.server) {

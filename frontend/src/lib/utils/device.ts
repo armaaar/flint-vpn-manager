@@ -1,8 +1,9 @@
 /** Device-related utility functions and constants. */
 
-import { parseUTC } from './format.js';
+import { parseUTC } from './format';
+import type { Device } from './types';
 
-export function isOnline(d) {
+export function isOnline(d: Device): boolean {
   // Use router's online status (source of truth) if available
   if (d.router_online !== undefined) return d.router_online;
   // Fallback to timestamp
@@ -11,25 +12,21 @@ export function isOnline(d) {
   return (Date.now() - t.getTime()) / 1000 < 300;
 }
 
-export function isStale(d) {
-  // Stage 8: last_seen is no longer tracked. The "stale" concept (>30d
-  // since last seen) is not meaningful anymore — gl-clients shows
-  // currently-known devices and that's the canonical present-tense view.
+export function isStale(d: Device): boolean {
   const t = parseUTC(d.last_seen);
   if (!t) return false;
   return (Date.now() - t.getTime()) / 1000 > 86400 * 30;
 }
 
-export function isRandomMac(mac) {
-  return mac && mac.length >= 2 && '26ae'.includes(mac[1].toLowerCase());
+export function isRandomMac(mac: string): boolean {
+  return !!mac && mac.length >= 2 && '26ae'.includes(mac[1].toLowerCase());
 }
 
 /**
  * GL.iNet router device class -> icon + label mapping.
  * These match the router dashboard's device type dropdown exactly.
- * The UCI config stores the `class` field (e.g. 'computer', 'phone', 'pad').
  */
-export const DEVICE_TYPES = {
+export const DEVICE_TYPES: Record<string, { icon: string; label: string }> = {
   computer:         { icon: '🖥️', label: 'Desktop' },
   phone:            { icon: '📱', label: 'Phone' },
   pad:              { icon: '📱', label: 'Tablet PC' },
@@ -47,7 +44,7 @@ export const DEVICE_TYPES = {
   switch:           { icon: '🔌', label: 'Switch' },
 };
 
-export function deviceIcon(d) {
+export function deviceIcon(d: Device | string): string {
   const cls = typeof d === 'object' ? d.device_class : '';
   if (cls && DEVICE_TYPES[cls]) return DEVICE_TYPES[cls].icon;
   // Fallback: guess from hostname
@@ -60,7 +57,7 @@ export function deviceIcon(d) {
   return '💻';
 }
 
-export function deviceTypeLabel(cls) {
+export function deviceTypeLabel(cls: string): string {
   if (cls && DEVICE_TYPES[cls]) return DEVICE_TYPES[cls].label;
   return '';
 }
