@@ -1313,6 +1313,11 @@ class VPNService:
             health = strategy.connect(self.router, ri)
             log.info(f"Profile '{profile['name']}' connect issued (health={health})")
 
+            # vpn-client restart (kernel WG / OVPN) flushes ALL src_mac_* ipsets
+            # including proton-wg ones. Re-add members from local store.
+            if not proto.startswith("wireguard-"):
+                self._reconcile_proton_wg_ipset_members()
+
             # Register for smart protocol monitoring if enabled
             opts = profile.get("options") or {}
             if opts.get("smart_protocol") and profile_id not in self._smart_pending:
@@ -1541,6 +1546,12 @@ class VPNService:
             strategy = get_strategy(proto)
             strategy.disconnect(self.router, ri)
             log.info(f"Profile '{profile['name']}' disconnected")
+
+            # vpn-client restart (kernel WG / OVPN) flushes ALL src_mac_* ipsets
+            # including proton-wg ones. Re-add members from local store.
+            if not proto.startswith("wireguard-"):
+                self._reconcile_proton_wg_ipset_members()
+
             return {"success": True, "health": HEALTH_RED}
         except Exception as e:
             log.error(f"Failed to disconnect profile '{profile['name']}': {e}", exc_info=True)
@@ -1902,12 +1913,12 @@ class VPNService:
 
     # ── proton-wg ipset reconciliation ──────────────────────────────────────
 
-    def reconcile_proton_wg_ipsets(self):
-        """Ensure proton-wg ipsets exist for running tunnels and rebuild mangle rules.
+    def _reconcile_proton_wg_ipset_members(self):
+        """Re-add proton-wg device MACs to their ipsets from local store.
 
-        Ipsets are ephemeral — they vanish on firewall reload or app restart.
-        This recreates them from device assignments in the local store and
-        rebuilds the mangle rules script.
+        Called after vpn-client restart, which flushes ALL src_mac_* ipsets
+        (including proton-wg ones managed by FlintVPN, not vpn-client).
+        Lightweight: only does ipset add, no mangle rebuild.
         """
         store_data = ps.load()
         for p in store_data.get("profiles", []):
@@ -1916,13 +1927,28 @@ class VPNService:
                 continue
             tunnel_id = ri.get("tunnel_id", 0)
             ipset_name = ri.get("ipset_name", f"src_mac_{tunnel_id}")
-            # Ensure ipset exists
-            self.router.exec(f"ipset create {ipset_name} hash:mac -exist")
-            # Re-add device MACs from assignments
             for mac, pid in store_data.get("device_assignments", {}).items():
                 if pid == p["id"]:
                     self.router.exec(f"ipset add {ipset_name} {mac} -exist")
-        # Rebuild mangle rules so they reference existing ipsets
+
+    def reconcile_proton_wg_ipsets(self):
+        """Ensure proton-wg ipsets exist for running tunnels and rebuild mangle rules.
+
+        Ipsets are ephemeral — they vanish on firewall reload or app restart.
+        This recreates them from device assignments in the local store and
+        rebuilds the mangle rules script. Called on app unlock.
+        """
+        store_data = ps.load()
+        for p in store_data.get("profiles", []):
+            ri = p.get("router_info") or {}
+            if not ri.get("vpn_protocol", "").startswith("wireguard-"):
+                continue
+            tunnel_id = ri.get("tunnel_id", 0)
+            ipset_name = ri.get("ipset_name", f"src_mac_{tunnel_id}")
+            self.router.exec(f"ipset create {ipset_name} hash:mac -exist")
+            for mac, pid in store_data.get("device_assignments", {}).items():
+                if pid == p["id"]:
+                    self.router.exec(f"ipset add {ipset_name} {mac} -exist")
         self.router._rebuild_proton_wg_mangle_rules()
 
     # ── LAN Access Control ───────────────────────────────────────────────────
