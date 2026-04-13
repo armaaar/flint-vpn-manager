@@ -265,6 +265,12 @@ class RouterLanAccess:
             "iptables -C forwarding_rule -j fvpn_lan_exc 2>/dev/null || "
             "iptables -I forwarding_rule 1 -j fvpn_lan_exc"
         )
+        # Allow VPN-routed traffic (fwmark != 0) from any zone — custom network
+        # zones only forward to wan by default, not to VPN tunnel zones
+        cmds.append(
+            "iptables -C forwarding_rule -m mark ! --mark 0x0/0xf000 -j ACCEPT 2>/dev/null || "
+            "iptables -I forwarding_rule -m mark ! --mark 0x0/0xf000 -j ACCEPT"
+        )
 
         self._ssh.exec(" ; ".join(cmds))
         self._write_firewall_include(exceptions)
@@ -307,6 +313,11 @@ class RouterLanAccess:
         lines.append(
             "iptables -C forwarding_rule -j fvpn_lan_exc 2>/dev/null || "
             "iptables -I forwarding_rule 1 -j fvpn_lan_exc"
+        )
+        # Allow VPN-routed traffic from any zone (custom networks → VPN tunnels)
+        lines.append(
+            "iptables -C forwarding_rule -m mark ! --mark 0x0/0xf000 -j ACCEPT 2>/dev/null || "
+            "iptables -I forwarding_rule -m mark ! --mark 0x0/0xf000 -j ACCEPT"
         )
 
         script = "\n".join(lines) + "\n"
