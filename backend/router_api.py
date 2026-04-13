@@ -1011,8 +1011,11 @@ class RouterAPI:
             # persists and breaks routing after firewall reload.
             tunnels.append((iface, mark, ipset_name, tid))
 
-        # Build iptables commands
+        # Build iptables commands — ensure ipsets exist first (they're
+        # ephemeral and may have been lost during firewall reload / disconnect)
         cmds = []
+        for iface, mark, ipset_name, tid in tunnels:
+            cmds.append(f"ipset create {ipset_name} hash:mac -exist")
         for iface, mark, ipset_name, tid in tunnels:
             chain = f"TUNNEL{tid}_ROUTE_POLICY"
             cmds.append(f"iptables -t mangle -N {chain} 2>/dev/null")
