@@ -15,6 +15,8 @@ _SAFE_IP_RE = re.compile(r'^[0-9./]+$')
 
 # Zone names to skip in cross-network rules (wan is managed separately)
 _SKIP_ZONES = {"wan"}
+# Prefixes used by vpn-client / FlintVPN for tunnel interfaces — not real LANs
+_VPN_ZONE_PREFIXES = ("wgclient", "ovpnclient", "protonwg", "wgserver", "ovpnserver")
 
 
 class RouterLanAccess:
@@ -48,6 +50,8 @@ class RouterLanAccess:
                 continue
             zone_name = fields.get("name", "")
             if not zone_name or zone_name in _SKIP_ZONES:
+                continue
+            if any(zone_name.startswith(p) for p in _VPN_ZONE_PREFIXES):
                 continue
             net_names = fields.get("network", [])
             if isinstance(net_names, str):
@@ -170,6 +174,8 @@ class RouterLanAccess:
             src = fields.get("src", "")
             dest = fields.get("dest", "")
             if src in _SKIP_ZONES or dest in _SKIP_ZONES:
+                continue
+            if any(src.startswith(p) or dest.startswith(p) for p in _VPN_ZONE_PREFIXES):
                 continue
             if not src or not dest:
                 continue
