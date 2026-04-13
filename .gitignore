@@ -47,6 +47,11 @@ Thumbs.db
 .idea/
 .vscode/
 
+# Screenshots / images
+*.png
+*.jpg
+*.jpeg
+
 # Tooling / scratch
 .playwright-mcp/
 /tmp/
