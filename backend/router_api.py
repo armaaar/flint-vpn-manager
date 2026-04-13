@@ -1004,10 +1004,12 @@ class RouterAPI:
             ipset_name = vals.get("FVPN_IPSET", "")
             if not (iface and tid and mark and ipset_name):
                 continue
-            # Only create mangle rules for tunnels whose interface is UP
-            link = self.exec(f"ip link show {iface} 2>/dev/null | head -1")
-            if iface in link:
-                tunnels.append((iface, mark, ipset_name, tid))
+            # Always include configured tunnels — the mangle rules use ipset
+            # matching (not interface matching) so they work even if the
+            # interface is temporarily down (e.g. during WiFi driver reload).
+            # Skipping down interfaces would produce an empty script that
+            # persists and breaks routing after firewall reload.
+            tunnels.append((iface, mark, ipset_name, tid))
 
         # Build iptables commands
         cmds = []

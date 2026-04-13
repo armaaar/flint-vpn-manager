@@ -1832,10 +1832,13 @@ class VPNService:
                     del store_data["device_assignments"][mac]
                     ps.save(store_data)
                 if proto.startswith("wireguard-"):
-                    # proton-wg: add MAC to ipset directly (no route_policy rule)
+                    # proton-wg: add MAC to ipset directly (no route_policy rule).
+                    # Also persist locally — ipsets are ephemeral and lost on
+                    # firewall reload / app restart. Local store is the backup.
                     ipset_name = ri.get("ipset_name", f"src_mac_{ri.get('tunnel_id', 0)}")
                     self.router.exec(f"ipset create {ipset_name} hash:mac -exist")
                     self.router.exec(f"ipset add {ipset_name} {mac} -exist")
+                    ps.assign_device(mac, profile_id)
                 else:
                     # Kernel WG / OpenVPN: use route_policy rule
                     self.router.set_device_vpn(mac, ri["rule_name"])
@@ -1896,6 +1899,31 @@ class VPNService:
 
         # Invalidate cache so next device query picks up the change
         self.invalidate_device_cache()
+
+    # ── proton-wg ipset reconciliation ──────────────────────────────────────
+
+    def reconcile_proton_wg_ipsets(self):
+        """Ensure proton-wg ipsets exist for running tunnels and rebuild mangle rules.
+
+        Ipsets are ephemeral — they vanish on firewall reload or app restart.
+        This recreates them from device assignments in the local store and
+        rebuilds the mangle rules script.
+        """
+        store_data = ps.load()
+        for p in store_data.get("profiles", []):
+            ri = p.get("router_info") or {}
+            if not ri.get("vpn_protocol", "").startswith("wireguard-"):
+                continue
+            tunnel_id = ri.get("tunnel_id", 0)
+            ipset_name = ri.get("ipset_name", f"src_mac_{tunnel_id}")
+            # Ensure ipset exists
+            self.router.exec(f"ipset create {ipset_name} hash:mac -exist")
+            # Re-add device MACs from assignments
+            for mac, pid in store_data.get("device_assignments", {}).items():
+                if pid == p["id"]:
+                    self.router.exec(f"ipset add {ipset_name} {mac} -exist")
+        # Rebuild mangle rules so they reference existing ipsets
+        self.router._rebuild_proton_wg_mangle_rules()
 
     # ── LAN Access Control ───────────────────────────────────────────────────
 

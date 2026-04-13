@@ -206,6 +206,12 @@ def api_unlock():
         except Exception as e:
             log.warning(f"NoInternet sync on unlock failed: {e}")
 
+        # Reconcile proton-wg ipsets (ephemeral, lost on restart/reload)
+        try:
+            _service.reconcile_proton_wg_ipsets()
+        except Exception as e:
+            log.warning(f"proton-wg ipset reconciliation failed: {e}")
+
         # Reapply LAN access exceptions from config
         try:
             _get_lan_service().reapply_all()
