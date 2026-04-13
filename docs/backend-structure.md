@@ -1,15 +1,26 @@
 # Backend Package Structure
 
-The backend is organized into 7 packages, each with a single responsibility. This document explains what each package owns, how packages depend on each other, and how to find the right place for new code.
+The backend is organized into 8 packages, each with a single responsibility. This document explains what each package owns, how packages depend on each other, and how to find the right place for new code.
 
 ## Directory Layout
 
 ```
 backend/
-├── app.py                          # Flask entry point
+├── app.py                          # Flask entry point (~84 lines: logging + blueprint registration)
 ├── cli.py                          # Click CLI entry point
 ├── consts.py                       # Shared constants (protocols, profile types, health states)
-├── service_registry.py             # Runtime singleton lifecycle (RouterAPI, ProtonAPI, VPNService)
+├── service_registry.py             # Runtime singleton lifecycle (RouterAPI, ProtonAPI, VPNService, LanAccessService)
+│
+├── routes/                         # Flask route blueprints (no business logic)
+│   ├── __init__.py
+│   ├── _helpers.py                 # Shared: require_unlocked decorator, service getters, location cache
+│   ├── auth.py                     # /api/status, /api/setup, /api/unlock, /api/lock
+│   ├── profiles.py                 # Profile CRUD, server selection, tunnel control, refresh, latency
+│   ├── devices.py                  # /api/devices — listing, labeling, assignment
+│   ├── lan_access.py               # /api/lan-access/* — network CRUD, rules, exceptions
+│   ├── settings.py                 # /api/settings/*, server prefs, adblock, credentials
+│   ├── stream.py                   # /api/stream — SSE live updates (10s tick)
+│   └── logs.py                     # /api/logs — log file listing, reading, clearing
 │
 ├── router/                         # Everything that talks to the router via SSH
 │   ├── api.py                      # SSH transport + lazy facade/tool hub (~270 lines)
@@ -37,7 +48,11 @@ backend/
 │       └── lan_access.py           # Network CRUD, zone forwarding, device exceptions
 │
 ├── services/                       # Business logic orchestrators (no SSH, no Flask)
-│   ├── vpn_service.py              # Profile CRUD, connect/disconnect, server switch
+│   ├── vpn_service.py              # Top-level facade: composes ProfileService + DeviceService + sync
+│   ├── profile_service.py          # Profile CRUD + mutations (create, delete, change_type, switch_server, change_protocol)
+│   ├── profile_list_builder.py     # Read-only profile list query (merges router + local + Proton)
+│   ├── backup_service.py           # Profile store backup/restore to router
+│   ├── adblock_service.py          # Blocklist download and merge
 │   ├── device_service.py           # Device discovery, assignment, labeling, caching
 │   └── lan_access_service.py       # LAN network management + config.json persistence
 │
@@ -121,13 +136,31 @@ class RouterPolicy:
 
 See [router-layer-internals.md](router-layer-internals.md) for the full design, testing patterns, and conventions.
 
+### `routes/` — Flask Blueprints
+
+Seven blueprints, one per route domain. Each imports shared helpers from `routes/_helpers.py` (the `require_unlocked` decorator, service getters, location cache). No business logic — routes parse requests, delegate to services, and format responses.
+
+| Blueprint | Routes | Purpose |
+|-----------|--------|---------|
+| `auth.py` | 4 | Status, setup, unlock (bootstraps all services), lock |
+| `profiles.py` | 17 | Profile CRUD, server selection, tunnel control, refresh, latency |
+| `devices.py` | 3 | Device listing, labeling, assignment |
+| `lan_access.py` | 9 | LAN network CRUD, zone forwarding, isolation, exceptions |
+| `settings.py` | 12 | App settings, server prefs, adblock, credentials |
+| `stream.py` | 1 | SSE live updates (10s tick: health, devices, smart protocol) |
+| `logs.py` | 3 | Log file listing, reading, clearing |
+
 ### `services/` — Business Logic
 
-Stateless orchestrators that combine router operations, Proton API calls, and local persistence into user-facing workflows. No Flask dependency — these are testable without HTTP.
+Orchestrators that combine router operations, Proton API calls, and local persistence into user-facing workflows. No Flask dependency — testable without HTTP.
 
 | Module | Responsibility |
 |--------|---------------|
-| `vpn_service.py` | Profile CRUD, connect/disconnect, server switch, protocol change, reorder. Delegates to `DeviceService`, `SmartProtocolManager`, `IpsetOps`, `ProfileHealer`, `protocol_limits`. |
+| `vpn_service.py` | Top-level facade (~276 lines). Composes `ProfileService`, `DeviceService`, `SmartProtocolManager`. Owns tunnel control (connect/disconnect), sync operations, device delegation. |
+| `profile_service.py` | Profile CRUD + mutations (~680 lines). `create`, `update`, `delete`, `change_type`, `switch_server`, `change_protocol`, `reorder`, `set_guest`. Uses callbacks for cross-cutting sync. |
+| `profile_list_builder.py` | Read-only profile list query (~244 lines). Merges router rules + local store + Proton server data. |
+| `backup_service.py` | Profile store backup/restore to router. Silent disaster recovery on unlock. |
+| `adblock_service.py` | Blocklist download, merge, and deduplication. |
 | `device_service.py` | Device discovery (`build_devices_live`), assignment (`assign_device`), labeling, TTL-based caching. Branches by protocol: kernel WG/OVPN → router, proton-wg → ipset, non-VPN → local store. |
 | `lan_access_service.py` | LAN network CRUD, zone forwarding rules, AP isolation, device exceptions. Persists to `config.json`. Orthogonal to VPN routing. |
 

@@ -119,7 +119,7 @@ class TestUnlockEndpoint:
         c, app_mod = client
         sm.setup("u", "p", "r", "master")
         # Mock start_tracker to avoid actual router connection
-        with patch("app.start_tracker"):
+        with patch("routes.auth.start_tracker"):
             resp = c.post("/api/unlock", json={"master_password": "master"})
         assert resp.json["success"] is True
 
@@ -1154,7 +1154,7 @@ class TestVPNLimits:
 class TestRefreshEndpoint:
     def test_refresh(self, unlocked_client):
         c, _ = unlocked_client
-        with patch("app.get_tracker") as mock_tracker:
+        with patch("routes.profiles.get_tracker") as mock_tracker:
             mock_tracker.return_value = MagicMock()
             resp = c.post("/api/refresh")
         assert resp.json["success"] is True

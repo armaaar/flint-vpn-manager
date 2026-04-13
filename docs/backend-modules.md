@@ -64,8 +64,20 @@ One facade per router subsystem. Each receives its tool dependencies via constru
 
 ## `services/` — Business Logic
 
-### `services/vpn_service.py` — Profile lifecycle orchestrator
-Core orchestrator. `VPNService` owns `build_profile_list`, profile CRUD, `switch_server`, `change_protocol`, `change_type`, `connect_profile`, `disconnect_profile`, `reorder_profiles`. Delegates device management to `DeviceService`, smart protocol to `SmartProtocolManager`, ipset operations to `IpsetOps`, tunnel ID healing to `ProfileHealer`, and protocol slot enforcement to `protocol_limits`. No Flask dependency.
+### `services/vpn_service.py` — Top-level orchestrator facade
+Thin facade (~276 lines) that composes `ProfileService`, `DeviceService`, `IpsetOps`, `SmartProtocolManager`, and `profile_list_builder` into a unified interface. Owns tunnel control (`connect_profile`, `disconnect_profile`), smart protocol management, cross-cutting sync operations (`sync_adblock_to_router`, `sync_noint_to_router`, ipset reconciliation), and device delegation. All callers (routes, CLI, background threads) use `VPNService` as the single entry point. No Flask dependency.
+
+### `services/profile_service.py` — Profile CRUD and mutations
+`ProfileService` handles profile lifecycle: `create_profile`, `update_profile`, `delete_profile`, `change_type`, `switch_server`, `change_protocol`, `reorder_profiles`, `set_guest_profile`. Uses callbacks for cross-cutting concerns (`cancel_smart_fn`, `sync_noint_fn`, `sync_adblock_fn`) following the same pattern as `DeviceService.assign_device()`. Includes DRY helper methods: `_acquire_lock`, `_create_tunnel`, `_teardown_tunnel`, `_reassign_devices`, `_persist_tunnel_update`, `_sync_lan_state`.
+
+### `services/profile_list_builder.py` — Profile list query
+Standalone `build_profile_list()` function that merges three data sources (router route_policy rules, local profile_store metadata, live Proton server data) into the canonical profile list for `/api/profiles`. Read-only — no mutation side-effects. Self-heals anonymous `@rule[N]` sections and detects ghost/orphan profiles.
+
+### `services/backup_service.py` — Profile store backup/restore
+`backup_local_state_to_router()` pushes `profile_store.json` to the router wrapped in a `_meta` envelope (timestamp, fingerprint, format version). `check_and_auto_restore()` restores from the router backup on unlock if newer. Silent disaster recovery.
+
+### `services/adblock_service.py` — Blocklist download and merge
+`download_and_merge_blocklists()` downloads community blocklists, merges with custom domains, deduplicates, and returns hosts-format content for upload to the router's second dnsmasq instance.
 
 ### `services/device_service.py` — Device assignment, listing, and caching
 `DeviceService` handles device discovery (`build_devices_live`), assignment (`assign_device`), labeling (`set_device_label`), and TTL-based caching (`get_devices_cached`). Thread-safe cache with `threading.Lock`. Assignment logic branches by protocol: kernel WG/OVPN → `router.devices.set_device_vpn()`, proton-wg → `IpsetOps.ensure_and_add()` + local store, non-VPN → local store only.

@@ -23,6 +23,7 @@ class ServiceRegistry:
         self.router: Optional[RouterAPI] = None
         self.service: Optional[VPNService] = None
         self.session_unlocked: bool = False
+        self._lan_service = None
 
     def get_proton(self) -> ProtonAPI:
         """Lazy-init ProtonAPI."""
@@ -47,10 +48,18 @@ class ServiceRegistry:
             raise RuntimeError("Service not initialized. Unlock first.")
         return self.service
 
+    def get_lan_service(self):
+        """Lazy-init and return the LanAccessService instance."""
+        if self._lan_service is None:
+            from services.lan_access_service import LanAccessService
+            self._lan_service = LanAccessService(self.get_router())
+        return self._lan_service
+
     def reset(self):
         """Called on lock — clears service but keeps router/proton for re-unlock."""
         self.session_unlocked = False
         self.service = None
+        self._lan_service = None
 
 
 # Module-level singleton (one per process).

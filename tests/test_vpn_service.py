@@ -141,14 +141,14 @@ def _store_data(profiles=None, device_assignments=None):
 class TestBuildProfileList:
     """Tests for VPNService.build_profile_list."""
 
-    @patch("services.vpn_service.ps.load")
+    @patch("services.profile_list_builder.ps.load")
     def test_empty_no_rules_no_profiles(self, mock_load, service):
         """No router rules + no local profiles -> empty list."""
         mock_load.return_value = _store_data()
         result = service.build_profile_list()
         assert result == []
 
-    @patch("services.vpn_service.ps.load")
+    @patch("services.profile_list_builder.ps.load")
     def test_merge_router_rule_with_local_vpn(self, mock_load, service, mock_router):
         """Router rule matched to local VPN profile by (protocol, peer_id)."""
         local = _make_local_vpn_profile(peer_id="9001", profile_id="vpn-1")
@@ -169,7 +169,7 @@ class TestBuildProfileList:
         assert "_orphan" not in p
         assert "_ghost" not in p
 
-    @patch("services.vpn_service.ps.load")
+    @patch("services.profile_list_builder.ps.load")
     def test_unified_display_order_sorts_all_profiles(self, mock_load, service, mock_router):
         """All profiles are sorted by display_order regardless of type."""
         vpn = _make_local_vpn_profile(peer_id="9001", profile_id="vpn-1")
@@ -189,7 +189,7 @@ class TestBuildProfileList:
         assert result[1]["type"] == PROFILE_TYPE_VPN  # display_order=1
         assert result[2]["id"] == "novpn-b"  # display_order=2
 
-    @patch("services.vpn_service.ps.load")
+    @patch("services.profile_list_builder.ps.load")
     def test_ghost_profile(self, mock_load, service, mock_router):
         """Local VPN profile with no matching router rule -> _ghost=True, health=red."""
         local = _make_local_vpn_profile(peer_id="9001", profile_id="vpn-1")
@@ -204,7 +204,7 @@ class TestBuildProfileList:
         assert p["health"] == HEALTH_RED
         assert p["kill_switch"] is False
 
-    @patch("services.vpn_service.ps.load")
+    @patch("services.profile_list_builder.ps.load")
     def test_orphan_profile(self, mock_load, service, mock_router):
         """Router rule with no matching local profile -> _orphan=True."""
         mock_load.return_value = _store_data()  # no local profiles
@@ -219,7 +219,7 @@ class TestBuildProfileList:
         assert p["_orphan"] is True
         assert p["name"] == "OrphanVPN"
 
-    @patch("services.vpn_service.ps.load")
+    @patch("services.profile_list_builder.ps.load")
     def test_device_count_from_router_assignments(self, mock_load, service, mock_router):
         """device_count reflects router's from_mac assignments."""
         local = _make_local_vpn_profile(peer_id="9001", profile_id="vpn-1")
@@ -243,7 +243,7 @@ class TestBuildProfileList:
 class TestCreateProfile:
     """Tests for VPNService.create_profile."""
 
-    @patch("services.vpn_service.ps.create_profile")
+    @patch("services.profile_service.ps.create_profile")
     def test_create_non_vpn(self, mock_create, service, mock_router):
         """Creating a non-VPN profile doesn't touch the router."""
         mock_create.return_value = {
@@ -258,8 +258,8 @@ class TestCreateProfile:
         mock_create.assert_called_once()
         mock_router.policy.set_kill_switch.assert_not_called()
 
-    @patch("services.vpn_service.ps.create_profile")
-    @patch("services.vpn_service.get_strategy")
+    @patch("services.profile_service.ps.create_profile")
+    @patch("services.profile_service.get_strategy")
     @patch("services.vpn_service.ps.get_profiles")
     def test_create_vpn_profile(self, mock_get_profiles, mock_get_strategy,
                                 mock_create, service, mock_proton):
@@ -335,8 +335,8 @@ class TestDeleteProfile:
     """Tests for VPNService.delete_profile."""
 
     @patch("services.vpn_service.noint_sync.sync_noint_to_router")
-    @patch("services.vpn_service.ps.delete_profile")
-    @patch("services.vpn_service.ps.get_profile")
+    @patch("services.profile_service.ps.delete_profile")
+    @patch("services.profile_service.ps.get_profile")
     def test_delete_non_vpn(self, mock_get, mock_delete, mock_noint_sync, service):
         """Deleting a non-VPN profile doesn't call strategy.delete."""
         mock_get.return_value = _make_non_vpn_profile(profile_id="novpn-1")
@@ -347,9 +347,9 @@ class TestDeleteProfile:
         mock_noint_sync.assert_called_once()
 
     @patch("services.vpn_service.noint_sync.sync_noint_to_router")
-    @patch("services.vpn_service.ps.delete_profile")
-    @patch("services.vpn_service.ps.get_profile")
-    @patch("services.vpn_service.get_strategy")
+    @patch("services.profile_service.ps.delete_profile")
+    @patch("services.profile_service.ps.get_profile")
+    @patch("services.profile_service.get_strategy")
     def test_delete_vpn(self, mock_get_strategy, mock_get, mock_delete,
                         mock_noint_sync, service):
         """Deleting a VPN profile calls strategy.delete."""
@@ -363,7 +363,7 @@ class TestDeleteProfile:
         mock_delete.assert_called_once_with("vpn-1")
         mock_noint_sync.assert_called_once()
 
-    @patch("services.vpn_service.ps.get_profile")
+    @patch("services.profile_service.ps.get_profile")
     def test_delete_nonexistent(self, mock_get, service):
         """Deleting a non-existent profile -> NotFoundError."""
         mock_get.return_value = None
@@ -378,9 +378,9 @@ class TestDeleteProfile:
 class TestSwitchServer:
     """Tests for VPNService.switch_server."""
 
-    @patch("services.vpn_service.ps.get_profile")
-    @patch("services.vpn_service.ps.update_profile")
-    @patch("services.vpn_service.get_strategy")
+    @patch("services.profile_service.ps.get_profile")
+    @patch("services.profile_service.ps.update_profile")
+    @patch("services.profile_service.get_strategy")
     def test_successful_switch(self, mock_get_strategy, mock_update, mock_get,
                                service, mock_proton):
         """Successful switch calls strategy.switch_server and updates profile_store."""
@@ -404,9 +404,9 @@ class TestSwitchServer:
         update_kwargs = mock_update.call_args[1]
         assert update_kwargs["server_id"] == "server-2"
 
-    @patch("services.vpn_service.ps.get_profile")
-    @patch("services.vpn_service.ps.update_profile")
-    @patch("services.vpn_service.get_strategy")
+    @patch("services.profile_service.ps.get_profile")
+    @patch("services.profile_service.ps.update_profile")
+    @patch("services.profile_service.get_strategy")
     def test_concurrent_switch_raises(self, mock_get_strategy, mock_update,
                                       mock_get, service, mock_proton):
         """Second concurrent switch on same profile raises RuntimeError."""
@@ -433,21 +433,21 @@ class TestSwitchServer:
         time.sleep(0.1)  # let t1 acquire the lock
 
         # Thread 2 should fail immediately
-        with pytest.raises(RuntimeError, match="already in progress"):
+        with pytest.raises(RuntimeError, match="in progress"):
             service.switch_server("vpn-1", "server-2")
 
         hold.set()  # release t1
         t1.join(timeout=5)
 
-    @patch("services.vpn_service.ps.get_profile")
+    @patch("services.profile_service.ps.get_profile")
     def test_switch_nonexistent_profile(self, mock_get, service):
-        """Switching a non-existent profile -> ValueError."""
+        """Switching a non-existent profile -> NotFoundError."""
         mock_get.return_value = None
 
-        with pytest.raises(ValueError, match="not found"):
+        with pytest.raises(NotFoundError):
             service.switch_server("doesnt-exist", "server-2")
 
-    @patch("services.vpn_service.ps.get_profile")
+    @patch("services.profile_service.ps.get_profile")
     def test_switch_non_vpn_profile(self, mock_get, service):
         """Switching a non-VPN profile -> ValueError."""
         mock_get.return_value = _make_non_vpn_profile(profile_id="novpn-1")
@@ -656,8 +656,8 @@ class TestBackupRestore:
 
         mock_router.write_file.assert_not_called()
 
-    @patch("services.vpn_service.ps.save")
-    @patch("services.vpn_service.ps.STORE_FILE", new_callable=PropertyMock)
+    @patch("services.backup_service.ps.save")
+    @patch("services.backup_service.ps.STORE_FILE", new_callable=PropertyMock)
     def test_auto_restore_when_backup_newer(self, mock_store_file, mock_save,
                                             tmp_path, mock_router):
         """check_and_auto_restore restores when backup is newer than local."""
@@ -685,8 +685,8 @@ class TestBackupRestore:
 
         mock_save.assert_called_once_with(backup_data)
 
-    @patch("services.vpn_service.ps.save")
-    @patch("services.vpn_service.ps.STORE_FILE", new_callable=PropertyMock)
+    @patch("services.backup_service.ps.save")
+    @patch("services.backup_service.ps.STORE_FILE", new_callable=PropertyMock)
     def test_auto_restore_skips_fingerprint_mismatch(self, mock_store_file, mock_save,
                                                      tmp_path, mock_router):
         """check_and_auto_restore skips when router fingerprint doesn't match."""
@@ -708,7 +708,7 @@ class TestBackupRestore:
 
         mock_save.assert_not_called()
 
-    @patch("services.vpn_service.ps.save")
+    @patch("services.backup_service.ps.save")
     def test_auto_restore_noop_when_no_backup(self, mock_save, mock_router):
         """check_and_auto_restore is a no-op when router has no backup file."""
         mock_router.read_file.return_value = ""
@@ -725,7 +725,7 @@ class TestConnectDisconnect:
     """Tests for connect_profile and disconnect_profile."""
 
     @patch("services.vpn_service.get_strategy")
-    @patch("services.vpn_service.ps.get_profile")
+    @patch("services.profile_service.ps.get_profile")
     def test_connect(self, mock_get, mock_get_strategy, service):
         """connect_profile calls strategy.connect."""
         mock_get.return_value = _make_local_vpn_profile(profile_id="vpn-1")
@@ -740,7 +740,7 @@ class TestConnectDisconnect:
         assert result["health"] == HEALTH_GREEN
 
     @patch("services.vpn_service.get_strategy")
-    @patch("services.vpn_service.ps.get_profile")
+    @patch("services.profile_service.ps.get_profile")
     def test_disconnect(self, mock_get, mock_get_strategy, service):
         """disconnect_profile calls strategy.disconnect."""
         mock_get.return_value = _make_local_vpn_profile(profile_id="vpn-1")
@@ -753,7 +753,7 @@ class TestConnectDisconnect:
         assert result["success"] is True
         assert result["health"] == HEALTH_RED
 
-    @patch("services.vpn_service.ps.get_profile")
+    @patch("services.profile_service.ps.get_profile")
     def test_connect_not_found(self, mock_get, service):
         """connect_profile with unknown profile -> NotFoundError."""
         mock_get.return_value = None
@@ -761,7 +761,7 @@ class TestConnectDisconnect:
         with pytest.raises(NotFoundError):
             service.connect_profile("doesnt-exist")
 
-    @patch("services.vpn_service.ps.get_profile")
+    @patch("services.profile_service.ps.get_profile")
     def test_disconnect_not_found(self, mock_get, service):
         """disconnect_profile with unknown profile -> NotFoundError."""
         mock_get.return_value = None
