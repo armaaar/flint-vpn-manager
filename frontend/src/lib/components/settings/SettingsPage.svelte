@@ -3,7 +3,6 @@
   import GeneralTab from './GeneralTab.svelte';
   import ServersTab from './ServersTab.svelte';
   import AdblockTab from './AdblockTab.svelte';
-  import SessionsTab from './SessionsTab.svelte';
   import SecurityTab from './SecurityTab.svelte';
 
   const dispatch = createEventDispatcher();
@@ -14,7 +13,6 @@
     { id: 'general', label: 'General', icon: '⚙' },
     { id: 'servers', label: 'Servers', icon: '🌐' },
     { id: 'adblock', label: 'DNS Ad Blocker', icon: '🚫' },
-    { id: 'sessions', label: 'Sessions', icon: '🔗' },
     { id: 'security', label: 'Security', icon: '🔒' },
   ];
   let activeTab = (initialTab && tabs.some(t => t.id === initialTab)) ? initialTab : 'general';
@@ -50,8 +48,6 @@
       <ServersTab />
     {:else if activeTab === 'adblock'}
       <AdblockTab />
-    {:else if activeTab === 'sessions'}
-      <SessionsTab />
     {:else if activeTab === 'security'}
       <SecurityTab />
     {/if}

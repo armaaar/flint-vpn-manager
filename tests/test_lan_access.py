@@ -5,6 +5,7 @@ import json
 import pytest
 
 from services.lan_access_service import LanAccessService
+from router.facades.lan_access import RouterLanAccess
 
 
 def _mock_router():
@@ -163,6 +164,53 @@ class TestExceptions:
         r.lan_access.apply_device_exceptions.assert_called_once()
 
 
+class TestDeleteNetwork:
+    def test_delete_passes_zone_id_to_router(self):
+        r = _mock_router()
+
+        with patch("services.lan_access_service.sm") as mock_sm:
+            mock_sm.get_config.return_value = {"lan_access": {"rules": [], "exceptions": []}}
+            svc = LanAccessService(r)
+            result = svc.delete_network("fvpn_iot")
+
+        assert result["success"]
+        r.lan_access.delete_network.assert_called_once_with("fvpn_iot")
+
+    def test_delete_cleans_rules_referencing_zone(self):
+        r = _mock_router()
+        rules = [
+            {"src_zone": "fvpn_iot", "dest_zone": "lan", "allowed": False},
+            {"src_zone": "lan", "dest_zone": "fvpn_iot", "allowed": True},
+            {"src_zone": "lan", "dest_zone": "guest", "allowed": True},
+        ]
+
+        with patch("services.lan_access_service.sm") as mock_sm:
+            mock_sm.get_config.return_value = {"lan_access": {"rules": rules, "exceptions": []}}
+            svc = LanAccessService(r)
+            svc.delete_network("fvpn_iot")
+
+        saved = mock_sm.update_config.call_args[1]["lan_access"]
+        assert len(saved["rules"]) == 1
+        assert saved["rules"][0]["src_zone"] == "lan"
+        assert saved["rules"][0]["dest_zone"] == "guest"
+
+    def test_delete_cleans_exceptions_referencing_zone(self):
+        r = _mock_router()
+        exceptions = [
+            {"id": "exc_1", "label": "fvpn_iot -> lan"},
+            {"id": "exc_2", "label": "lan -> guest"},
+        ]
+
+        with patch("services.lan_access_service.sm") as mock_sm:
+            mock_sm.get_config.return_value = {"lan_access": {"rules": [], "exceptions": exceptions}}
+            svc = LanAccessService(r)
+            svc.delete_network("fvpn_iot")
+
+        saved = mock_sm.update_config.call_args[1]["lan_access"]
+        assert len(saved["exceptions"]) == 1
+        assert saved["exceptions"][0]["id"] == "exc_2"
+
+
 class TestReapplyAll:
     def test_reapplies_exceptions(self):
         r = _mock_router()
@@ -184,3 +232,77 @@ class TestReapplyAll:
             svc.reapply_all()
 
         r.lan_access.apply_device_exceptions.assert_not_called()
+
+
+# ── Facade-level tests ───────────────────────────────────────────────
+
+
+def _make_facade(uci_sections: dict[str, list[str]] = None):
+    """Create a RouterLanAccess with mocked tools.
+
+    uci_sections: mapping of config name -> list of section names returned
+    by ``uci show``.  E.g. {"wireless": ["fvpn_iot_ra1"], "firewall": ["fvpn_iot_zone"]}.
+    """
+    uci_sections = uci_sections or {}
+    ssh = MagicMock()
+
+    def _fake_exec(cmd):
+        # Handle "uci show <config>" calls
+        for config, sections in uci_sections.items():
+            if f"uci show {config}" in cmd:
+                return "\n".join(f"{config}.{s}=section" for s in sections)
+        # BssidNum check
+        if "cat" in cmd and ".dat" in cmd:
+            return "BssidNum=2"
+        return ""
+
+    ssh.exec.side_effect = _fake_exec
+    uci = MagicMock()
+    iptables = MagicMock()
+    service_ctl = MagicMock()
+    return RouterLanAccess(uci, iptables, service_ctl, ssh)
+
+
+class TestFacadeDeleteNetwork:
+    def test_prefixed_zone_id_matches_sections(self):
+        """Regression: passing 'fvpn_iot' should NOT double-prefix to 'fvpn_fvpn_iot'."""
+        facade = _make_facade({
+            "wireless": ["fvpn_iot_ra1"],
+            "network": ["fvpn_iot"],
+            "firewall": ["fvpn_iot_zone"],
+            "dhcp": ["fvpn_iot"],
+        })
+        facade.delete_network("fvpn_iot")
+
+        # The commit+delete call is second-to-last (last is wifi driver reload)
+        all_calls = [c[0][0] for c in facade._ssh.exec.call_args_list]
+        delete_cmd = next(c for c in all_calls if "uci -q delete" in c)
+        assert "fvpn_iot" in delete_cmd
+
+    def test_bare_zone_id_also_works(self):
+        """Passing bare 'iot' should still add the prefix."""
+        facade = _make_facade({
+            "wireless": ["fvpn_iot_ra1"],
+            "network": [],
+            "firewall": [],
+            "dhcp": [],
+        })
+        facade.delete_network("iot")
+
+        all_calls = [c[0][0] for c in facade._ssh.exec.call_args_list]
+        delete_cmd = next(c for c in all_calls if "uci -q delete" in c)
+        assert "uci -q delete wireless.fvpn_iot_ra1" in delete_cmd
+
+    def test_rejects_builtin_zones(self):
+        facade = _make_facade()
+        with pytest.raises(ValueError, match="Cannot delete built-in"):
+            facade.delete_network("lan")
+        with pytest.raises(ValueError, match="Cannot delete built-in"):
+            facade.delete_network("guest")
+
+    def test_no_matching_sections_returns_silently(self):
+        facade = _make_facade({
+            "wireless": [], "network": [], "firewall": [], "dhcp": [],
+        })
+        facade.delete_network("fvpn_iot")
+        # Should not crash; no uci delete commands issued

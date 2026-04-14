@@ -425,7 +425,7 @@ class RouterLanAccess:
         if not _SAFE_NAME_RE.match(zone_id):
             raise ValueError(f"Invalid zone ID: {zone_id!r}")
 
-        prefix = f"fvpn_{zone_id}"
+        prefix = zone_id if zone_id.startswith("fvpn_") else f"fvpn_{zone_id}"
         configs = ["wireless", "network", "firewall", "dhcp"]
         cmds = []
         for config in configs:

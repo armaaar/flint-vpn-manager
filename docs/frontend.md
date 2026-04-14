@@ -64,10 +64,28 @@ src/
 │           ├── DeviceModal.svelte       # Device detail: label, type, group assignment
 │           └── LogsModal.svelte         # Log viewer with tabs (app.log, error.log, access.log)
 │
-└── __tests__/                           # Vitest unit tests
-    ├── api.test.js
-    ├── stores.test.js
-    └── utils.test.js
+├── __tests__/                           # Vitest unit tests
+│   ├── api.test.js                      # API client wrapper tests
+│   ├── stores.test.js                   # Core store tests
+│   ├── stores-extended.test.js          # SSE handling, reloadData, devicesForProfile
+│   ├── utils.test.js                    # Format, device, country utility tests
+│   ├── color.test.js                    # hexToHSL, gradient generation tests
+│   └── profile.test.js                  # connState, statusLabel, statusClass tests
+│
+e2e/                                     # Playwright E2E tests (against real backend + router)
+├── helpers.ts                           # unlockApp(), lockApp(), uniqueName(), API helpers
+├── unlock.spec.ts                       # Lock/unlock flow, wrong password error
+├── dashboard.spec.ts                    # Sidebar, groups, unassigned devices, refresh
+├── navigation.spec.ts                   # Hash routing, Settings/Networks/Logs navigation
+├── groups.spec.ts                       # Group CRUD, VPN form options, protocol cards
+├── devices.spec.ts                      # Device modal, labels, private MAC badge
+├── server-picker.spec.ts               # Country/city dropdowns, search, filter chips
+├── vpn-group-card.spec.ts              # Status, badges, VPN options toggle, server info
+├── settings.spec.ts                     # All settings tabs, credential forms
+├── adblock.spec.ts                      # Blocklist presets, custom inputs, domain count
+├── lan-access.spec.ts                   # Network cards, isolation, access rules, devices
+├── logs.spec.ts                         # Log tabs, content, refresh
+└── location.spec.ts                     # IP widget, Proton API status, router count
 ```
 
 ## TypeScript

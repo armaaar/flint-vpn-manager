@@ -55,3 +55,7 @@ Thumbs.db
 # Tooling / scratch
 .playwright-mcp/
 /tmp/
+
+# Playwright E2E
+frontend/playwright-report/
+frontend/test-results/

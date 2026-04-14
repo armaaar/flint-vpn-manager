@@ -168,31 +168,6 @@ def api_get_location():
         return jsonify({"error": str(e)}), 500
 
 
-@profiles_bp.route("/api/sessions")
-@require_unlocked
-def api_get_sessions():
-    """Get active VPN sessions for the Proton account.
-
-    Returns: {sessions: [{session_id, exit_ip, protocol}], max_connections: int}
-    """
-    proton = get_service().proton
-    if not proton or not proton.is_logged_in:
-        return jsonify({"error": "Not logged into ProtonVPN"}), 400
-    try:
-        sessions = proton.get_sessions()
-        max_conn = 10
-        try:
-            max_conn = 10 if proton.user_tier >= 2 else 1
-        except Exception:
-            pass
-        return jsonify({
-            "sessions": sessions,
-            "max_connections": max_conn,
-        })
-    except Exception as e:
-        log.warning(f"Sessions fetch failed: {e}")
-        return jsonify({"error": str(e)}), 500
-
 
 # ── Server / Type / Protocol Changes ─────────────────────────────────────────
 

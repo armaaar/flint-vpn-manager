@@ -2,7 +2,7 @@
 
 import type {
   Profile, Device, ServerInfo, AppSettings, AdblockSettings,
-  LanNetwork, LanException, AccessRule, VpnSession,
+  LanNetwork, LanException, AccessRule,
 } from './types';
 
 const BASE = '';
@@ -77,9 +77,8 @@ export const api = {
   // Latency Probing
   probeLatency: (serverIds: string[]) => request<{ latencies: Record<string, number | null> }>('/api/probe-latency', { method: 'POST', body: { server_ids: serverIds } }),
 
-  // Location & Sessions
+  // Location
   getLocation: () => request<{ ip: string; country: string; isp: string }>('/api/location'),
-  getSessions: () => request<{ sessions: VpnSession[]; max_connections: number }>('/api/sessions'),
 
   // Networks (LAN Access)
   getNetworks: () => request<LanNetwork[]>('/api/lan-access/networks'),

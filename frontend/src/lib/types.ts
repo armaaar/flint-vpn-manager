@@ -193,13 +193,6 @@ export interface LanException {
   direction: string;
 }
 
-// ── Session Types ──────────────────────────────────────────────────────────
-
-export interface VpnSession {
-  session_id: string;
-  exit_ip: string;
-  protocol: string;
-}
 
 // ── Toast ──────────────────────────────────────────────────────────────────
 

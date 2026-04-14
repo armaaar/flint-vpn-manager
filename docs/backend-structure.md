@@ -249,14 +249,17 @@ from consts import PROTO_WIREGUARD, HEALTH_GREEN
 
 ## Testing Structure
 
-Tests mirror the source structure:
+Tests mirror the source structure, organized into subdirectories by layer:
 
 ```
 tests/
-├── conftest.py                     # Shared fixtures
-├── test_app.py                     # Flask endpoint tests
-├── test_router_api.py              # RouterAPI + facade integration tests
-├── test_vpn_service.py             # VPN service tests
+├── conftest.py                     # Shared fixtures (tmp_data_dir)
+├── test_app.py                     # Flask endpoint tests (legacy)
+├── test_router_api.py              # RouterAPI integration tests
+├── test_vpn_service.py             # VPN service orchestration tests
+├── test_profile_service.py         # Profile CRUD + mutation tests
+├── test_device_service.py          # Device assignment + caching tests
+├── test_smart_protocol.py          # Smart protocol state machine tests
 ├── test_tunnel_strategy.py         # Strategy pattern tests
 ├── test_device_tracker.py          # Device tracker tests
 ├── test_auto_optimizer.py          # Auto optimizer tests
@@ -269,14 +272,33 @@ tests/
 ├── test_server_optimizer.py        # Server optimizer tests
 ├── test_profile_store.py           # Profile store tests
 ├── test_secrets.py                 # Secrets manager tests
-└── test_router_tools/              # Tool layer unit tests
-    ├── test_uci.py
-    ├── test_ipset.py
-    ├── test_iptables.py
-    ├── test_iproute.py
-    ├── test_service_ctl.py
-    ├── test_wg_show.py
-    └── test_integration.py         # Live router integration tests
+├── test_router_tools/              # Tool layer unit tests
+│   ├── test_uci.py
+│   ├── test_ipset.py
+│   ├── test_iptables.py
+│   ├── test_iproute.py
+│   ├── test_service_ctl.py
+│   ├── test_wg_show.py
+│   └── test_integration.py         # Live router integration tests
+├── test_router_facades/            # Facade layer tests (mock tools)
+│   ├── conftest.py                 # Shared fixtures (uci, ssh, ipset, etc.)
+│   ├── test_policy.py
+│   ├── test_tunnel.py
+│   ├── test_firewall.py
+│   ├── test_wireguard.py
+│   ├── test_openvpn.py
+│   ├── test_devices.py
+│   ├── test_proton_wg.py
+│   ├── test_adblock.py
+│   └── test_lan_access.py
+└── test_routes/                    # Flask route endpoint tests
+    ├── conftest.py                 # Flask test client + mock registry
+    ├── test_auth.py
+    ├── test_profiles.py
+    ├── test_devices.py
+    ├── test_settings.py
+    ├── test_lan_access.py
+    └── test_logs.py
 ```
 
 Tests marked `@pytest.mark.integration` require a live router connection and are excluded from normal runs.

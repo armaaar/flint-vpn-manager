@@ -7,13 +7,17 @@
 
   async function doUnlock() {
     error = '';
-    await api.unlock(password);
-    appStatus.set('unlocked');
-    // Load initial data
-    await reloadData();
-    const st = await api.getStatus();
-    protonLoggedIn.set(st.proton_logged_in || false);
-    startSSE();
+    try {
+      await api.unlock(password);
+      appStatus.set('unlocked');
+      // Load initial data
+      await reloadData();
+      const st = await api.getStatus();
+      protonLoggedIn.set(st.proton_logged_in || false);
+      startSSE();
+    } catch (e: unknown) {
+      error = e instanceof Error ? e.message : 'Unlock failed';
+    }
   }
 
   function onKeydown(e: KeyboardEvent) {

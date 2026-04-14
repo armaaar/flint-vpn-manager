@@ -619,26 +619,6 @@ aeb893d9a96d1f15519bb3c4dcb40ee3
             "lon": resp.get("Long"),
         }
 
-    def get_sessions(self) -> list:
-        """Get the list of active VPN sessions.
-
-        Calls ``GET /vpn/v1/sessions`` which returns all currently connected
-        VPN sessions for the user's account.
-
-        Returns:
-            List of dicts with keys: session_id, exit_ip, protocol.
-        """
-        session = self._api._session_holder.session
-        resp = session.api_request("/vpn/v1/sessions")
-        sessions_raw = resp.get("Sessions", [])
-        return [
-            {
-                "session_id": s.get("SessionID", ""),
-                "exit_ip": s.get("ExitIP", ""),
-                "protocol": s.get("Protocol", ""),
-            }
-            for s in sessions_raw
-        ]
 
     def get_available_ports(self) -> dict:
         """Return the available ports per protocol for the port selection UI."""

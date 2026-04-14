@@ -44,7 +44,9 @@ cd frontend && npm run build
 
 # Tests
 source venv/bin/activate && python -m pytest tests/     # Backend tests
-cd frontend && npx vitest run                           # Frontend tests
+cd frontend && npx vitest run                           # Frontend unit tests
+cd frontend && npx playwright test                      # Frontend E2E tests (needs backend running)
+cd frontend && npx playwright test --ui                 # E2E with interactive UI
 ```
 
 ## Source-of-Truth Rules
@@ -90,7 +92,13 @@ See [docs/design-system.md](docs/design-system.md) for the full Sentry-inspired 
 # Backend
 source venv/bin/activate && python -m pytest tests/ --tb=short
 
-# Frontend (must be rebuilt before user tests in browser — Flask serves static/)
+# Frontend unit tests
+cd frontend && export NVM_DIR="$HOME/.nvm" && . "$NVM_DIR/nvm.sh" && npx vitest run
+
+# Frontend E2E tests (requires backend running on :5000)
+cd frontend && export NVM_DIR="$HOME/.nvm" && . "$NVM_DIR/nvm.sh" && npx playwright test
+
+# Frontend build (must be rebuilt before user tests in browser — Flask serves static/)
 cd frontend && export NVM_DIR="$HOME/.nvm" && . "$NVM_DIR/nvm.sh" && npm run build
 
 # Restart server (KEEP secrets.enc and config.json — never delete them)
