@@ -200,9 +200,18 @@ def api_update_blocklist_now():
     if content is None and failed:
         return jsonify({"error": f"All sources failed to download: {', '.join(failed)}"}), 502
     try:
-        get_service().router.adblock.upload_blocklist(content)
+        import hashlib
+        new_hash = hashlib.sha256(content.encode()).hexdigest()
         config = sm.get_config()
         adblock = config.get("adblock", {})
+        old_hash = adblock.get("blocklist_hash")
+
+        if new_hash != old_hash:
+            get_service().router.adblock.upload_blocklist(content)
+            adblock["blocklist_hash"] = new_hash
+        else:
+            log.info("Blocklist unchanged (%d domains) — skipping upload", count)
+
         adblock["last_updated"] = datetime.now(timezone.utc).isoformat()
         adblock["domain_count"] = count
         sm.update_config(adblock=adblock)

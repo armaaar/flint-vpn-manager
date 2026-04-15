@@ -52,6 +52,16 @@ class AutoOptimizer:
         self._last_run_date: Optional[str] = None
         self._last_cert_check_date: Optional[str] = None
         self._last_blocklist_check_date: Optional[str] = None
+        # Pre-populate from persisted config so restarts within the same day
+        # skip the expensive blocklist download+upload.
+        try:
+            last_updated = sm.get_config().get("adblock", {}).get("last_updated")
+            if last_updated:
+                persisted_date = last_updated[:10]  # "YYYY-MM-DD" prefix
+                if persisted_date == datetime.now().strftime("%Y-%m-%d"):
+                    self._last_blocklist_check_date = persisted_date
+        except Exception:
+            pass
         # profile_id → datetime of last successful auto-switch.
         self._last_switch_at: Dict[str, datetime] = {}
 
@@ -325,6 +335,10 @@ class AutoOptimizer:
 
         Runs independently of auto-optimize. Only acts if blocklist sources
         are configured.
+
+        On the first tick after startup, if the blocklist file already exists
+        on the router (from a previous session), we skip the expensive
+        download+upload and just mark today as checked.
         """
         now = datetime.now()
         current_date = now.strftime("%Y-%m-%d")
@@ -332,13 +346,27 @@ class AutoOptimizer:
         if self._last_blocklist_check_date == current_date:
             return  # Already checked today
 
-        self._last_blocklist_check_date = current_date
-
         config = sm.get_config()
         adblock = config.get("adblock", {})
         sources = adblock.get("blocklist_sources", [])
         if not sources:
+            self._last_blocklist_check_date = current_date
             return
+
+        # On the first tick after startup (no persisted date matched today),
+        # check if the router already has a valid blocklist from the previous
+        # session.  If so, skip the expensive download+upload.
+        first_tick = self._last_blocklist_check_date is None
+        self._last_blocklist_check_date = current_date
+
+        if first_tick:
+            try:
+                router = self.get_router()
+                if router and router.adblock._blocklist_has_content():
+                    log.info("Blocklist already on router — skipping startup download")
+                    return
+            except Exception:
+                pass  # Fall through to download
 
         try:
             from services.adblock_service import download_and_merge_blocklists
@@ -351,9 +379,20 @@ class AutoOptimizer:
             if not router:
                 return
 
+            # Hash-based dedup: skip upload if content hasn't changed
+            import hashlib
+            new_hash = hashlib.sha256(content.encode()).hexdigest()
+            old_hash = adblock.get("blocklist_hash")
+            if new_hash == old_hash:
+                log.info("Blocklist unchanged (%d domains) — skipping upload", count)
+                adblock["last_updated"] = now.isoformat()
+                sm.update_config(adblock=adblock)
+                return
+
             router.adblock.upload_blocklist(content)
             adblock["last_updated"] = now.isoformat()
             adblock["domain_count"] = count
+            adblock["blocklist_hash"] = new_hash
             sm.update_config(adblock=adblock)
             log.info(f"Blocklist auto-update: {count} domains from {len(sources)} source(s)")
 

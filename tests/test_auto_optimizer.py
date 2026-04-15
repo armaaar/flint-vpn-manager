@@ -483,6 +483,8 @@ class TestBlocklistUpdate:
     def test_calls_download_and_merge_blocklists(self, optimizer):
         """Should use download_and_merge_blocklists() instead of duplicating logic."""
         opt, _, get_router, *_ = optimizer
+        # Simulate a day boundary (not first startup tick)
+        opt._last_blocklist_check_date = "2026-04-08"
         mock_router = MagicMock()
         get_router.return_value = mock_router
 
@@ -501,6 +503,8 @@ class TestBlocklistUpdate:
 
     def test_uploads_content_to_router(self, optimizer):
         opt, _, get_router, *_ = optimizer
+        # Simulate a day boundary (not first startup tick)
+        opt._last_blocklist_check_date = "2026-04-08"
         mock_router = MagicMock()
         get_router.return_value = mock_router
         content = "0.0.0.0 test.com\n:: test.com\n"

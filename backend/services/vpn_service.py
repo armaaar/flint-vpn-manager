@@ -12,6 +12,7 @@ import logging
 import threading
 
 import persistence.profile_store as ps
+import persistence.secrets_manager as sm
 import router.noint_sync as noint_sync
 from consts import (
     HEALTH_RED,
@@ -255,7 +256,13 @@ class VPNService:
         try:
             content, count, failed = download_and_merge_blocklists()
             if content:
+                import hashlib
                 self.router.adblock.upload_blocklist(content)
+                # Persist hash so auto-optimizer can skip redundant uploads
+                adblock = sm.get_config().get("adblock", {})
+                adblock["blocklist_hash"] = hashlib.sha256(content.encode()).hexdigest()
+                adblock["domain_count"] = count
+                sm.update_config(adblock=adblock)
                 log.info(f"Adblock: re-downloaded blocklist ({count} domains)")
             if failed:
                 log.warning(f"Adblock: some sources failed: {failed}")
