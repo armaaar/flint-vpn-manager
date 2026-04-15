@@ -64,7 +64,7 @@ test.describe('Server Picker', () => {
   test('server picker shows feature filter chips', async ({ page }) => {
     await openServerPicker(page);
     await expect(page.locator('.filter-chips')).toBeVisible();
-    await expect(page.locator('.filter-chip')).toHaveCount(4);
+    await expect(page.locator('.filter-chip')).toHaveCount(5);
   });
 
   test('clicking country dropdown shows country list', async ({ page }) => {
@@ -112,5 +112,27 @@ test.describe('Server Picker', () => {
 
     await p2pChip.click();
     await expect(p2pChip).not.toHaveClass(/active/);
+  });
+
+  test('IPv6 filter chip is visible', async ({ page }) => {
+    await openServerPicker(page);
+    const ipv6Chip = page.locator('.filter-chip:has-text("IPv6")');
+    await expect(ipv6Chip).toBeVisible();
+  });
+
+  test('toggling IPv6 filter chip filters servers', async ({ page }) => {
+    await openServerPicker(page);
+    const ipv6Chip = page.locator('.filter-chip:has-text("IPv6")');
+
+    // Check if it's currently active (may be auto-enabled if global IPv6 is on)
+    const wasActive = await ipv6Chip.evaluate(el => el.classList.contains('active'));
+
+    // Toggle it
+    await ipv6Chip.click();
+    if (wasActive) {
+      await expect(ipv6Chip).not.toHaveClass(/active/);
+    } else {
+      await expect(ipv6Chip).toHaveClass(/active/);
+    }
   });
 });

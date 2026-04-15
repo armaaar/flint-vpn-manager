@@ -183,6 +183,7 @@ class TestWireGuardStrategy:
             transport="udp",
             port=None,
             custom_dns=None,
+            ipv6=False,
         )
 
         # Router upload called with parsed WG fields
@@ -192,6 +193,7 @@ class TestWireGuardStrategy:
             public_key="test_public_key",
             endpoint="1.2.3.4:51820",
             dns="10.2.0.1",
+            ipv6=False,
         )
 
         # Return values
@@ -247,6 +249,7 @@ class TestWireGuardStrategy:
             transport="udp",
             port=None,
             custom_dns=None,
+            ipv6=False,
         )
 
         # In-place update, not delete-recreate
@@ -533,6 +536,7 @@ class TestProtonWGStrategy:
             transport="tcp",
             port=None,
             custom_dns=None,
+            ipv6=False,
         )
 
         # Should upload via proton_wg path with socket_type
@@ -543,6 +547,7 @@ class TestProtonWGStrategy:
             endpoint="1.2.3.4:51820",
             socket_type="tcp",
             dns="10.2.0.1",
+            ipv6=False,
         )
 
         assert wg_key == SAMPLE_WG_KEY
@@ -637,6 +642,7 @@ class TestProtonWGStrategy:
             transport="tcp",
             port=None,
             custom_dns=None,
+            ipv6=False,
         )
 
         # Should call proton_wg.update_config_live with the conf content

@@ -21,7 +21,22 @@ from consts import (
     PROTO_WIREGUARD_TLS,
 )
 
+try:
+    from proton.vpn.session.servers.types import ServerFeatureEnum
+except ImportError:
+    ServerFeatureEnum = None
+
 log = logging.getLogger("flintvpn")
+
+
+def _server_has_ipv6(server) -> bool:
+    """Return True if the Proton server supports IPv6 inside the tunnel."""
+    if ServerFeatureEnum is None:
+        return False
+    try:
+        return ServerFeatureEnum.IPV6 in server.features
+    except Exception:
+        return False
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -161,6 +176,7 @@ class WireGuardStrategy(TunnelStrategy):
         Returns:
             (router_info, server_info, wg_key, cert_expiry)
         """
+        ipv6 = _server_has_ipv6(server)
         config_str, server_info, wg_key, cert_expiry = proton.generate_wireguard_config(
             server,
             profile_name=profile_name,
@@ -171,6 +187,7 @@ class WireGuardStrategy(TunnelStrategy):
             transport="udp",
             port=options.get("port"),
             custom_dns=options.get("custom_dns"),
+            ipv6=ipv6,
         )
         wg = _parse_wg_config(config_str)
         router_info = router.wireguard.upload_wireguard_config(
@@ -179,6 +196,7 @@ class WireGuardStrategy(TunnelStrategy):
             public_key=wg["public_key"],
             endpoint=wg["endpoint"],
             dns=wg["dns"],
+            ipv6=ipv6,
         )
         return router_info, server_info, wg_key, cert_expiry
 
@@ -213,6 +231,7 @@ class WireGuardStrategy(TunnelStrategy):
             (None, server_info, wg_key, cert_expiry) -- ``None`` because
             router_info does not change.
         """
+        ipv6 = _server_has_ipv6(server)
         existing_wg_key = profile.get("wg_key")
         config_str, server_info, wg_key, cert_expiry = proton.generate_wireguard_config(
             server,
@@ -225,6 +244,7 @@ class WireGuardStrategy(TunnelStrategy):
             transport="udp",
             port=options.get("port"),
             custom_dns=options.get("custom_dns"),
+            ipv6=ipv6,
         )
         wg = _parse_wg_config(config_str)
 
@@ -440,6 +460,7 @@ class ProtonWGStrategy(TunnelStrategy):
         Returns:
             (router_info, server_info, wg_key, cert_expiry)
         """
+        ipv6 = _server_has_ipv6(server)
         config_str, server_info, wg_key, cert_expiry = proton.generate_wireguard_config(
             server,
             profile_name=profile_name,
@@ -450,6 +471,7 @@ class ProtonWGStrategy(TunnelStrategy):
             transport=self.transport,
             port=options.get("port"),
             custom_dns=options.get("custom_dns"),
+            ipv6=ipv6,
         )
         wg = _parse_wg_config(config_str)
         router_info = router.proton_wg.upload_proton_wg_config(
@@ -459,6 +481,7 @@ class ProtonWGStrategy(TunnelStrategy):
             endpoint=wg["endpoint"],
             socket_type=self.transport,
             dns=wg["dns"],
+            ipv6=ipv6,
         )
         return router_info, server_info, wg_key, cert_expiry
 
@@ -516,6 +539,7 @@ class ProtonWGStrategy(TunnelStrategy):
             (None, server_info, wg_key, cert_expiry) -- ``None`` because
             router_info does not change.
         """
+        ipv6 = _server_has_ipv6(server)
         existing_wg_key = profile.get("wg_key")
         config_str, server_info, wg_key, cert_expiry = proton.generate_wireguard_config(
             server,
@@ -528,17 +552,19 @@ class ProtonWGStrategy(TunnelStrategy):
             transport=self.transport,
             port=options.get("port"),
             custom_dns=options.get("custom_dns"),
+            ipv6=ipv6,
         )
         wg = _parse_wg_config(config_str)
 
         iface = old_router_info.get("tunnel_name", "protonwg0")
+        allowed_ips = "0.0.0.0/0, ::/0" if ipv6 else "0.0.0.0/0"
         wg_conf = (
             f"[Interface]\n"
             f"PrivateKey = {wg['private_key']}\n"
             f"\n"
             f"[Peer]\n"
             f"PublicKey = {wg['public_key']}\n"
-            f"AllowedIPs = 0.0.0.0/0\n"
+            f"AllowedIPs = {allowed_ips}\n"
             f"Endpoint = {wg['endpoint']}\n"
             f"PersistentKeepalive = 25\n"
         )

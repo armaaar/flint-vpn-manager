@@ -48,7 +48,7 @@ _MAC_RE = re.compile(r'^([0-9a-f]{2}:){5}[0-9a-f]{2}$', re.IGNORECASE)
 # normalize_server_scope() also accepts the legacy shape (type='server'|
 # 'country'|'city'|'global') and converts it.
 
-DEFAULT_SCOPE_FEATURES = {"streaming": False, "p2p": False, "secure_core": False, "tor": False}
+DEFAULT_SCOPE_FEATURES = {"streaming": False, "p2p": False, "secure_core": False, "tor": False, "ipv6": False}
 
 
 def normalize_server_scope(scope) -> dict:
@@ -69,6 +69,7 @@ def normalize_server_scope(scope) -> dict:
         "p2p": bool(features_in.get("p2p", False)),
         "secure_core": bool(features_in.get("secure_core", False)),
         "tor": bool(features_in.get("tor", False)),
+        "ipv6": bool(features_in.get("ipv6", False)),
     }
 
     # Check whether this is the new shape (has any of the new top-level fields)

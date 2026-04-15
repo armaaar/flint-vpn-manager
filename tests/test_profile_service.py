@@ -253,6 +253,81 @@ class TestReorderProfiles:
             svc.reorder_profiles([])
 
 
+class TestSwitchServer:
+    def test_cert_fingerprint_conflict_clears_wg_key(self):
+        """When cert refresh fails with a 409 conflict, wg_key should be cleared
+        so switch_server generates a fresh key pair."""
+        svc = _make_service()
+        profile = {
+            "id": "p1", "name": "US", "type": PROFILE_TYPE_VPN,
+            "router_info": {"rule_name": "fvpn_rule_9001", "vpn_protocol": PROTO_WIREGUARD},
+            "server_id": "srv1",
+            "server": {"id": "srv1"},
+            "wg_key": "old_key_b64",
+            "options": {"netshield": 0, "moderate_nat": False},
+            "server_scope": None,
+        }
+
+        with patch("services.profile_service.ps") as mock_ps, \
+             patch("services.profile_service.get_strategy") as mock_gs, \
+             patch("services.profile_service.require_vpn_profile", return_value=dict(profile)):
+            # Cert refresh raises a fingerprint conflict error
+            svc.proton.refresh_wireguard_cert.side_effect = RuntimeError(
+                "Fingerprint conflict (409/2500)"
+            )
+            svc.proton.get_server_by_id.return_value = {"id": "srv2"}
+
+            mock_gs.return_value.switch_server.return_value = (
+                {"rule_name": "fvpn_rule_9001", "vpn_protocol": PROTO_WIREGUARD},
+                {"id": "srv2"},
+                "new_key",
+                1234567890,
+            )
+            mock_ps.get_profile.return_value = {"id": "p1", "name": "US"}
+            mock_ps.normalize_server_scope.return_value = None
+
+            # Pass options that differ from profile to trigger cert refresh
+            svc.switch_server("p1", "srv2", options={"netshield": 2, "moderate_nat": True})
+
+        # Should have cleared wg_key in local store after the conflict
+        wg_key_update = [
+            c for c in mock_ps.update_profile.call_args_list
+            if c[1].get("wg_key") is None and len(c[1]) <= 2  # The clearing call
+        ]
+        assert len(wg_key_update) >= 1
+
+    def test_switch_server_basic(self):
+        """Basic server switch persists new server info."""
+        svc = _make_service()
+        profile = {
+            "id": "p1", "name": "US", "type": PROFILE_TYPE_VPN,
+            "router_info": {"rule_name": "fvpn_rule_9001", "vpn_protocol": PROTO_WIREGUARD},
+            "server_id": "srv1",
+            "server": {"id": "srv1"},
+            "options": {"netshield": 0},
+            "server_scope": None,
+        }
+
+        with patch("services.profile_service.ps") as mock_ps, \
+             patch("services.profile_service.get_strategy") as mock_gs, \
+             patch("services.profile_service.require_vpn_profile", return_value=dict(profile)):
+            svc.proton.get_server_by_id.return_value = {"id": "srv2"}
+            mock_gs.return_value.switch_server.return_value = (
+                None,  # new_ri is None for WG (keeps old)
+                {"id": "srv2", "endpoint": "5.6.7.8:51820"},
+                "wg_key",
+                9999999,
+            )
+            mock_ps.get_profile.return_value = {"id": "p1"}
+            mock_ps.normalize_server_scope.return_value = None
+
+            result = svc.switch_server("p1", "srv2")
+
+        # Should persist new server_id
+        update_call = mock_ps.update_profile.call_args
+        assert update_call[1]["server_id"] == "srv2"
+
+
 class TestSetGuestProfile:
     def test_sets_guest(self):
         svc = _make_service()

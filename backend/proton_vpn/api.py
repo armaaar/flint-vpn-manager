@@ -59,8 +59,11 @@ NETSHIELD_DNS = {
     2: "10.2.0.1",         # Malware + ads blocking (server-side via certificate)
 }
 
-# Regex to match IPv6 lines in WireGuard configs
-_IPV6_PATTERN = re.compile(r".*::.*")
+NETSHIELD_DNS_V6 = {
+    0: "2a07:b944::2:1",   # Off — standard Proton IPv6 DNS
+    1: "2a07:b944::2:1",   # Malware blocking
+    2: "2a07:b944::2:1",   # Malware + ads blocking
+}
 
 
 class ProtonAPI:
@@ -278,6 +281,7 @@ class ProtonAPI:
         transport: str = "udp",
         port: Optional[int] = None,
         custom_dns: Optional[str] = None,
+        ipv6: bool = False,
     ) -> tuple[str, dict, str, int]:
         """Generate a WireGuard .conf with a persistent (365-day) certificate.
 
@@ -330,13 +334,11 @@ class ProtonAPI:
                 log.warning(f"Port {port} not in known ports for {proto_key}/{transport_key}: {valid_ports}")
 
         if custom_dns:
-            # Validate DNS: must be a single valid IPv4 address.
-            # UCI stores DNS as a single string value — comma-separated
-            # would break the GL.iNet vpn-client's DNS resolution.
+            # Validate DNS: must be a single valid IP address.
             import ipaddress as _ipaddress
             custom_dns = custom_dns.strip()
             try:
-                _ipaddress.IPv4Address(custom_dns)
+                _ipaddress.ip_address(custom_dns)
             except ValueError:
                 raise ValueError(f"Invalid DNS address: {custom_dns!r}")
             dns = custom_dns
@@ -345,15 +347,27 @@ class ProtonAPI:
         if port is None:
             port = self.WG_PORTS.get(transport, 51820)
 
+        from consts import PROTON_WG_IPV6_ADDR, PROTON_IPV6_DNS
+
+        address = "10.2.0.2/32"
+        allowed_ips = "0.0.0.0/0"
+        dns_line = dns
+        if ipv6:
+            address = f"10.2.0.2/32, {PROTON_WG_IPV6_ADDR}"
+            allowed_ips = "0.0.0.0/0, ::/0"
+            if not custom_dns:
+                dns_v6 = NETSHIELD_DNS_V6.get(netshield, PROTON_IPV6_DNS)
+                dns_line = f"{dns}, {dns_v6}"
+
         config_lines = [
             "[Interface]",
             f"PrivateKey = {kh.x25519_sk_str}",
-            "Address = 10.2.0.2/32",
-            f"DNS = {dns}",
+            f"Address = {address}",
+            f"DNS = {dns_line}",
             "",
             "[Peer]",
             f"PublicKey = {physical.x25519_pk}",
-            "AllowedIPs = 0.0.0.0/0",
+            f"AllowedIPs = {allowed_ips}",
             f"Endpoint = {physical.entry_ip}:{port}",
         ]
 
@@ -647,4 +661,5 @@ aeb893d9a96d1f15519bb3c4dcb40ee3
             "streaming": ServerFeatureEnum.STREAMING in server.features,
             "p2p": ServerFeatureEnum.P2P in server.features,
             "tor": ServerFeatureEnum.TOR in server.features,
+            "ipv6": ServerFeatureEnum.IPV6 in server.features,
         }

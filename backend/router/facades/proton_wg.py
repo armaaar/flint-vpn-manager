@@ -79,6 +79,7 @@ class RouterProtonWG:
         endpoint: str,
         socket_type: str = "tcp",
         dns: str = "10.2.0.1",
+        ipv6: bool = False,
     ) -> dict:
         """Write a proton-wg config and env file to the router."""
         iface, mark, table_num = self._next_proton_wg_slot()
@@ -87,18 +88,20 @@ class RouterProtonWG:
         self._ssh.exec(f"mkdir -p {PROTON_WG_DIR}")
         self.ensure_proton_wg_initd()
 
+        allowed_ips = "0.0.0.0/0, ::/0" if ipv6 else "0.0.0.0/0"
         wg_conf = (
             f"[Interface]\n"
             f"PrivateKey = {private_key}\n"
             f"\n"
             f"[Peer]\n"
             f"PublicKey = {public_key}\n"
-            f"AllowedIPs = 0.0.0.0/0\n"
+            f"AllowedIPs = {allowed_ips}\n"
             f"Endpoint = {endpoint}\n"
             f"PersistentKeepalive = 25\n"
         )
         self._ssh.write_file(f"{PROTON_WG_DIR}/{iface}.conf", wg_conf)
 
+        ipv6_flag = "1" if ipv6 else "0"
         env = (
             f"PROTON_WG_INTERFACE_NAME={iface}\n"
             f"PROTON_WG_SOCKET_TYPE={socket_type}\n"
@@ -106,6 +109,7 @@ class RouterProtonWG:
             f"FVPN_TUNNEL_ID={tunnel_id}\n"
             f"FVPN_MARK={mark}\n"
             f"FVPN_IPSET=src_mac_{tunnel_id}\n"
+            f"FVPN_IPV6={ipv6_flag}\n"
         )
         self._ssh.write_file(f"{PROTON_WG_DIR}/{iface}.env", env)
 
@@ -121,6 +125,7 @@ class RouterProtonWG:
             "socket_type": socket_type,
             "vpn_protocol": {"tcp": PROTO_WIREGUARD_TCP, "tls": PROTO_WIREGUARD_TLS}[socket_type],
             "rule_name": f"fvpn_pwg_{iface}",
+            "ipv6": ipv6,
         }
 
     def start_proton_wg_tunnel(self, iface: str, mark: str, table_num: int,
@@ -145,17 +150,14 @@ class RouterProtonWG:
 
         env_exists = self._ssh.exec(f"[ -f {env_path} ] && echo yes || echo no").strip()
         if env_exists != "yes":
-            socket_type = "tcp"
-            conf_content = self._ssh.exec(f"cat {conf_path} 2>/dev/null").strip()
-            if ":443" in conf_content:
-                socket_type = "tcp"
             env = (
                 f"PROTON_WG_INTERFACE_NAME={iface}\n"
-                f"PROTON_WG_SOCKET_TYPE={socket_type}\n"
+                f"PROTON_WG_SOCKET_TYPE=tcp\n"
                 f"PROTON_WG_SERVER_NAME_STRATEGY=1\n"
                 f"FVPN_TUNNEL_ID={tunnel_id}\n"
                 f"FVPN_MARK={mark}\n"
                 f"FVPN_IPSET={ipset_name}\n"
+                f"FVPN_IPV6=0\n"
             )
             self._ssh.write_file(env_path, env)
 
@@ -182,10 +184,26 @@ class RouterProtonWG:
         self._iproute.addr_add("10.2.0.2/32", iface)
         self._iproute.link_set_up(iface)
 
+        # Check if IPv6 is enabled (read env from disk only if we didn't just write it)
+        if env_exists == "yes":
+            env_content = self._ssh.exec(f"cat {env_path} 2>/dev/null").strip()
+            _ipv6_enabled = "FVPN_IPV6=1" in env_content
+        else:
+            _ipv6_enabled = False  # Reconstructed env defaults to FVPN_IPV6=0
+
+        if _ipv6_enabled:
+            from consts import PROTON_WG_IPV6_ADDR
+            self._iproute.addr_add_v6(PROTON_WG_IPV6_ADDR, iface)
+
         # 5. Routing table + ip rules
         self._iproute.route_add("default", iface, table_num)
         self._iproute.route_add_blackhole("default", table_num, metric=254)
         self._iproute.rule_add(mark, "0xf000", table_num, 6000)
+
+        if _ipv6_enabled:
+            self._iproute.route_add_v6("default", iface, table_num)
+            self._iproute.route_add_blackhole_v6("default", table_num, metric=254)
+            self._iproute.rule_add_v6(mark, "0xf000", table_num, 6000)
 
         # 6. Firewall zone via UCI
         self._ssh.exec(
@@ -207,7 +225,10 @@ class RouterProtonWG:
         # 7. Rebuild ALL proton-wg mangle MARK rules
         self._rebuild_proton_wg_mangle_rules()
 
-        # 8. Wait for WG handshake
+        # 8. Per-tunnel dnsmasq (DNS isolation + adblock support)
+        self._start_proton_wg_dnsmasq(iface, mark, dns)
+
+        # 9. Wait for WG handshake
         for _ in range(15):
             hs = self._ssh.exec(f"wg show {iface} latest-handshakes 2>/dev/null")
             if hs.strip() and "\t0" not in hs:
@@ -219,12 +240,17 @@ class RouterProtonWG:
         """Stop a proton-wg tunnel: kill process, clean up routing + firewall."""
         chain = f"TUNNEL{tunnel_id}_ROUTE_POLICY"
 
+        # 0. Tear down per-tunnel dnsmasq first (before firewall reload)
+        self._stop_proton_wg_dnsmasq(iface, mark)
+
         # 1. Remove mangle chain
         self._iptables.delete_chain("mangle", "ROUTE_POLICY", chain)
 
-        # 2. Remove ip rules + routes
+        # 2. Remove ip rules + routes (IPv4 + IPv6)
         self._iproute.rule_del(mark, "0xf000", table_num)
         self._iproute.route_flush_table(table_num)
+        self._iproute.rule_del_v6(mark, "0xf000", table_num)
+        self._iproute.route_flush_table_v6(table_num)
 
         # 3. Kill ONLY this tunnel's proton-wg process
         pid = self._ssh.exec(
@@ -248,6 +274,118 @@ class RouterProtonWG:
 
         # 6. Clean up log
         self._ssh.exec(f"rm -f /tmp/{iface}.log")
+
+    # ── Per-tunnel dnsmasq for DNS isolation ──────────────────────────
+
+    @staticmethod
+    def _dns_port(mark: str) -> int:
+        """Compute the dnsmasq port for a proton-wg tunnel from its mark.
+
+        Port = 2000 + (mark >> 12) * 100 + 53, giving:
+        0x6000→2653, 0x7000→2753, 0x9000→2953, 0xf000→3553
+        """
+        return 2000 + (int(mark, 16) >> 12) * 100 + 53
+
+    @staticmethod
+    def _ct_zone(mark: str) -> int:
+        """Conntrack zone ID = mark value as decimal."""
+        return int(mark, 16)
+
+    @staticmethod
+    def _dns_iptables_cmds(mark: str, port: int, zone: int) -> list:
+        """Build the 3 check-or-append iptables commands for DNS CT zone + REDIRECT.
+
+        Used by both _start_proton_wg_dnsmasq (live apply) and
+        _rebuild_proton_wg_mangle_rules (firewall include script).
+        """
+        return [
+            (f"iptables -t raw -C pre_dns_deal_conn_zone "
+             f"-p udp ! -i lo -m mark --mark {mark}/0xf000 "
+             f"-m addrtype --dst-type LOCAL -j CT --zone {zone} 2>/dev/null || "
+             f"iptables -t raw -A pre_dns_deal_conn_zone "
+             f"-p udp ! -i lo -m mark --mark {mark}/0xf000 "
+             f"-m addrtype --dst-type LOCAL -j CT --zone {zone}"),
+            (f"iptables -t raw -C out_dns_deal_conn_zone "
+             f"-p udp ! -o lo -m udp --sport {port} "
+             f"-j CT --zone {zone} 2>/dev/null || "
+             f"iptables -t raw -A out_dns_deal_conn_zone "
+             f"-p udp ! -o lo -m udp --sport {port} "
+             f"-j CT --zone {zone}"),
+            (f"iptables -t nat -C policy_redirect "
+             f"-p udp -m mark --mark {mark}/0xf000 "
+             f"-m addrtype --dst-type LOCAL "
+             f"--dport 53 -j REDIRECT --to-ports {port} 2>/dev/null || "
+             f"iptables -t nat -A policy_redirect "
+             f"-p udp -m mark --mark {mark}/0xf000 "
+             f"-m addrtype --dst-type LOCAL "
+             f"--dport 53 -j REDIRECT --to-ports {port}"),
+        ]
+
+    def _start_proton_wg_dnsmasq(self, iface: str, mark: str,
+                                  dns: str = "10.2.0.1") -> None:
+        """Set up a per-tunnel dnsmasq instance with CT zone + DNS redirect.
+
+        Replicates the firmware's per-tunnel DNS mechanism (used for
+        wgclient1-4) so that proton-wg tunnels get isolated DNS
+        resolution and adblock support via conf-dir injection.
+        """
+        port = self._dns_port(mark)
+        zone = self._ct_zone(mark)
+        conf_dir = f"/tmp/dnsmasq.d.{iface}"
+        resolv_file = f"/tmp/resolv.conf.d/resolv.conf.{iface}"
+        conf_path = f"/var/etc/dnsmasq.conf.{iface}"
+
+        # 1. Create conf-dir and resolv-file
+        self._ssh.exec(f"mkdir -p {conf_dir} /tmp/resolv.conf.d")
+        self._ssh.write_file(resolv_file, f"# Interface {iface}\nnameserver {dns}\n")
+
+        # 2. Write minimal dnsmasq config (matches firmware pattern)
+        dnsmasq_conf = (
+            f"# Auto-generated by FlintVPN — per-tunnel DNS for {iface}\n"
+            f"port={port}\n"
+            f"bind-dynamic\n"
+            f"no-dhcp-interface=\n"
+            f"no-hosts\n"
+            f"cache-size=1000\n"
+            f"resolv-file={resolv_file}\n"
+            f"conf-dir={conf_dir}\n"
+            f"log-facility=/dev/null\n"
+        )
+        self._ssh.write_file(conf_path, dnsmasq_conf)
+
+        # 3. Start dnsmasq process
+        self._ssh.exec(
+            f"pgrep -f 'dnsmasq.*{conf_path}' >/dev/null 2>&1 || "
+            f"/usr/sbin/dnsmasq -C {conf_path}"
+        )
+
+        # 4. CT zone + DNS REDIRECT rules
+        for cmd in self._dns_iptables_cmds(mark, port, zone):
+            self._ssh.exec(cmd)
+
+    def _stop_proton_wg_dnsmasq(self, iface: str, mark: str) -> None:
+        """Tear down the per-tunnel dnsmasq and associated iptables rules."""
+        port = self._dns_port(mark)
+        zone = self._ct_zone(mark)
+        conf_path = f"/var/etc/dnsmasq.conf.{iface}"
+        conf_dir = f"/tmp/dnsmasq.d.{iface}"
+        resolv_file = f"/tmp/resolv.conf.d/resolv.conf.{iface}"
+
+        # Single batched cleanup: kill dnsmasq, remove iptables rules, delete files
+        self._ssh.exec(
+            f"pgrep -f 'dnsmasq.*{conf_path}' | xargs kill 2>/dev/null; "
+            f"iptables -t raw -D pre_dns_deal_conn_zone "
+            f"-p udp ! -i lo -m mark --mark {mark}/0xf000 "
+            f"-m addrtype --dst-type LOCAL -j CT --zone {zone} 2>/dev/null; "
+            f"iptables -t raw -D out_dns_deal_conn_zone "
+            f"-p udp ! -o lo -m udp --sport {port} "
+            f"-j CT --zone {zone} 2>/dev/null; "
+            f"iptables -t nat -D policy_redirect "
+            f"-p udp -m mark --mark {mark}/0xf000 "
+            f"-m addrtype --dst-type LOCAL "
+            f"--dport 53 -j REDIRECT --to-ports {port} 2>/dev/null; "
+            f"rm -rf {conf_dir} {resolv_file} {conf_path}; true"
+        )
 
     def _rebuild_proton_wg_mangle_rules(self) -> None:
         """Rebuild mangle MARK rules for ALL active proton-wg tunnels."""
@@ -305,12 +443,21 @@ class RouterProtonWG:
                 f"iptables -t mangle -I ROUTE_POLICY 1 -j {chain}"
             )
 
-        if cmds:
-            self._ssh.exec("; ".join(cmds))
+        # DNS infrastructure: CT zone + REDIRECT for each tunnel's dnsmasq
+        dns_cmds = []
+        for iface, mark, ipset_name, tid in tunnels:
+            dns_cmds.extend(self._dns_iptables_cmds(
+                mark, self._dns_port(mark), self._ct_zone(mark),
+            ))
 
-        script = "#!/bin/sh\n# Auto-generated by FlintVPN — proton-wg mangle rules\n"
+        all_cmds = cmds + dns_cmds
+
+        if all_cmds:
+            self._ssh.exec("; ".join(all_cmds))
+
+        script = "#!/bin/sh\n# Auto-generated by FlintVPN — proton-wg mangle + DNS rules\n"
         script += "# Re-applied on every firewall reload\n\n"
-        for cmd in cmds:
+        for cmd in all_cmds:
             script += cmd + "\n"
         self._ssh.write_file(f"{PROTON_WG_DIR}/mangle_rules.sh", script)
         self._ssh.exec(f"chmod +x {PROTON_WG_DIR}/mangle_rules.sh")
@@ -318,6 +465,137 @@ class RouterProtonWG:
         self._uci.ensure_firewall_include(
             "fvpn_pwg_mangle", f"{PROTON_WG_DIR}/mangle_rules.sh"
         )
+
+        # Rebuild IPv6 mangle rules for all tunnel types (proton-wg + vpn-client)
+        self._rebuild_ipv6_mangle_rules()
+
+    def _rebuild_ipv6_mangle_rules(self) -> None:
+        """Rebuild ip6tables mangle MARK + IPv6 routing for ALL active tunnels.
+
+        Covers both proton-wg tunnels (from .env files) and vpn-client
+        tunnels (from route_policy UCI rules). Also writes the IPv6
+        FORWARD rules (Phase 4 selective forwarding).
+
+        Since vpn-client is IPv4-only, FlintVPN must manage the entire
+        IPv6 routing layer for all tunnel types.
+        """
+        from consts import IPV6_MANGLE_SCRIPT, IPV6_FWD_SCRIPT
+
+        tunnels = []  # (iface, mark, ipset_name, tid, ipv6_enabled)
+
+        # 1. Proton-wg tunnels from .env files
+        envs = self._ssh.exec(f"ls {PROTON_WG_DIR}/*.env 2>/dev/null || true").strip()
+        for env_path in (envs.splitlines() if envs else []):
+            env_path = env_path.strip()
+            if not env_path:
+                continue
+            env_content = self._ssh.exec(f"cat {env_path} 2>/dev/null").strip()
+            vals = {}
+            for line in env_content.splitlines():
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    vals[k] = v
+            iface = vals.get("PROTON_WG_INTERFACE_NAME", "")
+            tid = vals.get("FVPN_TUNNEL_ID", "")
+            mark = vals.get("FVPN_MARK", "")
+            ipset_name = vals.get("FVPN_IPSET", "")
+            ipv6_flag = vals.get("FVPN_IPV6", "0")
+            if not (iface and tid and mark and ipset_name):
+                continue
+            tunnels.append((iface, mark, ipset_name, tid, ipv6_flag == "1"))
+
+        # 2. vpn-client tunnels from route_policy UCI rules
+        try:
+            rp_raw = self._ssh.exec(
+                "uci show route_policy 2>/dev/null | grep '\\.enabled=.1.' || true"
+            ).strip()
+            for line in rp_raw.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                # route_policy.fvpn_rule_9001.enabled='1'
+                rule_name = line.split(".")[1] if "." in line else ""
+                if not rule_name.startswith("fvpn_rule"):
+                    continue
+                via = self._ssh.exec(
+                    f"uci -q get route_policy.{rule_name}.via 2>/dev/null || echo ''"
+                ).strip()
+                tid = self._ssh.exec(
+                    f"uci -q get route_policy.{rule_name}.tunnel_id 2>/dev/null || echo ''"
+                ).strip()
+                from_ipset = self._ssh.exec(
+                    f"uci -q get route_policy.{rule_name}.from 2>/dev/null || echo ''"
+                ).strip()
+                if not (via and tid and from_ipset):
+                    continue
+                # Compute mark from tunnel_id (vpn-client uses 0x1000 + tunnel_id base)
+                try:
+                    mark_int = 0x1000 + int(tid)
+                    mark = f"0x{mark_int:x}"
+                except ValueError:
+                    continue
+                # vpn-client tunnels: IPv6 support depends on the profile's router_info
+                # For now, enable IPv6 mangle for all vpn-client tunnels — the FORWARD
+                # rules (Phase 4) will block actual forwarding for non-IPv6 tunnels
+                tunnels.append((via, mark, from_ipset, tid, True))
+        except Exception:
+            pass
+
+        # Build ip6tables mangle commands for IPv6-enabled tunnels
+        cmds = []
+        fwd_cmds = [
+            "ip6tables -F FORWARD 2>/dev/null || true",
+            "ip6tables -P FORWARD DROP",
+            "ip6tables -A FORWARD -m state --state ESTABLISHED,RELATED -j ACCEPT",
+        ]
+
+        for iface, mark, ipset_name, tid, ipv6_enabled in tunnels:
+            if not ipv6_enabled:
+                continue
+            # Check interface is UP
+            link = self._ssh.exec(f"ip link show {iface} 2>/dev/null | head -1").strip()
+            if not link or "UP" not in link:
+                continue
+
+            chain = f"FVPN_V6_{tid}"
+            cmds.append(f"ipset create {ipset_name} hash:mac -exist")
+            cmds.append(f"ip6tables -t mangle -N {chain} 2>/dev/null || true")
+            cmds.append(f"ip6tables -t mangle -F {chain}")
+            cmds.append(
+                f"ip6tables -t mangle -A {chain} "
+                f"-m mark --mark 0x0/0xf000 "
+                f"-m set --match-set {ipset_name} src "
+                f"-j MARK --set-xmark {mark}/0xf000"
+            )
+            cmds.append(
+                f"ip6tables -t mangle -C ROUTE_POLICY -j {chain} 2>/dev/null || "
+                f"ip6tables -t mangle -I ROUTE_POLICY 1 -j {chain}"
+            )
+
+            # Phase 4: Allow IPv6 forwarding for marked traffic to this tunnel
+            fwd_cmds.append(
+                f"ip6tables -A FORWARD -m mark --mark {mark}/0xf000 -o {iface} -j ACCEPT"
+            )
+
+        # Apply mangle rules
+        if cmds:
+            self._ssh.exec("; ".join(cmds))
+
+        # Write mangle firewall include script
+        mangle_script = "#!/bin/sh\n# Auto-generated by FlintVPN — IPv6 mangle rules\n\n"
+        for cmd in cmds:
+            mangle_script += cmd + "\n"
+        self._ssh.write_file(IPV6_MANGLE_SCRIPT, mangle_script)
+        self._ssh.exec(f"chmod +x {IPV6_MANGLE_SCRIPT}")
+        self._uci.ensure_firewall_include("fvpn_ipv6_mangle", IPV6_MANGLE_SCRIPT)
+
+        # Write IPv6 FORWARD script (Phase 4 selective forwarding)
+        fwd_script = "#!/bin/sh\n# Auto-generated by FlintVPN — IPv6 forwarding rules\n\n"
+        for cmd in fwd_cmds:
+            fwd_script += cmd + "\n"
+        self._ssh.write_file(IPV6_FWD_SCRIPT, fwd_script)
+        self._ssh.exec(f"chmod +x {IPV6_FWD_SCRIPT}")
+        self._uci.ensure_firewall_include("fvpn_ipv6_fwd", IPV6_FWD_SCRIPT)
 
     def delete_proton_wg_config(self, iface: str, tunnel_id: int) -> None:
         """Delete proton-wg config files, ipset, and rebuild mangle rules."""
@@ -366,11 +644,28 @@ start_service() {
          table_num=$((1000 + 0x$(echo "$mark" | sed 's/0x//;s/000//'))) && \
          ip route add default dev "$iface" table "$table_num" 2>/dev/null && \
          ip route add blackhole default metric 254 table "$table_num" 2>/dev/null && \
-         ip rule add fwmark "$mark"/0xf000 lookup "$table_num" priority 6000 2>/dev/null \
+         ip rule add fwmark "$mark"/0xf000 lookup "$table_num" priority 6000 2>/dev/null && \
+         # IPv6 routing (if enabled for this tunnel)
+         if [ "$FVPN_IPV6" = "1" ]; then \
+           ip -6 addr add 2a07:b944::2:2/128 dev "$iface" 2>/dev/null; \
+           ip -6 route add default dev "$iface" table "$table_num" 2>/dev/null; \
+           ip -6 route add blackhole default metric 254 table "$table_num" 2>/dev/null; \
+           ip -6 rule add fwmark "$mark"/0xf000 lookup "$table_num" priority 6000 2>/dev/null; \
+         fi && \
+         # Per-tunnel dnsmasq for DNS isolation
+         dns_port=$((2000 + (0x$(echo "$mark" | sed 's/0x//') / 4096) * 100 + 53)) && \
+         conf_dir="/tmp/dnsmasq.d.$iface" && \
+         resolv="/tmp/resolv.conf.d/resolv.conf.$iface" && \
+         dnsmasq_conf="/var/etc/dnsmasq.conf.$iface" && \
+         mkdir -p "$conf_dir" /tmp/resolv.conf.d && \
+         echo "nameserver 10.2.0.1" > "$resolv" && \
+         printf "port=%s\nbind-dynamic\nno-dhcp-interface=\nno-hosts\ncache-size=1000\nresolv-file=%s\nconf-dir=%s\nlog-facility=/dev/null\n" \
+           "$dns_port" "$resolv" "$conf_dir" > "$dnsmasq_conf" && \
+         /usr/sbin/dnsmasq -C "$dnsmasq_conf" \
         ) &
     done
 
-    # Apply mangle rules (firewall include handles subsequent reloads)
+    # Apply mangle + DNS rules (firewall include handles subsequent reloads)
     if [ -x "$PROTON_WG_DIR/mangle_rules.sh" ]; then
         (sleep 5 && "$PROTON_WG_DIR/mangle_rules.sh") &
     fi

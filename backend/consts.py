@@ -17,14 +17,8 @@ PROTO_WIREGUARD_TLS = "wireguard-tls"
 PROTO_OPENVPN = "openvpn"
 
 # DNS ad blocking
-ADBLOCK_PORT = 5354  # 5353 is taken by avahi-daemon (mDNS)
-ADBLOCK_CONF_PATH = "/etc/fvpn/dnsmasq-adblock.conf"
 ADBLOCK_HOSTS_PATH = "/etc/fvpn/blocklist.hosts"
 ADBLOCK_RULES_SCRIPT = "/etc/fvpn/adblock_rules.sh"
-ADBLOCK_MACS_FILE = "/etc/fvpn/adblock_macs.txt"
-ADBLOCK_IPSET = "fvpn_adblock_macs"
-ADBLOCK_CHAIN = "fvpn_adblock"
-ADBLOCK_INIT_SCRIPT = "/etc/init.d/fvpn-adblock"
 
 BLOCKLIST_PRESETS = {
     "hagezi-light": {
@@ -64,6 +58,12 @@ BLOCKLIST_PRESETS = {
         "info_url": "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
     },
 }
+
+# IPv6 dual-stack support
+IPV6_FWD_SCRIPT = "/etc/fvpn/ipv6_forward.sh"
+IPV6_MANGLE_SCRIPT = "/etc/fvpn/ipv6_mangle_rules.sh"
+PROTON_WG_IPV6_ADDR = "2a07:b944::2:2/128"
+PROTON_IPV6_DNS = "2a07:b944::2:1"
 
 # Tunnel health states
 HEALTH_GREEN = "green"

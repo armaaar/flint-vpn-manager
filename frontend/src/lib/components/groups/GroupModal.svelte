@@ -233,8 +233,7 @@
       // 1. Type change (VPN → non-VPN, or non-VPN ↔ non-VPN)
       if (typeChanged) {
         showToast(initialType === 'vpn' ? 'Removing tunnel…' : 'Changing type…');
-        const res = await api.changeType(liveProfile.id, { type });
-        if (res?.error) { showToast(res.error, true); return; }
+        await api.changeType(liveProfile.id, { type });
       }
 
       // 2. Metadata
@@ -248,27 +247,27 @@
       // 3. Protocol change (VPN → VPN, different protocol)
       if (type === 'vpn' && !typeChanged && protocolChanged) {
         showToast('Switching protocol…');
-        const res = await api.changeProtocol(liveProfile.id, {
+        await api.changeProtocol(liveProfile.id, {
           vpn_protocol: effectiveProtocol(),
           options: buildVpnOptions(),
           server_scope: liveProfile.server_scope,
           ovpn_protocol: ovpnProtocol,
         });
-        if (res?.error) { showToast(res.error, true); return; }
       } else if (type === 'vpn' && !typeChanged && optionsChanged && liveProfile.server?.id) {
         // 5. VPN options changed without protocol change — regenerate tunnel
         showToast('Regenerating tunnel with new options…');
-        const res = await api.changeServer(liveProfile.id, {
+        await api.changeServer(liveProfile.id, {
           server_id: liveProfile.server.id,
           options: buildVpnOptions(),
           server_scope: liveProfile.server_scope,
         });
-        if (res?.error) { showToast(res.error, true); return; }
       }
 
       close();
       showToast('Group updated');
       dispatch('reload');
+    } catch (err) {
+      showToast(err.message || 'Failed to update group', true);
     } finally {
       saving = false;
     }
@@ -277,11 +276,16 @@
   async function deleteGroup() {
     if (!confirm(`Delete "${name}"? All devices will be unassigned.`)) return;
     deleting = true;
-    await api.deleteProfile(liveProfile.id);
-    deleting = false;
-    close();
-    showToast('Group deleted');
-    dispatch('reload');
+    try {
+      await api.deleteProfile(liveProfile.id);
+      close();
+      showToast('Group deleted');
+      dispatch('reload');
+    } catch (err) {
+      error = err.message;
+    } finally {
+      deleting = false;
+    }
   }
 
   function close() {
@@ -292,7 +296,7 @@
 </script>
 
 {#if isOpen}
-<div class="modal-overlay active" on:click|self={close}>
+<div class="modal-overlay active">
   <div class="modal">
     <div class="modal-header">
       <h2>{mode === 'create' ? 'Create Group' : 'Edit Group'}</h2>

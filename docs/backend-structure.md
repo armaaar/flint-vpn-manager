@@ -44,7 +44,7 @@ backend/
 │       ├── wireguard.py            # Kernel WG peer CRUD + live hot-swap
 │       ├── openvpn.py              # OpenVPN client CRUD
 │       ├── proton_wg.py            # Userspace WG TCP/TLS full lifecycle
-│       ├── adblock.py              # DNS blocking dnsmasq + ipset + iptables REDIRECT
+│       ├── adblock.py              # DNS blocking via addn-hosts injection into per-tunnel dnsmasq
 │       └── lan_access.py           # Network CRUD, zone forwarding, device exceptions
 │
 ├── services/                       # Business logic orchestrators (no SSH, no Flask)

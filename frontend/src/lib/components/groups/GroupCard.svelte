@@ -1,7 +1,7 @@
 <script>
   import { devices, profiles, showToast, movingDevices, smartProtocolStatus, reloadData } from '../../stores/app';
   import { api } from '../../api';
-  import { isOnline, deviceIcon } from '../../utils/device';
+  import { isOnline, deviceIcon, sortDevices } from '../../utils/device';
   import { countryFlagUrl } from '../../utils/country';
   import { derivedConnState, getStatusClass, getStatusLabel, getStatusBorderColor } from '../../utils/profile';
   import { buildGradient } from '../../utils/color';
@@ -14,7 +14,7 @@
   const dispatch = createEventDispatcher();
 
   const MAC_RE = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i;
-  $: devs = $devices.filter(d => d.profile_id === profile.id).map(d => ({ ...d, id: d.mac }));
+  $: devs = sortDevices($devices.filter(d => d.profile_id === profile.id)).map(d => ({ ...d, id: d.mac }));
   $: onlineCount = devs.filter(d => isOnline(d)).length;
 
   let deviceItems = [];
@@ -142,7 +142,7 @@
 </script>
 
 <div class="group-card" style="--card-color: {profile.color}; --status-color: {statusBorderColor}">
-  <div class="group-status-header {statusClass}" style="background: {headerGradient}">
+  <div class="group-status-header {statusClass}" class:non-vpn-header={profile.type !== 'vpn'} style="background: {headerGradient}">
     <div class="group-top">
       <div>
         <span class="group-name">{profile.icon} {profile.name}</span>
@@ -183,6 +183,9 @@
                 on:click|stopPropagation={() => dispatch('pickserver', { profileId: profile.id })}
                 title="Change server">…</button>
       </div>
+      {#if profile.server && profile.server.ipv6 === false && profile.router_info?.ipv6}
+        <div class="ipv6-warning">IPv6 blocked — server does not support IPv6</div>
+      {/if}
     {/if}
 
     {#if profile.type === 'vpn'}
@@ -211,7 +214,7 @@
         {#if (profile.options?.netshield ?? 0) > 0}
           <span class="opt-pill ns-on" class:ns-active={connState === 'connected'}
                 title="NetShield {netshieldLabel}{connState === 'connected' ? ' — Active' : ''}">
-            ⛨ {connState === 'connected' ? netshieldLabel : 'NS' + profile.options.netshield}
+            ⛨ NS{profile.options.netshield}
           </span>
         {/if}
         {#if profile.adblock}<span class="opt-pill ab-on" title="DNS Ad Blocker">🚫 Ads</span>{/if}
@@ -318,6 +321,7 @@
 <style>
   .group-card { background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); width: 300px; flex: 0 0 300px; overflow: hidden; display: flex; flex-direction: column; border-left: 6px solid var(--status-color, #636e72); transition: border-color .3s ease; }
   .group-status-header { padding: 20px; border-radius: 0; position: relative; min-height: 140px; display: flex; flex-direction: column; justify-content: space-between; }
+  .group-status-header.non-vpn-header { min-height: auto; border-bottom: 1px solid var(--border); }
   .group-top { display: flex; justify-content: space-between; align-items: flex-start; }
   .group-name { font-size: 1.1rem; font-weight: 700; color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,.3); }
   .badge-guest { font-size: .65rem; background: rgba(46,204,113,.25); color: #fff; padding: 2px 6px; border-radius: 3px; font-weight: 600; margin-left: 6px; vertical-align: middle; }
@@ -332,6 +336,7 @@
   .group-server-name { font-size: .95rem; color: #fff; font-weight: 500; flex: 1; }
   .group-server-menu { background: none; border: none; color: rgba(255,255,255,.7); font-size: 1.2rem; padding: 4px; cursor: pointer; letter-spacing: 2px; }
   .group-server-menu:hover { color: #fff; }
+  .ipv6-warning { font-size: .75rem; color: var(--warning, #e2b93d); padding: 4px 0 0; }
   :global(.flag-img) { width: 20px; height: 15px; vertical-align: middle; border-radius: 2px; object-fit: cover; }
   .proto-tag { font-size: .6rem; padding: 1px 5px; border-radius: 3px; font-weight: 700; vertical-align: middle; margin-left: 4px; }
   .proto-tag.wg { background: rgba(46,204,113,.2); color: #2ecc71; }

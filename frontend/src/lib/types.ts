@@ -28,6 +28,7 @@ export interface RouterInfo {
   tunnel_id?: number;
   tunnel_name?: string;
   ipset_name?: string;
+  ipv6?: boolean;
 }
 
 export interface ServerInfo {
@@ -47,6 +48,7 @@ export interface ServerInfo {
   streaming?: boolean;
   secure_core?: boolean;
   tor?: boolean;
+  ipv6?: boolean;
   enabled?: boolean;
   // UI-added fields
   blacklisted?: boolean;
@@ -105,6 +107,7 @@ export interface Device {
   tx_speed: number;
   total_rx: number;
   total_tx: number;
+  ipv6_addresses?: string[];
   // DnD requires an id field
   id?: string;
 }
@@ -135,6 +138,7 @@ export interface SmartProtocolStatus {
 export interface AppSettings {
   router_ip: string;
   alternative_routing?: boolean;
+  global_ipv6_enabled?: boolean;
   auto_optimize?: {
     enabled: boolean;
     time: string;
@@ -162,6 +166,7 @@ export interface LanNetwork {
   device_count?: number;
   enabled?: boolean;
   isolated?: boolean;
+  ipv6_enabled?: boolean;
   is_lan?: boolean;
   is_guest?: boolean;
 }

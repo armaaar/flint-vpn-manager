@@ -16,7 +16,7 @@
 | **Latency Probe** | TCP connect-time to port 443. **Always from router** (never local). `curl -w "%{time_connect}"`. Tiebreaker within 15% score. |
 | **NetShield** | DNS ad/malware blocking. 0=off, 1=malware, 2=malware+ads+trackers. |
 | **Guest Group** | Auto-assign target for new MACs. Any group type. |
-| **DNS Ad Blocker** | Per-group DNS-level blocking via second dnsmasq on port 5353. `fvpn_adblock_macs` hash:mac ipset + iptables REDIRECT in `policy_redirect` chain. Profile field `adblock: true/false`. VPN + NoVPN groups only. |
+| **DNS Ad Blocker** | Per-group DNS-level blocking via `addn-hosts` injection into per-tunnel dnsmasq conf-dirs. Blocklist file at `/etc/fvpn/blocklist.hosts` with dual-stack entries (IPv4 `0.0.0.0` + IPv6 `::`). Profile field `adblock: true/false`. VPN + NoVPN groups only. `sync_adblock(ifaces)` manages snippet lifecycle. |
 | **Anonymous section** | `@rule[N]` from GL.iNet UI edits. Self-healed to `fvpn_rule_*` by `heal_anonymous_rule_section`. |
 | **proton-wg** | Userspace WG (TCP/TLS). ARM64 binary at `/usr/bin/proton-wg`. FlintVPN-managed. |
 | **Persistent cert** | 365-day WG cert, `Mode: "persistent"`. Per-profile Ed25519 key. No local agent needed. |

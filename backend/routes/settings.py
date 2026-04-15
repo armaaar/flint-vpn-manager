@@ -41,6 +41,33 @@ def api_update_settings():
         if _registry.service is not None:
             _registry.service.router = get_router()
 
+    # Apply global IPv6 setting — cascades to all networks
+    if "global_ipv6_enabled" in data:
+        try:
+            router = get_router()
+            if data["global_ipv6_enabled"]:
+                router.firewall.ensure_ipv6_router_enabled()
+                # Enable IPv6 on all FlintVPN-managed networks
+                networks = router.lan_access.get_networks()
+                for net in networks:
+                    if not net.get("ipv6_enabled"):
+                        try:
+                            router.lan_access.set_ipv6(net["id"], True)
+                        except Exception:
+                            pass
+            else:
+                # Disable IPv6 on all networks first
+                networks = router.lan_access.get_networks()
+                for net in networks:
+                    if net.get("ipv6_enabled"):
+                        try:
+                            router.lan_access.set_ipv6(net["id"], False)
+                        except Exception:
+                            pass
+                router.firewall.disable_ipv6_router()
+        except Exception as e:
+            log.warning(f"Failed to apply global IPv6 setting: {e}")
+
     return jsonify(config)
 
 

@@ -76,6 +76,14 @@ def iproute():
     m.route_flush_table.return_value = None
     m.rule_add.return_value = None
     m.rule_del.return_value = None
+    # IPv6 variants
+    m.addr_add_v6.return_value = None
+    m.route_add_v6.return_value = None
+    m.route_add_blackhole_v6.return_value = None
+    m.route_flush_table_v6.return_value = None
+    m.rule_add_v6.return_value = None
+    m.rule_del_v6.return_value = None
+    m.neigh_show_v6.return_value = ""
     return m
 
 

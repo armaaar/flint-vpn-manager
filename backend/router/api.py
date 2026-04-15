@@ -9,21 +9,12 @@ This class provides the SSH transport (connect/exec/write_file/read_file),
 lazy-loads both layers, and exposes backward-compatible delegate methods.
 """
 
-import time
+import os
+import subprocess
+import tempfile
 from typing import Optional
 
 import paramiko
-
-from consts import (
-    HEALTH_AMBER,
-    HEALTH_CONNECTING,
-    HEALTH_GREEN,
-    HEALTH_RED,
-    PROTO_OPENVPN,
-    PROTO_WIREGUARD,
-    PROTO_WIREGUARD_TCP,
-    PROTO_WIREGUARD_TLS,
-)
 
 # WireGuard mark base for route policy (matches rtp2.sh)
 WG_MARK_BASE = 0x1000
@@ -112,14 +103,50 @@ class RouterAPI:
                 raise RuntimeError(f"SSH connection lost: {e}") from e
 
     def write_file(self, remote_path: str, content: str):
-        """Write a file to the router via SSH stdin pipe."""
-        self.connect()
-        _, stdout, stderr = self._client.exec_command(
-            f"cat > {remote_path}", timeout=30
-        )
-        stdout.channel.sendall(content.encode("utf-8"))
-        stdout.channel.shutdown_write()
-        stdout.channel.recv_exit_status()
+        """Write a file to the router.
+
+        Small files (<1MB) use SSH stdin pipe. Large files use a local
+        temp file + ``scp`` to avoid Dropbear channel buffer limits.
+        """
+        data = content.encode("utf-8")
+        # Dropbear SSH drops large stdin pipes; use scp for files >= 1MB
+        _SCP_THRESHOLD = 1_000_000
+        if len(data) < _SCP_THRESHOLD:
+            self.connect()
+            _, stdout, stderr = self._client.exec_command(
+                f"cat > {remote_path}", timeout=30
+            )
+            stdout.channel.sendall(data)
+            stdout.channel.shutdown_write()
+            stdout.channel.recv_exit_status()
+        else:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", suffix=".tmp", delete=False
+            ) as f:
+                f.write(data)
+                tmp_path = f.name
+            try:
+                scp_args = [
+                    "scp", "-O", "-q",
+                    "-o", "StrictHostKeyChecking=no",
+                    "-o", "UserKnownHostsFile=/dev/null",
+                    "-P", str(self.port),
+                ]
+                if self.key_filename:
+                    scp_args += ["-i", self.key_filename]
+                scp_args += [
+                    tmp_path,
+                    f"{self.username}@{self.host}:{remote_path}",
+                ]
+                result = subprocess.run(
+                    scp_args, capture_output=True, timeout=120
+                )
+                if result.returncode != 0:
+                    raise RuntimeError(
+                        f"scp failed: {result.stderr.decode(errors='replace')}"
+                    )
+            finally:
+                os.unlink(tmp_path)
 
     def read_file(self, remote_path: str) -> Optional[str]:
         """Read a file from the router. Returns None if missing or empty."""
@@ -187,6 +214,13 @@ class RouterAPI:
             self._service_ctl_tool = ServiceCtl(self)
         return self._service_ctl_tool
 
+    @property
+    def ip6tables(self):
+        if not hasattr(self, "_ip6tables_tool"):
+            from router.tools.iptables import Ip6tables
+            self._ip6tables_tool = Ip6tables(self)
+        return self._ip6tables_tool
+
     # ── Feature Layer Properties ─────────────────────────────────────────
 
     @property
@@ -200,7 +234,10 @@ class RouterAPI:
     def tunnel(self):
         if not hasattr(self, "_tunnel_facade"):
             from router.facades.tunnel import RouterTunnel
-            self._tunnel_facade = RouterTunnel(self.uci, self.service_ctl, self)
+            self._tunnel_facade = RouterTunnel(
+                self.uci, self.service_ctl, self,
+                ipv6_mangle_rebuild=lambda: self.proton_wg._rebuild_ipv6_mangle_rules(),
+            )
         return self._tunnel_facade
 
     @property
@@ -228,6 +265,7 @@ class RouterAPI:
             from router.facades.adblock import RouterAdblock
             self._adblock_facade = RouterAdblock(
                 self.uci, self.ipset_tool, self.iptables, self.service_ctl, self,
+                ip6tables=self.ip6tables,
             )
         return self._adblock_facade
 
@@ -237,6 +275,7 @@ class RouterAPI:
             from router.facades.lan_access import RouterLanAccess
             self._lan_access_facade = RouterLanAccess(
                 self.uci, self.iptables, self.service_ctl, self,
+                ip6tables=self.ip6tables,
             )
         return self._lan_access_facade
 

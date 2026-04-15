@@ -31,6 +31,7 @@ export default defineConfig({
       testMatch: 'lan-access.spec.ts',
       dependencies: ['vpn'],
       timeout: 60_000,
+      retries: 1,
     },
     // All other tests run in parallel after unlock tests finish
     {

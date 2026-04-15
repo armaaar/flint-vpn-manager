@@ -458,3 +458,78 @@ class TestCertRenewal:
             opt.check_and_refresh_certs()
 
         mock_proton.refresh_wireguard_cert.assert_not_called()
+
+
+class TestBlocklistUpdate:
+    """Tests for check_and_update_blocklist() — daily blocklist auto-update."""
+
+    def test_skips_when_already_checked_today(self, optimizer):
+        opt, *_ = optimizer
+        opt._last_blocklist_check_date = datetime.now().strftime("%Y-%m-%d")
+        with patch("background.auto_optimizer.sm") as mock_sm:
+            opt.check_and_update_blocklist()
+        mock_sm.get_config.assert_not_called()
+
+    def test_skips_when_no_sources_configured(self, optimizer):
+        opt, *_ = optimizer
+        with patch("background.auto_optimizer.sm") as mock_sm, \
+             patch("background.auto_optimizer.datetime") as mock_dt:
+            mock_dt.now.return_value = datetime(2026, 4, 9, 12, 0)
+            mock_sm.get_config.return_value = {"adblock": {"blocklist_sources": []}}
+            opt.check_and_update_blocklist()
+
+        assert opt._last_blocklist_check_date == "2026-04-09"
+
+    def test_calls_download_and_merge_blocklists(self, optimizer):
+        """Should use download_and_merge_blocklists() instead of duplicating logic."""
+        opt, _, get_router, *_ = optimizer
+        mock_router = MagicMock()
+        get_router.return_value = mock_router
+
+        with patch("background.auto_optimizer.sm") as mock_sm, \
+             patch("background.auto_optimizer.datetime") as mock_dt, \
+             patch("services.adblock_service.download_and_merge_blocklists") as mock_dl:
+            mock_dt.now.return_value = datetime(2026, 4, 9, 12, 0)
+            mock_sm.get_config.return_value = {
+                "adblock": {"blocklist_sources": ["hagezi-light"]}
+            }
+            mock_dl.return_value = ("0.0.0.0 ads.test\n:: ads.test\n", 1, [])
+            opt.check_and_update_blocklist()
+
+        mock_dl.assert_called_once()
+        mock_router.adblock.upload_blocklist.assert_called_once()
+
+    def test_uploads_content_to_router(self, optimizer):
+        opt, _, get_router, *_ = optimizer
+        mock_router = MagicMock()
+        get_router.return_value = mock_router
+        content = "0.0.0.0 test.com\n:: test.com\n"
+
+        with patch("background.auto_optimizer.sm") as mock_sm, \
+             patch("background.auto_optimizer.datetime") as mock_dt, \
+             patch("services.adblock_service.download_and_merge_blocklists") as mock_dl:
+            mock_dt.now.return_value = datetime(2026, 4, 9, 12, 0)
+            mock_sm.get_config.return_value = {
+                "adblock": {"blocklist_sources": ["hagezi-light"]}
+            }
+            mock_dl.return_value = (content, 1, [])
+            opt.check_and_update_blocklist()
+
+        mock_router.adblock.upload_blocklist.assert_called_once_with(content)
+
+    def test_skips_when_download_returns_none(self, optimizer):
+        opt, _, get_router, *_ = optimizer
+        mock_router = MagicMock()
+        get_router.return_value = mock_router
+
+        with patch("background.auto_optimizer.sm") as mock_sm, \
+             patch("background.auto_optimizer.datetime") as mock_dt, \
+             patch("services.adblock_service.download_and_merge_blocklists") as mock_dl:
+            mock_dt.now.return_value = datetime(2026, 4, 9, 12, 0)
+            mock_sm.get_config.return_value = {
+                "adblock": {"blocklist_sources": ["hagezi-light"]}
+            }
+            mock_dl.return_value = (None, 0, ["hagezi-light"])
+            opt.check_and_update_blocklist()
+
+        mock_router.adblock.upload_blocklist.assert_not_called()

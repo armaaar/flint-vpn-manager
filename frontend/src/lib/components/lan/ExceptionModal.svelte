@@ -109,7 +109,7 @@
   const close = () => dispatch('close');
 </script>
 
-<div class="modal-overlay active" on:click|self={close}>
+<div class="modal-overlay active">
   <div class="modal">
     <div class="modal-header">
       <h2>{exception ? 'Edit' : 'Add'} Exception</h2>

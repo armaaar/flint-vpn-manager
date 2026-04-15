@@ -17,10 +17,11 @@ from consts import (
 class RouterTunnel:
     """Facade for VPN tunnel control on the GL.iNet Flint 2."""
 
-    def __init__(self, uci, service_ctl, ssh):
+    def __init__(self, uci, service_ctl, ssh, ipv6_mangle_rebuild=None):
         self._uci = uci
         self._service_ctl = service_ctl
         self._ssh = ssh  # raw exec for ifstatus, wg show, etc.
+        self._ipv6_mangle_rebuild = ipv6_mangle_rebuild
 
     # ── Tunnel Control ───────────────────────────────────────────────────
 
@@ -41,6 +42,14 @@ class RouterTunnel:
 
         self._service_ctl.restart("vpn-client")
 
+        # Rebuild IPv6 mangle rules after vpn-client restart.
+        # vpn-client only sets up IPv4 mangle/routing — FlintVPN manages IPv6.
+        if self._ipv6_mangle_rebuild:
+            try:
+                self._ipv6_mangle_rebuild()
+            except Exception:
+                pass
+
     def bring_tunnel_down(self, rule_name: str, **_kwargs):
         """Bring a VPN tunnel down by disabling its route policy rule.
 
@@ -54,6 +63,13 @@ class RouterTunnel:
         ])
 
         self._service_ctl.restart("vpn-client")
+
+        # Rebuild IPv6 mangle rules after vpn-client restart
+        if self._ipv6_mangle_rebuild:
+            try:
+                self._ipv6_mangle_rebuild()
+            except Exception:
+                pass
 
         self._uci.multi([
             f"uci set route_policy.{rule_name}.killswitch='1'",

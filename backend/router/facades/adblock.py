@@ -1,80 +1,69 @@
-"""Router adblock facade — second dnsmasq instance + ipset + iptables REDIRECT.
+"""Router adblock facade — blocklist injection into per-tunnel dnsmasq instances.
 
-Manages a blocking dnsmasq on port 5354 with community blocklists.
-Devices in adblock-enabled groups have their DNS redirected via iptables
-from port 53 to 5354. The blocking dnsmasq forwards non-blocked queries
-to the main dnsmasq on 127.0.0.1:53.
+Instead of running a separate blocking dnsmasq with iptables REDIRECT (which
+breaks GL.iNet's per-tunnel conntrack zones and kills DNS for VPN-marked
+devices), we inject ``addn-hosts`` directives directly into the per-tunnel
+dnsmasq conf-dirs.  Each VPN profile's tunnel has its own dnsmasq instance
+with a ``conf-dir`` at ``/tmp/dnsmasq.d.<iface>/``.  For no-VPN profiles,
+the main dnsmasq uses ``/tmp/dnsmasq.d/``.
 
-Safety invariant: iptables REDIRECT rules are ONLY active when BOTH:
-  1. The blocking dnsmasq is confirmed listening on the port
-  2. The blocklist file is non-empty
-If either condition fails, REDIRECT rules are removed to prevent DNS
-blackholing (which kills internet for affected devices).
+This keeps DNS on the normal per-tunnel path with correct conntrack zones,
+while still providing ad-blocking via the shared blocklist file.
+
+Safety invariant: addn-hosts snippets are ONLY injected when the blocklist
+file on the router is non-empty.  If the blocklist is empty, all snippets
+are removed to prevent stale blocking after a failed update.
 
 Tool-layer objects (Uci, Ipset, Iptables, ServiceCtl) are injected directly.
-The raw ``ssh`` handle is kept only for netstat, grep, chmod, kill, and
-write_file calls.
+The raw ``ssh`` handle is kept for file operations and process signaling.
 """
 
 import logging
 
-from consts import (
-    ADBLOCK_CHAIN,
-    ADBLOCK_CONF_PATH,
-    ADBLOCK_HOSTS_PATH,
-    ADBLOCK_INIT_SCRIPT,
-    ADBLOCK_IPSET,
-    ADBLOCK_MACS_FILE,
-    ADBLOCK_PORT,
-    ADBLOCK_RULES_SCRIPT,
-)
+from consts import ADBLOCK_HOSTS_PATH, ADBLOCK_RULES_SCRIPT
 
 log = logging.getLogger("flintvpn")
 
+# Config snippet injected into each target dnsmasq conf-dir
+_SNIPPET_NAME = "fvpn-adblock"
 
-DNSMASQ_ADBLOCK_CONF = """\
-# FlintVPN — blocking dnsmasq for DNS ad filtering
-port={port}
-listen-address={listen}
-bind-interfaces
-no-resolv
-no-hosts
-addn-hosts={hosts}
-server={listen}#53
-cache-size=1000
-user=root
-log-facility=/dev/null
-"""
+# Persistence file: which interfaces currently have adblock active
+_IFACES_FILE = "/etc/fvpn/adblock_ifaces.txt"
 
-INIT_SCRIPT = f"""\
-#!/bin/sh /etc/rc.common
-START=99
-STOP=10
-USE_PROCD=1
+# Dnsmasq conf-dir paths
+_MAIN_CONF_DIR = "/tmp/dnsmasq.d"
+_TUNNEL_CONF_DIR_TPL = "/tmp/dnsmasq.d.{iface}"
 
-start_service() {{
-    # Only start if blocklist has content — empty blocklist = no point running
-    [ -s "{ADBLOCK_HOSTS_PATH}" ] || return
-    [ -f "{ADBLOCK_CONF_PATH}" ] || return
-    procd_open_instance "dnsmasq-adblock"
-    procd_set_param command /usr/sbin/dnsmasq -C "{ADBLOCK_CONF_PATH}" -k
-    procd_set_param stdout 0
-    procd_set_param stderr 0
-    procd_set_param respawn
-    procd_close_instance
-}}
-"""
+# Legacy infrastructure constants (for one-time cleanup only)
+_OLD_IPSET = "fvpn_adblock_macs"
+_OLD_CHAIN = "fvpn_adblock"
+_OLD_CONF_PATH = "/etc/fvpn/dnsmasq-adblock.conf"
+_OLD_INIT_SCRIPT = "/etc/init.d/fvpn-adblock"
+_OLD_MACS_FILE = "/etc/fvpn/adblock_macs.txt"
 
 
 class RouterAdblock:
     """Facade for DNS ad-blocking infrastructure on the GL.iNet Flint 2."""
 
-    def __init__(self, uci, ipset, iptables, service_ctl, ssh):
+    def __init__(self, uci, ipset, iptables, service_ctl, ssh, ip6tables=None):
         self._uci = uci
         self._ipset = ipset
         self._iptables = iptables
+        self._ip6tables = ip6tables
         self._service_ctl = service_ctl
-        self._ssh = ssh  # raw exec for netstat, grep, chmod, kill; write_file for configs
+        self._ssh = ssh
+
+    # ── Path helpers ───────────────────────────────────────────────────
+
+    @staticmethod
+    def _conf_dir(iface: str) -> str:
+        if iface == "main":
+            return _MAIN_CONF_DIR
+        return _TUNNEL_CONF_DIR_TPL.format(iface=iface)
+
+    @classmethod
+    def _snippet_path(cls, iface: str) -> str:
+        return f"{cls._conf_dir(iface)}/{_SNIPPET_NAME}"
 
     # ── Health checks ──────────────────────────────────────────────────
 
@@ -89,194 +78,172 @@ class RouterAdblock:
         except ValueError:
             return False
 
-    def _dnsmasq_is_healthy(self) -> bool:
-        """Check if the blocking dnsmasq is listening on the correct port."""
-        result = self._ssh.exec(
-            f"netstat -tlnup 2>/dev/null | grep ':{ADBLOCK_PORT} .*dnsmasq' || true"
-        ).strip()
-        return bool(result)
+    # ── Core sync ──────────────────────────────────────────────────────
 
-    def _redirect_is_safe(self) -> bool:
-        """Return True only if it's safe to redirect DNS to the blocking dnsmasq."""
-        return self._dnsmasq_is_healthy() and self._blocklist_has_content()
+    def sync_adblock(self, ifaces: set) -> None:
+        """Inject or remove the blocklist from per-tunnel dnsmasq instances.
 
-    # ── Blocking dnsmasq lifecycle ──────────────────────────────────────
-
-    def ensure_adblock_dnsmasq(self) -> bool:
-        """Ensure the blocking dnsmasq instance is running with a valid blocklist.
-
-        Always writes config and init script. Only starts the process if
-        the blocklist has content. Returns True if dnsmasq is healthy and
-        ready to receive redirected DNS.
+        Args:
+            ifaces: Set of interface names (e.g. ``{"wgclient1", "main"}``)
+                that should have ad-blocking active.  Pass empty set to
+                disable adblock everywhere.
         """
-        router_ip = self._uci.get(
-            "network.lan.ipaddr", "192.168.8.1"
-        ).strip() or "192.168.8.1"
-        conf = DNSMASQ_ADBLOCK_CONF.format(
-            port=ADBLOCK_PORT, listen=router_ip, hosts=ADBLOCK_HOSTS_PATH,
-        )
-        self._ssh.write_file(ADBLOCK_CONF_PATH, conf)
-        self._ssh.write_file(ADBLOCK_INIT_SCRIPT, INIT_SCRIPT)
-        self._ssh.exec(f"chmod +x {ADBLOCK_INIT_SCRIPT}")
-        self._service_ctl.enable("fvpn-adblock")
+        # One-time cleanup of legacy REDIRECT-based infrastructure
+        if not hasattr(self, "_legacy_cleaned"):
+            self._cleanup_old_redirect_infra()
+            self._legacy_cleaned = True
 
-        if not self._blocklist_has_content():
-            log.warning("Blocklist empty — not starting blocking dnsmasq")
-            self.stop_adblock_dnsmasq()
-            return False
-
-        if self._dnsmasq_is_healthy():
-            return True
-
-        log.info("Starting blocking dnsmasq on port %d", ADBLOCK_PORT)
-
-        self._service_ctl.stop("fvpn-adblock")
-        self._service_ctl.start("fvpn-adblock")
-
-        import time
-        for _ in range(3):
-            time.sleep(1)
-            if self._dnsmasq_is_healthy():
-                log.info("Blocking dnsmasq healthy on port %d", ADBLOCK_PORT)
-                return True
-
-        log.warning("Blocking dnsmasq failed to start on port %d", ADBLOCK_PORT)
-        return False
-
-    def stop_adblock_dnsmasq(self) -> None:
-        """Stop the blocking dnsmasq. Idempotent."""
-        self._service_ctl.stop("fvpn-adblock")
-        self._service_ctl.disable("fvpn-adblock")
-
-    # ── Ipset + iptables rules ──────────────────────────────────────────
-
-    def sync_adblock_rules(self, macs: set) -> None:
-        """Rebuild the adblock ipset and iptables REDIRECT rules.
-
-        Safety: only adds REDIRECT rules if the blocking dnsmasq is
-        confirmed healthy and the blocklist has content. Otherwise
-        removes all REDIRECT rules to prevent DNS blackholing.
-        """
-        if not macs:
-            self.cleanup_adblock()
+        if not ifaces or not self._blocklist_has_content():
+            self._remove_all_snippets()
+            self._write_firewall_include(set())
+            log.info("Adblock disabled: %s",
+                     "no interfaces" if not ifaces else "blocklist empty")
             return
 
-        dnsmasq_ready = self.ensure_adblock_dnsmasq()
-
-        mac_content = "\n".join(sorted(macs)) + "\n"
-        self._ssh.write_file(ADBLOCK_MACS_FILE, mac_content)
-
-        # Create and populate ipset
-        self._ipset.create(ADBLOCK_IPSET, "hash:mac")
-        self._ipset.flush(ADBLOCK_IPSET)
-        for mac in sorted(macs):
-            self._ipset.add(ADBLOCK_IPSET, mac)
-
-        if dnsmasq_ready:
-            self._apply_redirect_rules()
-            self._write_firewall_include(with_redirect=True)
-            log.info("Adblock rules synced: %d MACs, redirect ACTIVE", len(macs))
-        else:
-            self._remove_redirect_rules()
-            self._write_firewall_include(with_redirect=False)
-            log.warning(
-                "Adblock rules synced: %d MACs in ipset, redirect DISABLED "
-                "(blocklist empty or dnsmasq not ready)", len(macs)
+        # Inject snippet into target conf-dirs
+        for iface in ifaces:
+            conf_dir = self._conf_dir(iface)
+            self._ssh.exec(
+                f"[ -d {conf_dir} ] && "
+                f"echo 'addn-hosts={ADBLOCK_HOSTS_PATH}' > {conf_dir}/{_SNIPPET_NAME} "
+                f"|| true"
             )
 
-    def _apply_redirect_rules(self) -> None:
-        """Create the iptables REDIRECT chain and wire it into policy_redirect."""
-        chain = ADBLOCK_CHAIN
-        ipt = self._iptables
-        ipt.ensure_chain("nat", chain)
-        ipt.flush_chain("nat", chain)
-        ipt.append(
-            "nat", chain,
-            f"-m set --match-set {ADBLOCK_IPSET} src",
-            f"-p udp --dport 53 -j REDIRECT --to-ports {ADBLOCK_PORT}",
-        )
-        ipt.append(
-            "nat", chain,
-            f"-m set --match-set {ADBLOCK_IPSET} src",
-            f"-p tcp --dport 53 -j REDIRECT --to-ports {ADBLOCK_PORT}",
-        )
-        ipt.insert_if_absent("nat", "policy_redirect", f"-j {chain}")
+        # Remove stale snippets from interfaces that no longer need adblock
+        old_ifaces = self._read_ifaces_file()
+        removed_ifaces = old_ifaces - ifaces
+        for stale in removed_ifaces:
+            self._ssh.exec(f"rm -f {self._snippet_path(stale)}")
 
-    def _remove_redirect_rules(self) -> None:
-        """Remove REDIRECT rules from iptables. Idempotent."""
-        self._iptables.delete_chain("nat", "policy_redirect", ADBLOCK_CHAIN)
+        # Persist interface list for firewall-reload recovery
+        self._ssh.write_file(_IFACES_FILE, "\n".join(sorted(ifaces)) + "\n")
+        self._write_firewall_include(ifaces)
 
-    def _build_rule_commands(self) -> list:
-        """Build iptables commands for the firewall include script."""
-        chain = ADBLOCK_CHAIN
-        return [
-            f"iptables -t nat -N {chain} 2>/dev/null || true",
-            f"iptables -t nat -F {chain}",
-            f"iptables -t nat -A {chain} "
-            f"-m set --match-set {ADBLOCK_IPSET} src "
-            f"-p udp --dport 53 -j REDIRECT --to-ports {ADBLOCK_PORT}",
-            f"iptables -t nat -A {chain} "
-            f"-m set --match-set {ADBLOCK_IPSET} src "
-            f"-p tcp --dport 53 -j REDIRECT --to-ports {ADBLOCK_PORT}",
-            f"iptables -t nat -C policy_redirect -j {chain} 2>/dev/null || "
-            f"iptables -t nat -I policy_redirect 1 -j {chain}",
-        ]
+        # Restart dnsmasq instances that lost their snippet (SIGHUP won't
+        # unload addn-hosts from a deleted conf-dir file). Instances that
+        # gained or kept a snippet only need SIGHUP to re-read hosts files.
+        self._restart_dnsmasq(removed_ifaces)
+        self._sighup_dnsmasq()
+        log.info("Adblock synced: blocklist injected into %s",
+                 ", ".join(sorted(ifaces)))
 
-    def _write_firewall_include(self, with_redirect: bool) -> None:
-        """Write the firewall include script for reboot persistence."""
-        script = (
-            "#!/bin/sh\n"
-            "# Auto-generated by FlintVPN — DNS ad-block rules\n"
-            "# Re-applied on every firewall reload\n\n"
-            f"ipset create {ADBLOCK_IPSET} hash:mac -exist\n"
-            f"ipset flush {ADBLOCK_IPSET}\n"
-            f"if [ -f {ADBLOCK_MACS_FILE} ]; then\n"
-            f"  while read mac; do\n"
-            f'    [ -n "$mac" ] && ipset add {ADBLOCK_IPSET} "$mac" -exist 2>/dev/null\n'
-            f"  done < {ADBLOCK_MACS_FILE}\n"
-            f"fi\n\n"
-        )
-        if with_redirect:
-            script += (
-                f"# Only redirect if blocklist has content and dnsmasq is running\n"
-                f"if [ -s {ADBLOCK_HOSTS_PATH} ] && "
-                f"netstat -tlnup 2>/dev/null | grep -q ':{ADBLOCK_PORT} '; then\n"
-            )
-            for cmd in self._build_rule_commands():
-                script += f"  {cmd}\n"
-            script += "fi\n"
-
-        self._ssh.write_file(ADBLOCK_RULES_SCRIPT, script)
-        self._ssh.exec(f"chmod +x {ADBLOCK_RULES_SCRIPT}")
-
-        # Register as firewall include (idempotent)
-        self._uci.ensure_firewall_include("fvpn_adblock", ADBLOCK_RULES_SCRIPT)
-
-    # ── Blocklist upload ────────────────────────────────────────────────
+    # ── Blocklist upload ───────────────────────────────────────────────
 
     def upload_blocklist(self, content: str) -> None:
-        """Write blocklist to router and reload the blocking dnsmasq."""
+        """Write blocklist to router and reload affected dnsmasq instances."""
         self._ssh.write_file(ADBLOCK_HOSTS_PATH, content)
         log.info("Blocklist uploaded (%d bytes)", len(content))
+        if self._read_ifaces_file():
+            self._sighup_dnsmasq()
 
-        if self._dnsmasq_is_healthy():
-            self._ssh.exec(
-                f"kill -HUP $(pgrep -f 'dnsmasq.*dnsmasq-adblock') 2>/dev/null || true"
-            )
-        else:
-            self.ensure_adblock_dnsmasq()
-
-    # ── Full teardown ───────────────────────────────────────────────────
+    # ── Full teardown ──────────────────────────────────────────────────
 
     def cleanup_adblock(self) -> None:
         """Remove all adblock infrastructure from the router. Idempotent."""
-        self._remove_redirect_rules()
-        self._ipset.destroy(ADBLOCK_IPSET)
-        self.stop_adblock_dnsmasq()
+        self._remove_all_snippets()
+        self._cleanup_old_redirect_infra()
         self._uci.delete("firewall.fvpn_adblock")
         self._uci.commit("firewall")
         self._ssh.exec(
-            f"rm -f {ADBLOCK_RULES_SCRIPT} {ADBLOCK_MACS_FILE} "
-            f"{ADBLOCK_CONF_PATH} {ADBLOCK_INIT_SCRIPT}; true"
+            f"rm -f {ADBLOCK_RULES_SCRIPT} {_IFACES_FILE}; true"
         )
         log.info("Adblock infrastructure cleaned up")
+
+    # ── Private helpers ────────────────────────────────────────────────
+
+    def _read_ifaces_file(self) -> set:
+        result = self._ssh.exec(
+            f"cat {_IFACES_FILE} 2>/dev/null || true"
+        ).strip()
+        if not result:
+            return set()
+        return {line.strip() for line in result.splitlines() if line.strip()}
+
+    def _remove_all_snippets(self) -> None:
+        """Remove addn-hosts snippets from all known conf-dirs."""
+        old_ifaces = self._read_ifaces_file()
+        all_ifaces = set(old_ifaces)
+        paths = [self._snippet_path(iface) for iface in old_ifaces]
+        # Also clean all known tunnel dirs in case ifaces file was stale
+        for extra in ("main", "wgclient1", "wgclient2", "wgclient3", "wgclient4",
+                       "protonwg0", "protonwg1", "protonwg2", "protonwg3"):
+            p = self._snippet_path(extra)
+            if p not in paths:
+                paths.append(p)
+            all_ifaces.add(extra)
+        if paths:
+            self._ssh.exec(f"rm -f {' '.join(paths)}; true")
+        self._ssh.write_file(_IFACES_FILE, "")
+        self._restart_dnsmasq(all_ifaces)
+
+    def _sighup_dnsmasq(self) -> None:
+        """Send SIGHUP to all dnsmasq processes to re-read hosts files."""
+        self._ssh.exec("killall -HUP dnsmasq 2>/dev/null || true")
+
+    def _restart_dnsmasq(self, ifaces: set) -> None:
+        """Restart dnsmasq instances for the given interfaces.
+
+        Needed when removing addn-hosts snippets: SIGHUP won't unload
+        an addn-hosts directive that was loaded from a conf-dir file
+        that has since been deleted.  A full restart forces dnsmasq to
+        re-read its conf-dir, picking up the removal.
+        """
+        if not ifaces:
+            return
+        cmds = []
+        for iface in ifaces:
+            conf = ("dnsmasq.conf.cfg01411c" if iface == "main"
+                    else f"dnsmasq.conf.{iface}")
+            cmds.append(
+                f"pgrep -f 'dnsmasq.*{conf}' | xargs kill 2>/dev/null; "
+                f"sleep 0.5; "
+                f"pgrep -f 'dnsmasq.*{conf}' || "
+                f"/usr/sbin/dnsmasq -C /var/etc/{conf} 2>/dev/null"
+            )
+        self._ssh.exec("; ".join(cmds) + "; true")
+
+    def _write_firewall_include(self, ifaces: set) -> None:
+        """Write firewall include script for reboot/reload persistence."""
+        script = (
+            "#!/bin/sh\n"
+            "# Auto-generated by FlintVPN — DNS ad-block injection\n"
+            "# Re-applied on every firewall reload\n\n"
+        )
+        if ifaces:
+            script += (
+                f"if [ -s {ADBLOCK_HOSTS_PATH} ] && "
+                f"[ -f {_IFACES_FILE} ]; then\n"
+                f"  while IFS= read -r iface; do\n"
+                f"    [ -z \"$iface\" ] && continue\n"
+                f"    if [ \"$iface\" = \"main\" ]; then\n"
+                f"      conf_dir=\"{_MAIN_CONF_DIR}\"\n"
+                f"    else\n"
+                f"      conf_dir=\"/tmp/dnsmasq.d.$iface\"\n"
+                f"    fi\n"
+                f"    [ -d \"$conf_dir\" ] && "
+                f"echo 'addn-hosts={ADBLOCK_HOSTS_PATH}' "
+                f"> \"$conf_dir/{_SNIPPET_NAME}\"\n"
+                f"  done < {_IFACES_FILE}\n"
+                f"  killall -HUP dnsmasq 2>/dev/null || true\n"
+                f"fi\n"
+            )
+        self._ssh.write_file(ADBLOCK_RULES_SCRIPT, script)
+        self._ssh.exec(f"chmod +x {ADBLOCK_RULES_SCRIPT}")
+        self._uci.ensure_firewall_include("fvpn_adblock", ADBLOCK_RULES_SCRIPT)
+
+    def _cleanup_old_redirect_infra(self) -> None:
+        """Remove legacy REDIRECT-based adblock infrastructure (one-time migration)."""
+        for ipt in self._all_iptables():
+            ipt.delete_chain("nat", "policy_redirect", _OLD_CHAIN)
+        self._ipset.destroy(_OLD_IPSET)
+        self._service_ctl.stop("fvpn-adblock")
+        self._service_ctl.disable("fvpn-adblock")
+        self._ssh.exec(
+            f"rm -f {_OLD_CONF_PATH} {_OLD_INIT_SCRIPT} {_OLD_MACS_FILE}; true"
+        )
+
+    def _all_iptables(self):
+        """Yield iptables tool, and ip6tables if available."""
+        yield self._iptables
+        if self._ip6tables:
+            yield self._ip6tables

@@ -8,6 +8,8 @@ test.describe('LAN Access Page', () => {
     await expect(page.locator('.lan-page')).toBeVisible({ timeout: 5_000 });
     // Wait for networks to load from router (SSH can be slow)
     await expect(page.locator('text=Loading networks')).not.toBeVisible({ timeout: 30_000 });
+    // Wait for at least one network card to fully render (header + content)
+    await expect(page.locator('.network-card .network-header').first()).toBeVisible({ timeout: 10_000 });
   });
 
   test('shows page header with back and refresh buttons', async ({ page }) => {
@@ -49,13 +51,13 @@ test.describe('LAN Access Page', () => {
     await expect(firstCard.locator('.network-body')).toBeVisible({ timeout: 10_000 });
   });
 
-  test('expanded network shows device isolation toggle', async ({ page }) => {
+  test('expanded network shows toggle pills', async ({ page }) => {
     const firstCard = page.locator('.network-card').first();
     await firstCard.locator('.network-header').click();
     await expect(firstCard.locator('.network-body')).toBeVisible({ timeout: 10_000 });
 
-    // Isolation toggle checkbox
-    await expect(firstCard.locator('.network-body input[type="checkbox"]').first()).toBeVisible();
+    // Toggle pills for Isolated (always visible)
+    await expect(firstCard.locator('.toggle-pill:has-text("Isolated")')).toBeVisible();
   });
 
   test('expanded network shows access rules table', async ({ page }) => {
@@ -110,6 +112,23 @@ test.describe('LAN Access Page', () => {
     // Rule toggles are buttons with lock or check icons
     const ruleToggles = firstCard.locator('.rule-toggle, button:has-text("🔒"), button:has-text("✅")');
     await expect(ruleToggles.first()).toBeVisible();
+  });
+
+  test('expanded network shows IPv6 pill when global IPv6 enabled', async ({ page }) => {
+    const firstCard = page.locator('.network-card').first();
+    await firstCard.locator('.network-header').click();
+    await expect(firstCard.locator('.network-body')).toBeVisible({ timeout: 10_000 });
+
+    // IPv6 pill visibility depends on global setting
+    // Check settings first
+    const settings = await page.request.get('http://localhost:5173/api/settings');
+    const config = await settings.json();
+    const ipv6Pill = firstCard.locator('.toggle-pill:has-text("IPv6")');
+    if (config.global_ipv6_enabled) {
+      await expect(ipv6Pill).toBeVisible();
+    } else {
+      await expect(ipv6Pill).not.toBeVisible();
+    }
   });
 
   test('back button returns to dashboard', async ({ page }) => {

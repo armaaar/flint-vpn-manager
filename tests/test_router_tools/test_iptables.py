@@ -1,10 +1,10 @@
-"""Tests for router_tools.iptables — iptables command wrapper."""
+"""Tests for router_tools.iptables — iptables and ip6tables command wrappers."""
 
 from unittest.mock import MagicMock
 
 import pytest
 
-from router.tools.iptables import Iptables
+from router.tools.iptables import Iptables, Ip6tables
 
 
 @pytest.fixture
@@ -90,3 +90,49 @@ class TestListRules:
     def test_returns_empty_on_error(self, ipt, ssh):
         ssh.exec.side_effect = RuntimeError("fail")
         assert ipt.list_rules("mangle", "NONEXIST") == []
+
+
+# ── Ip6tables ────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def ip6t(ssh):
+    return Ip6tables(ssh)
+
+
+class TestIp6tablesEnsureChain:
+    def test_uses_ip6tables_binary(self, ip6t, ssh):
+        ip6t.ensure_chain("nat", "fvpn_adblock")
+        ssh.exec.assert_called_once_with(
+            "ip6tables -t nat -N fvpn_adblock 2>/dev/null || true"
+        )
+
+
+class TestIp6tablesDeleteChain:
+    def test_uses_ip6tables_binary(self, ip6t, ssh):
+        ip6t.delete_chain("mangle", "ROUTE_POLICY", "FVPN_V6_300")
+        cmd = ssh.exec.call_args[0][0]
+        assert cmd.startswith("ip6tables")
+        assert "-D ROUTE_POLICY -j FVPN_V6_300" in cmd
+        assert "-F FVPN_V6_300" in cmd
+        assert "-X FVPN_V6_300" in cmd
+
+
+class TestIp6tablesAppend:
+    def test_uses_ip6tables_binary(self, ip6t, ssh):
+        ip6t.append(
+            "nat", "fvpn_adblock",
+            "-p udp --dport 53 -j REDIRECT --to-ports 5354",
+        )
+        ssh.exec.assert_called_once_with(
+            "ip6tables -t nat -A fvpn_adblock "
+            "-p udp --dport 53 -j REDIRECT --to-ports 5354"
+        )
+
+
+class TestIp6tablesInsertIfAbsent:
+    def test_uses_ip6tables_binary(self, ip6t, ssh):
+        ip6t.insert_if_absent("nat", "policy_redirect", "-j fvpn_adblock")
+        cmd = ssh.exec.call_args[0][0]
+        assert "ip6tables -t nat -C" in cmd
+        assert "ip6tables -t nat -I" in cmd

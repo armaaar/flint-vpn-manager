@@ -61,14 +61,6 @@ def api_stream():
                 except Exception:
                     pass
 
-                # Sync LAN rules if device IPs changed
-                if tracker and tracker.noint_stale:
-                    try:
-                        service.sync_noint_to_router()
-                        tracker.noint_stale = False
-                    except Exception:
-                        pass
-
                 # Device list: refresh on every SSE tick (10s)
                 service.invalidate_device_cache()
                 all_devices = service.get_devices_cached()

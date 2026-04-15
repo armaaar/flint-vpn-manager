@@ -163,6 +163,7 @@ class TestDeviceExceptions:
 class TestCreateNetwork:
     def test_creates_full_infrastructure(self, lan, uci, ssh, service_ctl):
         ssh.exec.side_effect = [
+            "",             # _next_ip6hint (uci show network | grep ip6hint)
             "BssidNum=2",  # _get_bssid_num
             "",             # sed (update BssidNum)
             "",             # sed (update BssidNum)
@@ -253,3 +254,146 @@ class TestCountDevicesPerSubnet:
     def test_empty_leases(self):
         counts = _count_devices_per_subnet("", {"lan": {"subnet": "192.168.8.0/24"}})
         assert counts["192.168.8.0/24"] == 0
+
+
+# ── IPv6 Tests ───────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def ip6tables_mock():
+    m = MagicMock()
+    m.ensure_chain.return_value = None
+    m.flush_chain.return_value = None
+    m.append.return_value = None
+    m.insert_if_absent.return_value = None
+    m.delete_chain.return_value = None
+    return m
+
+
+@pytest.fixture
+def lan_v6(uci, iptables, service_ctl, ssh, ip6tables_mock):
+    return RouterLanAccess(uci, iptables, service_ctl, ssh, ip6tables=ip6tables_mock)
+
+
+class TestApplyDeviceExceptionsIPv6:
+    def test_creates_chain_in_both_stacks(self, lan_v6, iptables, ip6tables_mock):
+        lan_v6.apply_device_exceptions([{
+            "from_ip": "192.168.8.100",
+            "to_ip": "192.168.9.50",
+            "direction": "both",
+        }])
+        iptables.ensure_chain.assert_called_with("filter", "fvpn_lan_exc")
+        ip6tables_mock.ensure_chain.assert_called_with("filter", "fvpn_lan_exc")
+
+    def test_ipv4_rule_only_in_iptables(self, lan_v6, iptables, ip6tables_mock):
+        lan_v6.apply_device_exceptions([{
+            "from_ip": "192.168.8.100",
+            "to_ip": "192.168.9.50",
+            "direction": "outbound",
+        }])
+        # IPv4 address should appear in iptables
+        ipt_calls = [str(c) for c in iptables.append.call_args_list]
+        assert any("192.168.8.100" in c for c in ipt_calls)
+        # IPv4 address should NOT appear in ip6tables
+        ip6_calls = [str(c) for c in ip6tables_mock.append.call_args_list]
+        assert not any("192.168.8.100" in c for c in ip6_calls)
+
+    def test_ipv6_rule_only_in_ip6tables(self, lan_v6, iptables, ip6tables_mock):
+        lan_v6.apply_device_exceptions([{
+            "from_ip": "2001:db8::1",
+            "to_ip": "2001:db8::2",
+            "direction": "outbound",
+        }])
+        # IPv6 address should appear in ip6tables
+        ip6_calls = [str(c) for c in ip6tables_mock.append.call_args_list]
+        assert any("2001:db8::1" in c for c in ip6_calls)
+        # IPv6 address should NOT appear in iptables
+        ipt_calls = [str(c) for c in iptables.append.call_args_list]
+        assert not any("2001:db8::1" in c for c in ipt_calls)
+
+
+class TestCleanupExceptionsIPv6:
+    def test_cleans_both_stacks(self, lan_v6, iptables, ip6tables_mock):
+        lan_v6.cleanup_exceptions()
+        iptables.delete_chain.assert_called_once()
+        ip6tables_mock.delete_chain.assert_called_once()
+
+
+class TestWriteFirewallIncludeIPv6:
+    def test_includes_ip6tables_commands(self, lan_v6, ssh):
+        lan_v6._write_firewall_include([{
+            "from_ip": "192.168.8.100",
+            "to_ip": "192.168.9.50",
+            "direction": "both",
+        }])
+        script = ssh.write_file.call_args[0][1]
+        assert "iptables -N fvpn_lan_exc" in script
+        assert "ip6tables -N fvpn_lan_exc" in script
+        assert "ip6tables -C forwarding_rule" in script
+
+
+class TestSetIpv6:
+    def test_enable_sets_uci_fields(self, lan, uci, ssh, service_ctl):
+        ssh.exec.return_value = ""  # No existing ip6hints
+        lan.set_ipv6("fvpn_iot", True)
+        uci.set.assert_any_call("network.fvpn_iot.ip6assign", "64")
+        uci.set.assert_any_call("network.fvpn_iot.ip6ifaceid", "::1")
+        uci.set.assert_any_call("dhcp.fvpn_iot.dhcpv6", "server")
+        uci.set.assert_any_call("dhcp.fvpn_iot.ra", "server")
+        uci.commit.assert_called_once_with("network", "dhcp")
+        service_ctl.reload.assert_any_call("dnsmasq")
+        service_ctl.reload.assert_any_call("firewall")
+
+    def test_disable_removes_uci_fields(self, lan, uci, ssh, service_ctl):
+        lan.set_ipv6("fvpn_iot", False)
+        uci.delete.assert_any_call("network.fvpn_iot.ip6assign")
+        uci.delete.assert_any_call("network.fvpn_iot.ip6hint")
+        uci.set.assert_any_call("dhcp.fvpn_iot.dhcpv6", "disabled")
+        uci.set.assert_any_call("dhcp.fvpn_iot.ra", "disabled")
+
+    def test_rejects_invalid_section_name(self, lan):
+        with pytest.raises(ValueError, match="Invalid"):
+            lan.set_ipv6("../etc/passwd", True)
+
+
+class TestNextIp6Hint:
+    def test_skips_used_hints(self, lan, ssh):
+        ssh.exec.return_value = (
+            "network.lan.ip6hint='0000'\n"
+            "network.guest.ip6hint='0001'\n"
+        )
+        hint = lan._next_ip6hint()
+        assert hint == "0002"
+
+    def test_first_hint_when_none_used(self, lan, ssh):
+        ssh.exec.return_value = ""
+        hint = lan._next_ip6hint()
+        assert hint == "0001"
+
+
+class TestGetNetworksIpv6Field:
+    def test_includes_ipv6_enabled(self, lan, ssh, uci):
+        # Simulate UCI output with ip6assign on LAN but not IoT
+        ssh.exec.return_value = (
+            # Wireless
+            "wireless.lan_2g=wifi-iface\n"
+            "wireless.lan_2g.device='mt798611'\n"
+            "wireless.lan_2g.network='lan'\n"
+            "wireless.lan_2g.ssid='TestWiFi'\n"
+            "wireless.lan_2g.mode='ap'\n"
+            "===SPLIT===\n"
+            # Network
+            "network.lan=interface\n"
+            "network.lan.proto='static'\n"
+            "network.lan.ipaddr='192.168.8.1'\n"
+            "network.lan.netmask='255.255.255.0'\n"
+            "network.lan.ip6assign='64'\n"
+            "===SPLIT===\n"
+            # Firewall
+            "firewall.lan_zone=zone\n"
+            "firewall.lan_zone.name='lan'\n"
+            "firewall.lan_zone.network='lan'\n"
+        )
+        networks = lan.get_networks()
+        assert len(networks) == 1
+        assert networks[0]["ipv6_enabled"] is True

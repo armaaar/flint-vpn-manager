@@ -1,7 +1,7 @@
 <script>
   import { api } from '../../api';
   import { devices, showToast } from '../../stores/app';
-  import { isOnline } from '../../utils/device';
+  import { isOnline, deviceIcon, sortDevices } from '../../utils/device';
   import { createEventDispatcher, onMount } from 'svelte';
   import ExceptionModal from './ExceptionModal.svelte';
   import DeviceModal from '../modals/DeviceModal.svelte';
@@ -12,6 +12,7 @@
   let accessRules = [];
   let exceptions = [];
   let loading = true;
+  let globalIpv6Enabled = false;
   let savingRules = false;
   let expandedZone = null;
   let showExceptionModal = false;
@@ -42,6 +43,7 @@
 
   // Per-action loading states
   let togglingIsolation = null;   // zone id
+  let togglingIpv6 = null;        // zone id
   let togglingEnabled = null;     // zone id
   let savingSsid = null;          // ssid section
   let removingException = null;   // exception id
@@ -73,11 +75,15 @@
   const loadData = async () => {
     loading = true;
     try {
-      const data = await api.getNetworks();
+      const [data, settings] = await Promise.all([
+        api.getNetworks(),
+        api.getSettings(),
+      ]);
       networks = data.networks || [];
       accessRules = data.access_rules || [];
       exceptions = data.exceptions || [];
       pendingRules = accessRules.map(r => ({ ...r }));
+      globalIpv6Enabled = settings.global_ipv6_enabled === true;
     } catch (e) {
       showToast(e.message, true);
     } finally {
@@ -141,6 +147,21 @@
     );
   };
 
+  const toggleIpv6 = async (network) => {
+    togglingIpv6 = network.id;
+    const newState = !network.ipv6_enabled;
+    try {
+      await api.setIpv6(network.id, newState);
+      network.ipv6_enabled = newState;
+      networks = networks;
+      showToast(`IPv6 ${newState ? 'enabled' : 'disabled'} for ${ssidLabel(network)}`);
+    } catch (e) {
+      showToast(e.message, true);
+    } finally {
+      togglingIpv6 = null;
+    }
+  };
+
   const _doToggleEnabled = async (network) => {
     togglingEnabled = network.id;
     const newState = !network.enabled;
@@ -179,7 +200,7 @@
       if ('hidden' in settings) ssid.hidden = settings.hidden;
       if ('encryption' in settings) ssid.encryption = settings.encryption;
       if ('disabled' in settings) ssid.disabled = settings.disabled;
-      ssid.editPassword = '';
+      ssid.editPassword = ssid.password || '';
       networks = networks;
       showToast('WiFi settings updated');
     } catch (e) {
@@ -285,6 +306,10 @@
   const ssidLabel = (network) => network.ssids.map(s => s.name).join(' / ') || network.zone;
   const canDelete = (network) => network.id !== 'lan' && network.id !== 'guest';
 
+  const reloadDevices = async () => {
+    const d = await api.getDevices();
+    devices.set(d);
+  };
   const selectDevice = (mac) => { selectedMac = mac; };
   const groupDevices = (devices) => {
     const groups = { '5G': [], '2.4G': [], 'Ethernet': [], 'Other': [] };
@@ -295,7 +320,7 @@
       else if (iface === 'cable' || iface === 'Ethernet') groups['Ethernet'].push(d);
       else groups['Other'].push(d);
     }
-    return Object.entries(groups).filter(([, devs]) => devs.length > 0);
+    return Object.entries(groups).filter(([, devs]) => devs.length > 0).map(([g, devs]) => [g, sortDevices(devs)]);
   };
 
   // Editable SSID state — initialized when expanding
@@ -354,27 +379,33 @@
 
         {#if expandedZone === network.id}
           <div class="network-body">
-            <!-- Enable / Isolation toggles -->
-            <div class="toggles-row">
+            <!-- Network toggle pills -->
+            <div class="network-toggles">
               {#if network.id !== 'lan'}
-                <div class="option-item">
-                  <input type="checkbox" id="net-en-{network.id}" checked={network.enabled}
-                         on:change={() => toggleEnabled(network)} disabled={togglingEnabled === network.id}>
-                  <label for="net-en-{network.id}">
-                    {#if togglingEnabled === network.id}<span class="spinner-inline"></span>{/if}
-                    Enabled
-                  </label>
-                </div>
+                <button class="toggle-pill" class:active={network.enabled}
+                        disabled={togglingEnabled === network.id}
+                        on:click={() => toggleEnabled(network)}>
+                  {#if togglingEnabled === network.id}<span class="spinner-inline"></span>
+                  {:else}{network.enabled ? '●' : '○'}{/if}
+                  Active
+                </button>
               {/if}
-              <div class="option-item">
-                <input type="checkbox" id="net-iso-{network.id}" checked={network.isolation}
-                       on:change={() => toggleIsolation(network)} disabled={!network.enabled || togglingIsolation === network.id}>
-                <label for="net-iso-{network.id}">
-                  {#if togglingIsolation === network.id}<span class="spinner-inline"></span>{/if}
-                  Device isolation
-                  <span class="opt-hint">— {network.isolation ? 'devices cannot see each other' : 'devices communicate freely'}</span>
-                </label>
-              </div>
+              <button class="toggle-pill" class:active={network.isolation}
+                      disabled={!network.enabled || togglingIsolation === network.id}
+                      on:click={() => { if (network.enabled) toggleIsolation(network); }}>
+                {#if togglingIsolation === network.id}<span class="spinner-inline"></span>
+                {:else}{network.isolation ? '●' : '○'}{/if}
+                Isolated
+              </button>
+              {#if globalIpv6Enabled}
+                <button class="toggle-pill" class:active={network.ipv6_enabled}
+                        disabled={!network.enabled || togglingIpv6 === network.id}
+                        on:click={() => { if (network.enabled) toggleIpv6(network); }}>
+                  {#if togglingIpv6 === network.id}<span class="spinner-inline"></span>
+                  {:else}{network.ipv6_enabled ? '●' : '○'}{/if}
+                  IPv6
+                </button>
+              {/if}
             </div>
 
             <!-- Per-SSID wireless settings -->
@@ -480,6 +511,7 @@
                   <div class="device-list">
                     {#each devs as device}
                       <button class="device-row" on:click={() => selectDevice(device.mac)}>
+                        <span class="device-icon">{deviceIcon(device)}</span>
                         <span class="device-dot" class:online={isOnline(device)}></span>
                         <span class="device-name">{device.display_name}</span>
                         <span class="device-meta">{device.ip} · {device.mac.toUpperCase()}</span>
@@ -556,7 +588,7 @@
     on:close={() => { showExceptionModal = false; editingException = null; }} />
 {/if}
 
-<DeviceModal device={selectedDevice} on:close={() => selectedMac = null} on:reload={loadData} />
+<DeviceModal device={selectedDevice} on:close={() => selectedMac = null} on:reload={reloadDevices} />
 
 {#if wifiWarning}
 <div class="modal-overlay active" on:click|self={dismissWarning}>
@@ -604,7 +636,17 @@
   .badge-count { background: var(--bg3); color: var(--fg2); }
 
   .network-body { padding: 0 16px 16px; border-top: 1px solid var(--border); }
-  .toggles-row { display: flex; align-items: center; gap: 16px; padding: 12px 0; flex-wrap: wrap; }
+  .network-toggles { display: flex; gap: 8px; padding: 12px 0; flex-wrap: wrap; }
+  .toggle-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 12px; border-radius: var(--radius-xs);
+    border: 1px solid var(--border); background: transparent;
+    color: var(--fg3); font-size: .8rem; cursor: pointer;
+    transition: all .15s ease;
+  }
+  .toggle-pill:hover:not(:disabled) { border-color: var(--accent); color: var(--fg); }
+  .toggle-pill.active { background: var(--accent-bg); border-color: var(--accent); color: var(--accent); }
+  .toggle-pill:disabled { opacity: .4; cursor: not-allowed; }
   .option-item { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
   .option-item input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer; flex-shrink: 0; }
   .option-item label { font-size: .85rem; cursor: pointer; }
@@ -640,6 +682,7 @@
   .collapse-chevron { font-size: .7rem; color: var(--fg3); margin-right: 4px; }
 
   .device-row { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--bg); border: none; border-radius: var(--radius-xs); font-size: .82rem; width: 100%; text-align: left; color: var(--fg); cursor: pointer; font-family: inherit; }
+  .device-icon { flex-shrink: 0; font-size: .95rem; line-height: 1; }
   .device-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg3); flex-shrink: 0; }
   .device-dot.online { background: var(--green); }
   .device-name { font-weight: 500; flex: 1; }

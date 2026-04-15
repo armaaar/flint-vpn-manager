@@ -41,6 +41,48 @@ class RouterDevices:
                 })
         return leases
 
+    def get_ndp_neighbors(self) -> dict[str, list[str]]:
+        """Read the IPv6 NDP neighbor table and return global IPv6 addresses per MAC.
+
+        Returns:
+            Dict mapping lowercase MAC → list of global-scope IPv6 addresses.
+            Link-local (fe80::) addresses are filtered out.
+        """
+        result: dict[str, list[str]] = {}
+        try:
+            raw = self._iproute.neigh_show_v6()
+            for line in raw.strip().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                # Format: "2001:db8::1 dev br-lan lladdr aa:bb:cc:dd:ee:ff REACHABLE"
+                parts = line.split()
+                if len(parts) < 5 or "lladdr" not in parts or "dev" not in parts:
+                    continue
+                # Only include LAN-side bridges, skip WAN interfaces
+                try:
+                    dev = parts[parts.index("dev") + 1]
+                except (ValueError, IndexError):
+                    continue
+                if not dev.startswith("br-"):
+                    continue
+                ipv6 = parts[0]
+                # Skip link-local addresses
+                if ipv6.startswith("fe80:"):
+                    continue
+                try:
+                    mac_idx = parts.index("lladdr") + 1
+                    mac = parts[mac_idx].lower()
+                except (ValueError, IndexError):
+                    continue
+                if mac not in result:
+                    result[mac] = []
+                if ipv6 not in result[mac]:
+                    result[mac].append(ipv6)
+        except Exception:
+            pass
+        return result
+
     def get_client_details(self) -> dict:
         """Get rich client data from GL.iNet's client tracking.
 
@@ -92,7 +134,14 @@ class RouterDevices:
             raw = self._iproute.neigh_show()
             for line in raw.strip().splitlines():
                 parts = line.split()
-                if "lladdr" in parts and len(parts) >= 6:
+                if "lladdr" in parts and "dev" in parts and len(parts) >= 6:
+                    try:
+                        dev = parts[parts.index("dev") + 1]
+                    except (ValueError, IndexError):
+                        continue
+                    # Only include LAN-side bridges, skip WAN interfaces
+                    if not dev.startswith("br-"):
+                        continue
                     try:
                         idx = parts.index("lladdr")
                         mac = parts[idx + 1].lower()
@@ -103,13 +152,8 @@ class RouterDevices:
                         result[mac] = {}
                     if state in ("REACHABLE", "STALE", "DELAY", "PROBE"):
                         result[mac]["online"] = True
-                    if "iface" not in result[mac] and "dev" in parts:
-                        try:
-                            dev = parts[parts.index("dev") + 1]
-                            if dev.startswith("br-") and dev != "br-lan":
-                                result[mac]["iface"] = dev.replace("br-", "")
-                        except (ValueError, IndexError):
-                            pass
+                    if "iface" not in result[mac] and dev != "br-lan":
+                        result[mac]["iface"] = dev.replace("br-", "")
         except Exception:
             pass
 

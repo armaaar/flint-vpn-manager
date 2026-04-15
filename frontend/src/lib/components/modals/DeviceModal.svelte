@@ -10,11 +10,15 @@
   let label = '';
   let deviceClass = '';
   let targetProfileId = '';
+  let boundMac = '';
 
-  $: if (device) {
+  $: if (device && device.mac !== boundMac) {
+    boundMac = device.mac;
     label = device.label || '';
     deviceClass = device.device_class || '';
     targetProfileId = device.profile_id || '';
+  } else if (!device) {
+    boundMac = '';
   }
 
   $: online = device ? isOnline(device) : false;
@@ -48,7 +52,7 @@
 </script>
 
 {#if device}
-<div class="modal-overlay active" on:click|self={close}>
+<div class="modal-overlay active">
   <div class="modal">
     <div class="modal-header">
       <h2>{device.display_name}</h2>
@@ -60,6 +64,10 @@
       <div class="info-grid">
         <span class="info-label">MAC Address</span><span>{device.mac.toUpperCase()}</span>
         <span class="info-label">IP Address</span><span>{device.ip || 'Unknown'}</span>
+        {#if device.ipv6_addresses && device.ipv6_addresses.length}
+          <span class="info-label">IPv6</span>
+          <span class="ipv6-addrs">{device.ipv6_addresses.join(', ')}</span>
+        {/if}
         <span class="info-label">Hostname</span><span>{device.hostname || 'Not detected'}</span>
         <span class="info-label">Status</span>
         <span>

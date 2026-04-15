@@ -1,7 +1,7 @@
 <script>
   import { profiles, devices, unassignedDevices, protonLoggedIn, showToast, movingDevices, reloadData } from '../lib/stores/app';
   import { api } from '../lib/api';
-  import { deviceIcon, isRandomMac, isOnline } from '../lib/utils/device';
+  import { deviceIcon, isRandomMac, isOnline, sortDevices } from '../lib/utils/device';
   import { dndzone } from 'svelte-dnd-action';
   import GroupCard from '../lib/components/groups/GroupCard.svelte';
   import DeviceModal from '../lib/components/modals/DeviceModal.svelte';
@@ -106,7 +106,7 @@
   // Unassigned devices DnD
   let unassignedItems = [];
   let draggingUnassigned = false;
-  $: if (!draggingUnassigned) unassignedItems = $unassignedDevices.map(d => ({ ...d, id: d.mac }));
+  $: if (!draggingUnassigned) unassignedItems = sortDevices($unassignedDevices).map(d => ({ ...d, id: d.mac }));
 
   function handleUnassignedDndConsider(e) {
     draggingUnassigned = true;
@@ -178,13 +178,13 @@
     }
 
     if (serverPickerProfileId) {
-      const res = await api.changeServer(serverPickerProfileId, {
-        server_id: serverId, options, server_scope: scope,
-      });
-      if (res.error) {
-        showToast(res.error, true);
-      } else {
+      try {
+        await api.changeServer(serverPickerProfileId, {
+          server_id: serverId, options, server_scope: scope,
+        });
         showToast('Server switched');
+      } catch (err) {
+        showToast(err.message || 'Failed to switch server', true);
       }
       await reload();
     }

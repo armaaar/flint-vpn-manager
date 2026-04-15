@@ -341,38 +341,11 @@ class AutoOptimizer:
             return
 
         try:
-            import requests as http_requests
-            from consts import BLOCKLIST_PRESETS
+            from services.adblock_service import download_and_merge_blocklists
 
-            all_domains = set()
-            for source in sources:
-                url = BLOCKLIST_PRESETS.get(source, {}).get("url", source)
-                try:
-                    resp = http_requests.get(url, timeout=120)
-                    resp.raise_for_status()
-                    for line in resp.text.splitlines():
-                        line = line.strip()
-                        if not line or line.startswith("#"):
-                            continue
-                        parts = line.split()
-                        if len(parts) >= 2:
-                            domain = parts[1].lower()
-                            if domain and domain != "localhost":
-                                all_domains.add(domain)
-                        elif len(parts) == 1 and "." in parts[0]:
-                            all_domains.add(parts[0].lower())
-                except Exception as e:
-                    log.warning(f"Blocklist: failed to download {url}: {e}")
-
-            if not all_domains:
+            content, count, failed = download_and_merge_blocklists()
+            if not content:
                 return
-
-            sorted_domains = sorted(all_domains)
-            content = "# FlintVPN merged blocklist\n"
-            content += f"# Sources: {', '.join(sources)}\n"
-            content += f"# Domains: {len(sorted_domains)}\n\n"
-            for d in sorted_domains:
-                content += f"0.0.0.0 {d}\n"
 
             router = self.get_router()
             if not router:
@@ -380,9 +353,9 @@ class AutoOptimizer:
 
             router.adblock.upload_blocklist(content)
             adblock["last_updated"] = now.isoformat()
-            adblock["domain_count"] = len(sorted_domains)
+            adblock["domain_count"] = count
             sm.update_config(adblock=adblock)
-            log.info(f"Blocklist auto-update: {len(sorted_domains)} domains from {len(sources)} source(s)")
+            log.info(f"Blocklist auto-update: {count} domains from {len(sources)} source(s)")
 
         except Exception as e:
             log.warning(f"Blocklist auto-update failed: {e}")

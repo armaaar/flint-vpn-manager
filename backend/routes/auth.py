@@ -86,6 +86,19 @@ def api_unlock():
         tracker = start_tracker(router)
         tracker.poll_once()
 
+        # Apply global IPv6 setting — enable router IPv6 if user opted in,
+        # otherwise ensure leak protection blocks all IPv6 forwarding.
+        config = sm.get_config()
+        if config.get("global_ipv6_enabled"):
+            try:
+                router.firewall.ensure_ipv6_router_enabled()
+            except Exception as e:
+                log.warning(f"IPv6 router enablement failed: {e}")
+        try:
+            router.firewall.ensure_ipv6_leak_protection()
+        except Exception as e:
+            log.warning(f"IPv6 leak protection setup failed: {e}")
+
         # Reconcile router LAN execution layer (UCI ipsets + rules) with the
         # restored / local intent.
         try:

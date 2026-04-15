@@ -1,4 +1,8 @@
 {
-  "permissions": {},
+  "permissions": {
+    "allow": [
+      "mcp__playwright"
+    ]
+  },
   "enableAllProjectMcpServers": true
 }

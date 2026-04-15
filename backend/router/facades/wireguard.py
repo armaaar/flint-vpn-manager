@@ -44,6 +44,7 @@ class RouterWireguard:
         allowed_ips: str = "0.0.0.0/0",
         mtu: int = 1420,
         keepalive: int = 25,
+        ipv6: bool = False,
     ) -> dict:
         """Create a WireGuard peer config and route policy rule on the router."""
         peer_num = self._next_peer_id()
@@ -87,6 +88,7 @@ class RouterWireguard:
             "tunnel_id": tunnel_id,
             "rule_name": rule_name,
             "vpn_protocol": PROTO_WIREGUARD,
+            "ipv6": ipv6,
         }
 
     def update_wireguard_peer_live(

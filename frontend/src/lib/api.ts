@@ -88,6 +88,7 @@ export const api = {
   getNetworkDevices: (zoneId: string) => request<{ devices: Device[] }>(`/api/lan-access/networks/${zoneId}/devices`),
   updateAccessRules: (rules: AccessRule[]) => request('/api/lan-access/rules', { method: 'PUT', body: { rules } }),
   setIsolation: (zoneId: string, enabled: boolean) => request(`/api/lan-access/isolation/${zoneId}`, { method: 'PUT', body: { enabled } }),
+  setIpv6: (zoneId: string, enabled: boolean) => request(`/api/lan-access/ipv6/${zoneId}`, { method: 'PUT', body: { enabled } }),
   getExceptions: () => request<{ exceptions: LanException[] }>('/api/lan-access/exceptions'),
   addException: (data: Record<string, unknown>) => request<LanException>('/api/lan-access/exceptions', { method: 'POST', body: data }),
   removeException: (id: string) => request(`/api/lan-access/exceptions/${id}`, { method: 'DELETE' }),

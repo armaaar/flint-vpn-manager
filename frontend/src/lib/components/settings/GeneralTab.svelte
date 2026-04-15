@@ -7,11 +7,14 @@
   let savingRouter = false;
   let altRouting = true;
   let savingAltRouting = false;
+  let ipv6Enabled = false;
+  let savingIpv6 = false;
 
   onMount(async () => {
     const s = await api.getSettings();
     routerIp = s.router_ip || '';
     altRouting = s.alternative_routing !== false;
+    ipv6Enabled = s.global_ipv6_enabled === true;
   });
 
   async function saveRouter() {
@@ -26,6 +29,18 @@
     await api.updateSettings({ alternative_routing: altRouting });
     savingAltRouting = false;
     showToast('Alternative routing ' + (altRouting ? 'enabled' : 'disabled'));
+  }
+
+  async function saveIpv6() {
+    savingIpv6 = true;
+    try {
+      await api.updateSettings({ global_ipv6_enabled: ipv6Enabled });
+      showToast('IPv6 ' + (ipv6Enabled ? 'enabled' : 'disabled'));
+    } catch (e) {
+      showToast(e.message, true);
+    } finally {
+      savingIpv6 = false;
+    }
   }
 </script>
 
@@ -53,6 +68,21 @@
   </div>
   <button class="btn-primary btn-sm" on:click={saveAltRouting} disabled={savingAltRouting} style="margin-top:8px">
     {#if savingAltRouting}Saving...{:else}Save{/if}
+  </button>
+</div>
+
+<div class="settings-section">
+  <h3 class="section-title">IPv6</h3>
+  <span class="hint" style="display:block;margin-bottom:12px">
+    Enable dual-stack IPv4 + IPv6 connectivity on the router using NAT6 mode.
+    When disabled, only IPv4 is used. Applies to all networks.
+  </span>
+  <div class="ao-row">
+    <input type="checkbox" id="ipv6-global" bind:checked={ipv6Enabled}>
+    <label for="ipv6-global">Enable IPv6</label>
+  </div>
+  <button class="btn-primary btn-sm" on:click={saveIpv6} disabled={savingIpv6} style="margin-top:8px">
+    {#if savingIpv6}Applying...{:else}Save{/if}
   </button>
 </div>
 

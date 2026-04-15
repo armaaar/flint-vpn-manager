@@ -601,3 +601,73 @@ class TestProtonAPIIntegration:
 
     def test_user_tier(self, live_api):
         assert live_api.user_tier >= 2  # Plus or higher
+
+
+class TestGenerateWireGuardConfigIPv6:
+    """Tests for dual-stack IPv6 WireGuard config generation."""
+
+    def test_ipv6_config_has_dual_stack_addresses(self, mock_api):
+        api, mock = mock_api
+        server = _make_logical("CH#1", features=16)  # 16 = IPV6
+        _mock_persistent_cert_api(mock)
+
+        config, info, wg_key, cert_expiry = api.generate_wireguard_config(
+            server, ipv6=True
+        )
+
+        assert "Address = 10.2.0.2/32, 2a07:b944::2:2/128" in config
+        assert "AllowedIPs = 0.0.0.0/0, ::/0" in config
+        assert "2a07:b944::2:1" in config  # IPv6 DNS
+        assert "10.2.0.1" in config  # IPv4 DNS still present
+
+    def test_ipv6_false_produces_ipv4_only(self, mock_api):
+        api, mock = mock_api
+        server = _make_logical("CH#1", features=16)
+        _mock_persistent_cert_api(mock)
+
+        config, info, wg_key, cert_expiry = api.generate_wireguard_config(
+            server, ipv6=False
+        )
+
+        assert "Address = 10.2.0.2/32" in config
+        assert "::" not in config
+        assert "AllowedIPs = 0.0.0.0/0" in config
+        assert "::/0" not in config
+
+    def test_custom_dns_with_ipv6_overrides_both(self, mock_api):
+        api, mock = mock_api
+        server = _make_logical("CH#1", features=16)
+        _mock_persistent_cert_api(mock)
+
+        config, info, wg_key, cert_expiry = api.generate_wireguard_config(
+            server, ipv6=True, custom_dns="1.1.1.1"
+        )
+
+        assert "DNS = 1.1.1.1" in config
+        assert "2a07:b944::2:1" not in config  # Custom DNS replaces both
+
+    def test_ipv6_dns_accepted_as_custom(self, mock_api):
+        api, mock = mock_api
+        server = _make_logical("CH#1")
+        _mock_persistent_cert_api(mock)
+
+        config, info, wg_key, cert_expiry = api.generate_wireguard_config(
+            server, custom_dns="2001:4860:4860::8888"
+        )
+        assert "DNS = 2001:4860:4860::8888" in config
+
+    def test_server_to_dict_includes_ipv6_flag(self, mock_api):
+        api, mock = mock_api
+        server = _make_logical("CH#1", features=16)  # IPV6
+        _mock_persistent_cert_api(mock)
+
+        _, info, _, _ = api.generate_wireguard_config(server)
+        assert info["ipv6"] is True
+
+    def test_server_to_dict_ipv6_false_when_no_feature(self, mock_api):
+        api, mock = mock_api
+        server = _make_logical("CH#1", features=0)
+        _mock_persistent_cert_api(mock)
+
+        _, info, _, _ = api.generate_wireguard_config(server)
+        assert info["ipv6"] is False

@@ -15,7 +15,7 @@ import re
 from router.tools.uci import Uci
 
 _SAFE_NAME_RE = re.compile(r'^[a-zA-Z0-9_-]+$')
-_SAFE_IP_RE = re.compile(r'^[0-9./]+$')
+_SAFE_IP_RE = re.compile(r'^[0-9a-fA-F.:/%]+$')
 
 # Zone names to skip in cross-network rules (wan is managed separately)
 _SKIP_ZONES = {"wan"}
@@ -26,8 +26,9 @@ _VPN_ZONE_PREFIXES = ("wgclient", "ovpnclient", "protonwg", "wgserver", "ovpnser
 class RouterLanAccess:
     """Facade for cross-network access control on the GL.iNet Flint 2."""
 
-    def __init__(self, uci, iptables, service_ctl, ssh):
+    def __init__(self, uci, iptables, service_ctl, ssh, ip6tables=None):
         self._uci = uci
+        self._ip6tables = ip6tables
         self._iptables = iptables
         self._service_ctl = service_ctl
         self._ssh = ssh  # raw exec for uci show (bulk), sed, ifup, wifi driver; write_file for scripts
@@ -81,9 +82,11 @@ class RouterLanAccess:
                     subnet = str(iface.network)
                 except ValueError:
                     subnet = f"{ipaddr}/24"
+            ip6assign = fields.get("ip6assign", "")
             net_info[section] = {
                 "ipaddr": ipaddr, "netmask": netmask,
                 "bridge": bridge, "subnet": subnet, "disabled": disabled,
+                "ipv6_enabled": bool(ip6assign),
             }
 
         # Build wifi-iface → network mapping
@@ -159,6 +162,7 @@ class RouterLanAccess:
                 "isolation": isolation,
                 "enabled": enabled,
                 "device_count": device_counts.get(info.get("subnet", ""), 0),
+                "ipv6_enabled": info.get("ipv6_enabled", False),
             })
 
         return networks
@@ -223,52 +227,126 @@ class RouterLanAccess:
         self._uci.commit("wireless")
         self._service_ctl.wifi_reload()
 
+    # ── IPv6 per-network ─────────────────────────────────────────────
+
+    def set_ipv6(self, net_section: str, enabled: bool) -> None:
+        """Enable or disable IPv6 (RA + DHCPv6 + prefix delegation) on a network.
+
+        When enabling, allocates a /64 prefix from the router's ULA pool
+        and configures dnsmasq to serve RA and DHCPv6 on the interface.
+        """
+        if not _SAFE_NAME_RE.match(net_section):
+            raise ValueError(f"Invalid network section: {net_section!r}")
+
+        if enabled:
+            hint = self._next_ip6hint()
+            self._uci.set(f"network.{net_section}.ip6assign", "64")
+            self._uci.set(f"network.{net_section}.ip6hint", hint)
+            self._uci.set(f"network.{net_section}.ip6ifaceid", "::1")
+            self._uci.set(f"dhcp.{net_section}.dhcpv6", "server")
+            self._uci.set(f"dhcp.{net_section}.ra", "server")
+            self._uci.set(f"dhcp.{net_section}.ra_default", "1")
+            # ra_flags: delete first to avoid duplicates, then add
+            self._uci.delete(f"dhcp.{net_section}.ra_flags")
+            self._uci.add_list(f"dhcp.{net_section}.ra_flags", "other-config")
+            self._uci.add_list(f"dhcp.{net_section}.ra_flags", "managed-config")
+        else:
+            self._uci.delete(f"network.{net_section}.ip6assign")
+            self._uci.delete(f"network.{net_section}.ip6hint")
+            self._uci.delete(f"network.{net_section}.ip6ifaceid")
+            self._uci.set(f"dhcp.{net_section}.dhcpv6", "disabled")
+            self._uci.set(f"dhcp.{net_section}.ra", "disabled")
+            self._uci.delete(f"dhcp.{net_section}.ra_default")
+            self._uci.delete(f"dhcp.{net_section}.ra_flags")
+
+        self._uci.commit("network", "dhcp")
+        # Poke netifd to apply the prefix delegation on the bridge
+        self._ssh.exec(
+            f"ubus call network.interface.{net_section} up 2>/dev/null; true"
+        )
+        self._service_ctl.reload("dnsmasq")
+        self._service_ctl.reload("firewall")
+
+    def _next_ip6hint(self) -> str:
+        """Find the next unused ip6hint value across all network interfaces."""
+        raw = self._ssh.exec(
+            "uci show network 2>/dev/null | grep 'ip6hint=' || true"
+        )
+        used = set()
+        for line in raw.strip().splitlines():
+            # network.lan.ip6hint='0000'
+            val = line.split("=", 1)[-1].strip().strip("'\"")
+            try:
+                used.add(int(val, 16))
+            except ValueError:
+                pass
+        for i in range(1, 256):
+            if i not in used:
+                return f"{i:04x}"
+        return "00ff"
+
     # ── Device Exceptions ─────────────────────────────────────────────
 
     def apply_device_exceptions(self, exceptions: list[dict]) -> None:
-        """Write iptables ACCEPT rules for device-level exceptions."""
-        ipt = self._iptables
-        ipt.ensure_chain("filter", "fvpn_lan_exc")
-        ipt.flush_chain("filter", "fvpn_lan_exc")
+        """Write iptables + ip6tables ACCEPT rules for device-level exceptions."""
+        for ipt in self._all_iptables():
+            ipt.ensure_chain("filter", "fvpn_lan_exc")
+            ipt.flush_chain("filter", "fvpn_lan_exc")
 
-        for exc in exceptions:
-            from_ip = exc.get("from_ip", "")
-            to_ip = exc.get("to_ip", "")
-            direction = exc.get("direction", "both")
-            if not from_ip or not to_ip:
-                continue
-            if not _SAFE_IP_RE.match(from_ip) or not _SAFE_IP_RE.match(to_ip):
-                continue
-            if direction in ("outbound", "both"):
-                ipt.append("filter", "fvpn_lan_exc",
-                           f"-s {from_ip} -d {to_ip} -j ACCEPT")
-            if direction in ("inbound", "both"):
-                ipt.append("filter", "fvpn_lan_exc",
-                           f"-s {to_ip} -d {from_ip} -j ACCEPT")
+            for exc in exceptions:
+                from_ip = exc.get("from_ip", "")
+                to_ip = exc.get("to_ip", "")
+                direction = exc.get("direction", "both")
+                if not from_ip or not to_ip:
+                    continue
+                if not _SAFE_IP_RE.match(from_ip) or not _SAFE_IP_RE.match(to_ip):
+                    continue
+                # Determine address family and route to correct iptables binary
+                is_v6 = ":" in from_ip or ":" in to_ip
+                if is_v6 and ipt is self._iptables:
+                    continue  # Skip IPv6 addresses in iptables
+                if not is_v6 and ipt is not self._iptables:
+                    continue  # Skip IPv4 addresses in ip6tables
+                if direction in ("outbound", "both"):
+                    ipt.append("filter", "fvpn_lan_exc",
+                               f"-s {from_ip} -d {to_ip} -j ACCEPT")
+                if direction in ("inbound", "both"):
+                    ipt.append("filter", "fvpn_lan_exc",
+                               f"-s {to_ip} -d {from_ip} -j ACCEPT")
 
-        ipt.insert_if_absent("filter", "forwarding_rule", "-j fvpn_lan_exc")
-        ipt.insert_if_absent(
-            "filter", "forwarding_rule",
-            "-m mark ! --mark 0x0/0xf000 -j ACCEPT",
-        )
+            ipt.insert_if_absent("filter", "forwarding_rule", "-j fvpn_lan_exc")
+            ipt.insert_if_absent(
+                "filter", "forwarding_rule",
+                "-m mark ! --mark 0x0/0xf000 -j ACCEPT",
+            )
 
         self._write_firewall_include(exceptions)
 
+    def _all_iptables(self):
+        """Yield iptables tool, and ip6tables if available."""
+        yield self._iptables
+        if self._ip6tables:
+            yield self._ip6tables
+
     def cleanup_exceptions(self) -> None:
-        """Remove all exception iptables rules and firewall include."""
-        self._iptables.delete_chain("filter", "forwarding_rule", "fvpn_lan_exc")
+        """Remove all exception iptables/ip6tables rules and firewall include."""
+        for ipt in self._all_iptables():
+            ipt.delete_chain("filter", "forwarding_rule", "fvpn_lan_exc")
         self._ssh.exec("rm -f /etc/fvpn/lan_access_rules.sh")
         self._uci.delete("firewall.fvpn_lan_access")
         self._uci.commit("firewall")
 
     def _write_firewall_include(self, exceptions: list[dict]) -> None:
-        """Write firewall include script for reboot persistence."""
+        """Write firewall include script for reboot persistence (dual-stack)."""
         lines = [
             "#!/bin/sh",
             "# FlintVPN LAN access exceptions — auto-generated",
-            "iptables -N fvpn_lan_exc 2>/dev/null || true",
-            "iptables -F fvpn_lan_exc",
         ]
+
+        for binary in ("iptables", "ip6tables"):
+            lines.append(f"{binary} -N fvpn_lan_exc 2>/dev/null || true")
+            lines.append(f"{binary} -F fvpn_lan_exc")
+
         for exc in exceptions:
             from_ip = exc.get("from_ip", "")
             to_ip = exc.get("to_ip", "")
@@ -277,22 +355,25 @@ class RouterLanAccess:
                 continue
             if not _SAFE_IP_RE.match(from_ip) or not _SAFE_IP_RE.match(to_ip):
                 continue
+            binary = "ip6tables" if (":" in from_ip or ":" in to_ip) else "iptables"
             if direction in ("outbound", "both"):
                 lines.append(
-                    f"iptables -A fvpn_lan_exc -s {from_ip} -d {to_ip} -j ACCEPT"
+                    f"{binary} -A fvpn_lan_exc -s {from_ip} -d {to_ip} -j ACCEPT"
                 )
             if direction in ("inbound", "both"):
                 lines.append(
-                    f"iptables -A fvpn_lan_exc -s {to_ip} -d {from_ip} -j ACCEPT"
+                    f"{binary} -A fvpn_lan_exc -s {to_ip} -d {from_ip} -j ACCEPT"
                 )
-        lines.append(
-            "iptables -C forwarding_rule -j fvpn_lan_exc 2>/dev/null || "
-            "iptables -I forwarding_rule 1 -j fvpn_lan_exc"
-        )
-        lines.append(
-            "iptables -C forwarding_rule -m mark ! --mark 0x0/0xf000 -j ACCEPT 2>/dev/null || "
-            "iptables -I forwarding_rule -m mark ! --mark 0x0/0xf000 -j ACCEPT"
-        )
+
+        for binary in ("iptables", "ip6tables"):
+            lines.append(
+                f"{binary} -C forwarding_rule -j fvpn_lan_exc 2>/dev/null || "
+                f"{binary} -I forwarding_rule 1 -j fvpn_lan_exc"
+            )
+            lines.append(
+                f"{binary} -C forwarding_rule -m mark ! --mark 0x0/0xf000 -j ACCEPT 2>/dev/null || "
+                f"{binary} -I forwarding_rule -m mark ! --mark 0x0/0xf000 -j ACCEPT"
+            )
 
         script = "\n".join(lines) + "\n"
         self._ssh.write_file("/etc/fvpn/lan_access_rules.sh", script)
@@ -379,12 +460,15 @@ class RouterLanAccess:
                 "ifname": iface_5g, "ssid": f"{ssid}-5G", "encryption": "psk2",
                 "key": password, "isolate": iso, "disabled": "0",
             }),
-            # Network interface
+            # Network interface (dual-stack: IPv4 static + IPv6 prefix delegation)
             (f"network.{zn}", {
                 "_type": "interface",
                 "proto": "static", "type": "bridge",
                 "ipaddr": subnet_ip, "netmask": "255.255.255.0",
                 "force_link": "1", "bridge_empty": "1",
+                "ip6assign": "64",
+                "ip6hint": self._next_ip6hint(),
+                "ip6ifaceid": "::1",
             }),
             # Firewall zone
             (f"firewall.{zn}_zone", {
@@ -408,11 +492,12 @@ class RouterLanAccess:
                 "_type": "forwarding",
                 "src": zn, "dest": "wan",
             }),
-            # DHCP pool
+            # DHCP pool (dual-stack: DHCPv4 + DHCPv6 + RA)
             (f"dhcp.{zn}", {
                 "_type": "dhcp",
                 "interface": zn, "start": "100", "limit": "150",
                 "leasetime": "12h",
+                "dhcpv6": "server", "ra": "server", "ra_default": "1",
             }),
         ], "wireless", "network", "firewall", "dhcp")
         self._ssh.exec(f"ifup fvpn_{zone_id} 2>/dev/null; true")

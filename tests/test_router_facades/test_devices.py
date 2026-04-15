@@ -54,6 +54,20 @@ class TestGetClientDetails:
         assert "11:22:33:44:55:66" in result
         assert result["11:22:33:44:55:66"]["online"] is True
 
+    def test_excludes_wan_arp_entries(self, devices, ssh, iproute):
+        ssh.exec.side_effect = [
+            '{"clients": {}}',
+            "",  # gl-client config
+            "",  # iwinfo
+        ]
+        iproute.neigh_show.return_value = (
+            "192.168.8.10 dev br-lan lladdr aa:bb:cc:dd:ee:ff REACHABLE\n"
+            "192.168.0.1 dev eth1 lladdr 02:10:18:7a:fe:7c REACHABLE\n"
+        )
+        result = devices.get_client_details()
+        assert "aa:bb:cc:dd:ee:ff" in result
+        assert "02:10:18:7a:fe:7c" not in result
+
     def test_handles_gl_clients_error(self, devices, ssh, iproute):
         ssh.exec.side_effect = Exception("ubus failed")
         iproute.neigh_show.side_effect = Exception("neigh failed")
@@ -144,3 +158,46 @@ class TestStaticLeases:
         devices.remove_static_lease("aa:bb:cc:dd:ee:ff")
         uci.delete.assert_called_once()
         uci.commit.assert_called_once_with("dhcp")
+
+
+class TestGetNdpNeighbors:
+    def test_parses_global_ipv6_addresses(self, devices, iproute):
+        iproute.neigh_show_v6.return_value = (
+            "2001:db8::1 dev br-lan lladdr aa:bb:cc:dd:ee:ff REACHABLE\n"
+            "2001:db8::2 dev br-lan lladdr aa:bb:cc:dd:ee:ff STALE\n"
+            "fd00::5 dev br-lan lladdr 11:22:33:44:55:66 REACHABLE\n"
+        )
+        result = devices.get_ndp_neighbors()
+        assert "aa:bb:cc:dd:ee:ff" in result
+        assert "2001:db8::1" in result["aa:bb:cc:dd:ee:ff"]
+        assert "2001:db8::2" in result["aa:bb:cc:dd:ee:ff"]
+        assert "11:22:33:44:55:66" in result
+        assert "fd00::5" in result["11:22:33:44:55:66"]
+
+    def test_filters_link_local(self, devices, iproute):
+        iproute.neigh_show_v6.return_value = (
+            "fe80::1 dev br-lan lladdr aa:bb:cc:dd:ee:ff REACHABLE\n"
+            "2001:db8::1 dev br-lan lladdr aa:bb:cc:dd:ee:ff REACHABLE\n"
+        )
+        result = devices.get_ndp_neighbors()
+        assert "aa:bb:cc:dd:ee:ff" in result
+        addrs = result["aa:bb:cc:dd:ee:ff"]
+        assert "2001:db8::1" in addrs
+        assert not any(a.startswith("fe80:") for a in addrs)
+
+    def test_excludes_wan_ndp_entries(self, devices, iproute):
+        iproute.neigh_show_v6.return_value = (
+            "2001:db8::1 dev br-lan lladdr aa:bb:cc:dd:ee:ff REACHABLE\n"
+            "2a02:8071::1 dev eth1 lladdr 02:10:18:7a:fe:7c REACHABLE\n"
+        )
+        result = devices.get_ndp_neighbors()
+        assert "aa:bb:cc:dd:ee:ff" in result
+        assert "02:10:18:7a:fe:7c" not in result
+
+    def test_empty_when_no_neighbors(self, devices, iproute):
+        iproute.neigh_show_v6.return_value = ""
+        assert devices.get_ndp_neighbors() == {}
+
+    def test_handles_error_gracefully(self, devices, iproute):
+        iproute.neigh_show_v6.side_effect = RuntimeError("SSH fail")
+        assert devices.get_ndp_neighbors() == {}

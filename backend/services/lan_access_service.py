@@ -214,6 +214,18 @@ class LanAccessService:
 
         return {"success": True, "zone": zone_id, "isolation": enabled}
 
+    # ── IPv6 ─────────────────────────────────────────────────────────
+
+    def set_ipv6(self, zone_id: str, enabled: bool) -> dict:
+        """Enable or disable IPv6 on a network."""
+        networks = self.router.lan_access.get_networks()
+        target = next((n for n in networks if n["id"] == zone_id), None)
+        if not target:
+            raise ValueError(f"Network '{zone_id}' not found")
+
+        self.router.lan_access.set_ipv6(zone_id, enabled)
+        return {"success": True, "zone": zone_id, "ipv6_enabled": enabled}
+
     def _ip_to_zone(self, ip_or_subnet: str) -> str:
         """Resolve an IP or subnet string to its zone ID, or '' if unknown."""
         networks = self.router.lan_access.get_networks()

@@ -203,3 +203,158 @@ class TestUpdateTunnelEnv:
         cmd = ssh.exec.call_args[0][0]
         assert "FVPN_TUNNEL_ID=200" in cmd
         assert "FVPN_IPSET=src_mac_200" in cmd
+
+
+# ── IPv6 Tests ───────────────────────────────────────────────────────────
+
+
+class TestUploadProtonWgConfigIPv6:
+    def test_ipv6_config_has_dual_stack_allowed_ips(self, pwg, ssh, ipset):
+        ssh.exec.return_value = ""
+        result = pwg.upload_proton_wg_config(
+            profile_name="IPv6 Test",
+            private_key="privkey",
+            public_key="pubkey",
+            endpoint="1.2.3.4:443",
+            socket_type="tcp",
+            ipv6=True,
+        )
+        assert result["ipv6"] is True
+        # Check .conf was written with ::/0
+        conf_write = [c for c in ssh.write_file.call_args_list
+                      if c[0][0].endswith(".conf")]
+        assert conf_write
+        conf_content = conf_write[0][0][1]
+        assert "AllowedIPs = 0.0.0.0/0, ::/0" in conf_content
+        # Check .env has FVPN_IPV6=1
+        env_write = [c for c in ssh.write_file.call_args_list
+                     if c[0][0].endswith(".env")]
+        assert env_write
+        env_content = env_write[0][0][1]
+        assert "FVPN_IPV6=1" in env_content
+
+    def test_ipv4_only_config(self, pwg, ssh, ipset):
+        ssh.exec.return_value = ""
+        result = pwg.upload_proton_wg_config(
+            profile_name="IPv4 Only",
+            private_key="privkey",
+            public_key="pubkey",
+            endpoint="1.2.3.4:443",
+            ipv6=False,
+        )
+        assert result["ipv6"] is False
+        conf_write = [c for c in ssh.write_file.call_args_list
+                      if c[0][0].endswith(".conf")]
+        conf_content = conf_write[0][0][1]
+        assert "AllowedIPs = 0.0.0.0/0" in conf_content
+        assert "::/0" not in conf_content
+        env_write = [c for c in ssh.write_file.call_args_list
+                     if c[0][0].endswith(".env")]
+        env_content = env_write[0][0][1]
+        assert "FVPN_IPV6=0" in env_content
+
+
+class TestStopProtonWgTunnelIPv6:
+    def test_cleanup_includes_ipv6_routing(self, pwg, ssh, iptables, iproute, uci, service_ctl):
+        ssh.exec.side_effect = lambda cmd, **kw: (
+            "12345" if "pidof proton-wg" in cmd else ""
+        )
+        with patch("time.sleep"):
+            pwg.stop_proton_wg_tunnel("protonwg0", "0x6000", 1006, 100)
+
+        # IPv6 routing cleanup should be called
+        iproute.rule_del_v6.assert_called_once_with("0x6000", "0xf000", 1006)
+        iproute.route_flush_table_v6.assert_called_once_with(1006)
+
+
+class TestDnsPort:
+    """Test _dns_port() static method — port formula: 2000 + (mark >> 12) * 100 + 53."""
+
+    def test_mark_0x6000(self):
+        assert RouterProtonWG._dns_port("0x6000") == 2653
+
+    def test_mark_0x7000(self):
+        assert RouterProtonWG._dns_port("0x7000") == 2753
+
+    def test_mark_0x9000(self):
+        assert RouterProtonWG._dns_port("0x9000") == 2953
+
+    def test_mark_0xf000(self):
+        assert RouterProtonWG._dns_port("0xf000") == 3553
+
+
+class TestCtZone:
+    """Test _ct_zone() static method — zone ID = mark as decimal."""
+
+    def test_mark_0x6000(self):
+        assert RouterProtonWG._ct_zone("0x6000") == 0x6000
+
+    def test_mark_0x7000(self):
+        assert RouterProtonWG._ct_zone("0x7000") == 0x7000
+
+    def test_mark_0xf000(self):
+        assert RouterProtonWG._ct_zone("0xf000") == 0xf000
+
+
+class TestStartProtonWgDnsmasq:
+    """Test _start_proton_wg_dnsmasq() sets up dnsmasq config, CT zone, and REDIRECT."""
+
+    def test_creates_dnsmasq_config_and_rules(self, pwg, ssh):
+        ssh.exec.return_value = ""
+        pwg._start_proton_wg_dnsmasq("protonwg0", "0x6000", dns="10.2.0.1")
+
+        # Should create conf-dir and resolv-file
+        exec_calls = [str(c) for c in ssh.exec.call_args_list]
+        assert any("mkdir -p /tmp/dnsmasq.d.protonwg0" in c for c in exec_calls)
+
+        # Should write resolv file with DNS server
+        resolv_writes = [c for c in ssh.write_file.call_args_list
+                         if "resolv.conf.protonwg0" in str(c)]
+        assert resolv_writes
+        assert "10.2.0.1" in resolv_writes[0][0][1]
+
+        # Should write dnsmasq config with correct port (2653 for 0x6000)
+        conf_writes = [c for c in ssh.write_file.call_args_list
+                       if "dnsmasq.conf.protonwg0" in str(c)]
+        assert conf_writes
+        assert "port=2653" in conf_writes[0][0][1]
+
+        # Should set up CT zone rules (raw table)
+        assert any("pre_dns_deal_conn_zone" in c for c in exec_calls)
+        assert any("out_dns_deal_conn_zone" in c for c in exec_calls)
+
+        # Should set up DNS REDIRECT rule (nat table)
+        assert any("REDIRECT --to-ports 2653" in c for c in exec_calls)
+
+
+class TestStopProtonWgDnsmasq:
+    """Test _stop_proton_wg_dnsmasq() tears down dnsmasq and iptables rules."""
+
+    def test_kills_dnsmasq_and_removes_rules(self, pwg, ssh):
+        ssh.exec.return_value = ""
+        pwg._stop_proton_wg_dnsmasq("protonwg0", "0x6000")
+
+        exec_calls = [str(c) for c in ssh.exec.call_args_list]
+
+        # Should kill dnsmasq process
+        assert any("pgrep" in c and "kill" in c and "protonwg0" in c for c in exec_calls)
+
+        # Should remove CT zone rules
+        assert any("-D pre_dns_deal_conn_zone" in c for c in exec_calls)
+        assert any("-D out_dns_deal_conn_zone" in c for c in exec_calls)
+
+        # Should remove DNS REDIRECT
+        assert any("-D policy_redirect" in c and "REDIRECT" in c for c in exec_calls)
+
+        # Should clean up files
+        assert any("rm -rf" in c and "dnsmasq.d.protonwg0" in c for c in exec_calls)
+
+
+class TestEnsureProtonWgInitdIPv6:
+    def test_boot_script_includes_ipv6_block(self, pwg, ssh, service_ctl):
+        pwg.ensure_proton_wg_initd()
+        script = ssh.write_file.call_args[0][1]
+        assert "FVPN_IPV6" in script
+        assert "ip -6 addr add" in script
+        assert "ip -6 route add" in script
+        assert "ip -6 rule add" in script

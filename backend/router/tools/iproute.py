@@ -97,3 +97,59 @@ class Iproute:
         return self._ssh.exec(
             "ip neigh show 2>/dev/null || cat /proc/net/arp 2>/dev/null"
         )
+
+    # ── IPv6 variants ──────────────────────────────────────────────────
+    #
+    # Mirror the IPv4 methods above using ``ip -6`` for dual-stack
+    # routing.  GL.iNet's vpn-client only manages IPv4 rules, so
+    # FlintVPN must set up IPv6 routing independently.
+
+    def addr_add_v6(self, addr: str, dev: str) -> None:
+        """Add an IPv6 address to an interface."""
+        self._ssh.exec(f"ip -6 addr add {addr} dev {dev} 2>/dev/null; true")
+
+    def route_add_v6(
+        self,
+        dest: str,
+        dev: str,
+        table: int,
+        metric: int | None = None,
+    ) -> None:
+        """Add an IPv6 route to a specific table."""
+        cmd = f"ip -6 route add {dest} dev {dev} table {table}"
+        if metric is not None:
+            cmd += f" metric {metric}"
+        self._ssh.exec(f"{cmd} 2>/dev/null; true")
+
+    def route_add_blackhole_v6(
+        self, dest: str, table: int, metric: int | None = None
+    ) -> None:
+        """Add an IPv6 blackhole route (kill switch)."""
+        cmd = f"ip -6 route add blackhole {dest} table {table}"
+        if metric is not None:
+            cmd += f" metric {metric}"
+        self._ssh.exec(f"{cmd} 2>/dev/null; true")
+
+    def route_flush_table_v6(self, table: int) -> None:
+        """Flush all IPv6 routes in a routing table."""
+        self._ssh.exec(f"ip -6 route flush table {table} 2>/dev/null; true")
+
+    def rule_add_v6(
+        self, fwmark: str, mask: str, table: int, priority: int
+    ) -> None:
+        """Add an IPv6 policy routing rule matching a firewall mark."""
+        self._ssh.exec(
+            f"ip -6 rule add fwmark {fwmark}/{mask} lookup {table} "
+            f"priority {priority} 2>/dev/null; true"
+        )
+
+    def rule_del_v6(self, fwmark: str, mask: str, table: int) -> None:
+        """Remove an IPv6 policy routing rule."""
+        self._ssh.exec(
+            f"ip -6 rule del fwmark {fwmark}/{mask} lookup {table} "
+            f"2>/dev/null; true"
+        )
+
+    def neigh_show_v6(self) -> str:
+        """Read the IPv6 neighbor (NDP) table."""
+        return self._ssh.exec("ip -6 neigh show 2>/dev/null")

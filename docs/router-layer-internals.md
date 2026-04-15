@@ -58,7 +58,7 @@ class RouterPolicy:
 | `RouterWireguard` | `router/facades/wireguard.py` | `(uci, service_ctl, alloc_tunnel_id, ssh)` |
 | `RouterOpenvpn` | `router/facades/openvpn.py` | `(uci, service_ctl, alloc_tunnel_id, ssh)` |
 | `RouterProtonWG` | `router/facades/proton_wg.py` | `(uci, ipset, iptables, iproute, service_ctl, alloc_tunnel_id, ssh)` |
-| `RouterAdblock` | `router/facades/adblock.py` | `(uci, ipset, iptables, service_ctl, ssh)` |
+| `RouterAdblock` | `router/facades/adblock.py` | `(uci, ipset, iptables, service_ctl, ssh, ip6tables=None)` |
 | `RouterLanAccess` | `router/facades/lan_access.py` | `(uci, iptables, service_ctl, ssh)` |
 
 The constructor signature tells you at a glance what each facade depends on. If someone tries to use `self._iptables` in `RouterPolicy`, it's an `AttributeError` — not a silent success because the god object has everything.

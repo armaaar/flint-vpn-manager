@@ -57,7 +57,7 @@
 </script>
 
 {#if visible}
-<div class="modal-overlay active" on:click|self={close}>
+<div class="modal-overlay active">
   <div class="modal logs-modal">
     <div class="modal-header">
       <h2>Logs</h2>

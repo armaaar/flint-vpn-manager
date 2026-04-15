@@ -283,7 +283,7 @@ class ProfileService:
         if profile is None:
             raise NotFoundError("Profile not found")
 
-        ri = profile.get("router_info", {})
+        ri = profile.get("router_info") or {}
         rule_name = ri.get("rule_name")
         proto = ri.get("vpn_protocol", PROTO_WIREGUARD)
         is_pwg = proto.startswith("wireguard-")
@@ -328,31 +328,67 @@ class ProfileService:
     def delete_profile(self, profile_id):
         """Delete a profile and tear down its tunnel if VPN.
 
+        Handles both local profiles (in profile_store.json) and orphan
+        profiles (exist on router but not in local store, e.g. after a
+        store restore from backup).
+
         Acquires the per-profile switch lock (blocking) to wait for any
         in-progress smart protocol switch to finish before deleting.
 
         Raises:
-            NotFoundError: If the profile is not found.
+            NotFoundError: If the profile is not found locally or on router.
         """
         self._cancel_smart(profile_id)
 
         lock = self._acquire_lock(profile_id, blocking=True)
         try:
             profile = ps.get_profile(profile_id)
-            if not profile:
-                raise NotFoundError("Profile not found")
 
-            # Tear down router resources
-            if profile["type"] == PROFILE_TYPE_VPN and profile.get("router_info"):
-                self._teardown_tunnel(profile["router_info"])
-
-            log.info(f"Deleted profile '{profile['name']}' (id={profile_id})")
-            ps.delete_profile(profile_id)
+            if profile:
+                # Normal case: profile exists in local store
+                if profile["type"] == PROFILE_TYPE_VPN and profile.get("router_info"):
+                    self._teardown_tunnel(profile["router_info"])
+                log.info(f"Deleted profile '{profile['name']}' (id={profile_id})")
+                ps.delete_profile(profile_id)
+            else:
+                # Orphan: profile exists on router but not in local store.
+                # Try to tear down via router rule_name (the profile_id IS
+                # the rule_name for orphan profiles).
+                router_info = self._find_orphan_router_info(profile_id)
+                if not router_info:
+                    raise NotFoundError("Profile not found")
+                self._teardown_tunnel(router_info)
+                log.info(f"Deleted orphan profile (rule={profile_id})")
         finally:
             lock.release()
             self._switch_locks.pop(profile_id, None)
 
         self._sync_lan_state(sync_noint=True, sync_adblock=True)
+
+    def _find_orphan_router_info(self, rule_name):
+        """Look up router_info for an orphan profile by its rule_name.
+
+        Orphan profiles use the router rule_name as their ID in the
+        merged profile list. Returns a dict with enough info for
+        teardown, or None if the rule doesn't exist on the router.
+        """
+        try:
+            rules = self.router.policy.get_flint_vpn_rules()
+        except Exception:
+            return None
+        for rule in rules:
+            if rule.get("rule_name") == rule_name:
+                proto = PROTO_OPENVPN if rule.get("via_type") == PROTO_OPENVPN else PROTO_WIREGUARD
+                ri = {
+                    "rule_name": rule_name,
+                    "vpn_protocol": proto,
+                }
+                if rule.get("peer_id"):
+                    ri["peer_id"] = rule["peer_id"]
+                if rule.get("client_id"):
+                    ri["client_id"] = rule["client_id"]
+                return ri
+        return None
 
     # ── Type Change ─────────────────────────────────────────────────────────
 
@@ -496,15 +532,23 @@ class ProfileService:
                 new_cert = {k: opts.get(k) for k in cert_keys}
                 if old_cert != new_cert:
                     log.info(f"Refreshing WG cert for '{profile['name']}' — options changed: {old_cert} → {new_cert}")
-                    cert_expiry_new = self.proton.refresh_wireguard_cert(
-                        profile["wg_key"],
-                        profile_name=profile.get("name", "Unnamed"),
-                        netshield=opts.get("netshield", 0),
-                        moderate_nat=opts.get("moderate_nat", False),
-                        nat_pmp=opts.get("nat_pmp", False),
-                        vpn_accelerator=opts.get("vpn_accelerator", True),
-                    )
-                    ps.update_profile(profile_id, cert_expiry=cert_expiry_new)
+                    try:
+                        cert_expiry_new = self.proton.refresh_wireguard_cert(
+                            profile["wg_key"],
+                            profile_name=profile.get("name", "Unnamed"),
+                            netshield=opts.get("netshield", 0),
+                            moderate_nat=opts.get("moderate_nat", False),
+                            nat_pmp=opts.get("nat_pmp", False),
+                            vpn_accelerator=opts.get("vpn_accelerator", True),
+                        )
+                        ps.update_profile(profile_id, cert_expiry=cert_expiry_new)
+                    except Exception as e:
+                        # Fingerprint conflict (409/2500): Proton won't update
+                        # features on an existing key. Clear wg_key so
+                        # switch_server generates a fresh key pair.
+                        log.warning(f"Cert refresh failed ({e}), will regenerate key")
+                        profile["wg_key"] = None
+                        ps.update_profile(profile_id, wg_key=None)
 
             strategy = get_strategy(vpn_protocol)
             new_ri, server_info, wg_key, cert_expiry = strategy.switch_server(

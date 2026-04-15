@@ -1,13 +1,13 @@
 """NoInternet group enforcement — blocks WAN access for assigned devices.
 
-Manages a single global ``fvpn_noint_ips`` hash:ip ipset + one fw3 REJECT
+Manages a single global ``fvpn_noint_macs`` hash:mac ipset + one fw3 REJECT
 rule that drops all traffic from NoInternet devices to the WAN zone.
 
-Extracted from the old ``lan_sync.py`` LAN access layer so that NoInternet
-continues to work independently of the (removed) per-group LAN firewall.
+Uses hash:mac instead of hash:ip so the rule applies to both IPv4 and IPv6
+traffic without needing to track volatile SLAAC addresses.
 
 Execution model:
-  1. Collect IPs of devices assigned to NoInternet profiles.
+  1. Collect MACs of devices assigned to NoInternet profiles.
   2. Diff against the live kernel ipset membership.
   3. Apply adds/removes via ``ipset add/del`` (immediate, no reload).
   4. If the UCI ipset+rule sections don't exist yet, create them and reload.
@@ -19,21 +19,21 @@ import persistence.profile_store as profile_store
 from consts import PROFILE_TYPE_NO_INTERNET
 
 
-NOINT_IPSET = "fvpn_noint_ips"
+NOINT_IPSET = "fvpn_noint_macs"
 NOINT_RULE = "fvpn_noint_block"
+# Legacy ipset name — detected and migrated on first sync
+_LEGACY_IPSET = "fvpn_noint_ips"
 
 
 def sync_noint_to_router(
     router,
     store: Optional[dict] = None,
-    device_ips: Optional[dict] = None,
 ) -> dict:
     """Reconcile the NoInternet ipset on the router with local intent.
 
     Args:
         router: RouterAPI instance
         store: profile_store dict (loaded if None)
-        device_ips: {mac_lower: ip} from live DHCP (queried if None)
 
     Returns:
         {"applied": bool, "reload": bool, "adds": int, "removes": int}
@@ -41,12 +41,8 @@ def sync_noint_to_router(
     if store is None:
         store = profile_store.load()
 
-    if device_ips is None:
-        try:
-            leases = router.devices.get_dhcp_leases()
-            device_ips = {l["mac"].lower(): l.get("ip", "") for l in leases}
-        except Exception:
-            device_ips = {}
+    # Migrate from legacy hash:ip ipset if present
+    _migrate_legacy_ipset(router)
 
     profiles = {p["id"]: p for p in store.get("profiles", [])}
     noint_pids = {
@@ -56,21 +52,19 @@ def sync_noint_to_router(
 
     assignments = store.get("device_assignments", {})
 
-    desired_ips = set()
+    desired_macs = set()
     for mac, pid in assignments.items():
         if pid in noint_pids:
-            ip = device_ips.get(mac.lower(), "")
-            if ip:
-                desired_ips.add(ip)
+            desired_macs.add(mac.upper())
 
     # Read live kernel ipset membership
     try:
-        live_ips = set(router.ipset_tool.members(NOINT_IPSET))
+        live_macs = {m.upper() for m in router.ipset_tool.members(NOINT_IPSET)}
     except Exception:
-        live_ips = set()
+        live_macs = set()
 
-    add = sorted(desired_ips - live_ips)
-    remove = sorted(live_ips - desired_ips)
+    add = sorted(desired_macs - live_macs)
+    remove = sorted(live_macs - desired_macs)
     applied = False
     needs_reload = False
 
@@ -80,8 +74,8 @@ def sync_noint_to_router(
     except Exception:
         check = "MISSING"
 
-    if check == "MISSING" and (noint_pids or desired_ips):
-        uci = _build_uci_sections(desired_ips)
+    if check == "MISSING" and (noint_pids or desired_macs):
+        uci = _build_uci_sections(desired_macs)
         router.firewall.fvpn_uci_apply(uci, reload=True)
         needs_reload = True
         applied = True
@@ -95,7 +89,7 @@ def sync_noint_to_router(
         )
         router.firewall.fvpn_uci_apply(uci, reload=True)
         router.ipset_tool.destroy(NOINT_IPSET)
-        return {"applied": True, "reload": True, "adds": 0, "removes": len(live_ips)}
+        return {"applied": True, "reload": True, "adds": 0, "removes": len(live_macs)}
 
     # Apply membership diff (immediate kernel effect, no reload).
     if add or remove:
@@ -106,10 +100,10 @@ def sync_noint_to_router(
             pass
         # Dual-write to UCI for persistence across reboots.
         uci_lines = []
-        for ip in remove:
-            uci_lines.append(f"del_list firewall.{NOINT_IPSET}.entry='{ip}'")
-        for ip in add:
-            uci_lines.append(f"add_list firewall.{NOINT_IPSET}.entry='{ip}'")
+        for mac in remove:
+            uci_lines.append(f"del_list firewall.{NOINT_IPSET}.entry='{mac}'")
+        for mac in add:
+            uci_lines.append(f"add_list firewall.{NOINT_IPSET}.entry='{mac}'")
         if uci_lines:
             try:
                 router.firewall.fvpn_uci_apply("\n".join(uci_lines) + "\n", reload=False)
@@ -122,6 +116,22 @@ def sync_noint_to_router(
         "adds": len(add),
         "removes": len(remove),
     }
+
+
+def _migrate_legacy_ipset(router) -> None:
+    """Delete the legacy hash:ip ipset and UCI sections if present."""
+    try:
+        check = router.uci.get(f"firewall.{_LEGACY_IPSET}", "MISSING").strip()
+    except Exception:
+        return
+    if check == "MISSING":
+        return
+    try:
+        router.uci.delete(f"firewall.{_LEGACY_IPSET}")
+        router.uci.commit("firewall")
+        router.ipset_tool.destroy(_LEGACY_IPSET)
+    except Exception:
+        pass
 
 
 def wipe_noint(router) -> None:
@@ -137,18 +147,25 @@ def wipe_noint(router) -> None:
         router.service_ctl.reload("firewall")
     except Exception:
         pass
+    # Also clean up legacy ipset
+    try:
+        router.uci.delete(f"firewall.{_LEGACY_IPSET}")
+        router.uci.commit("firewall")
+        router.ipset_tool.destroy(_LEGACY_IPSET)
+    except Exception:
+        pass
 
 
-def _build_uci_sections(desired_ips: set) -> str:
+def _build_uci_sections(desired_macs: set) -> str:
     """Build UCI batch to create the ipset + rule sections from scratch."""
     lines = [
         f"set firewall.{NOINT_IPSET}=ipset",
         f"set firewall.{NOINT_IPSET}.name='{NOINT_IPSET}'",
-        f"set firewall.{NOINT_IPSET}.match='ip'",
+        f"set firewall.{NOINT_IPSET}.match='mac'",
         f"set firewall.{NOINT_IPSET}.storage='hash'",
     ]
-    for ip in sorted(desired_ips):
-        lines.append(f"add_list firewall.{NOINT_IPSET}.entry='{ip}'")
+    for mac in sorted(desired_macs):
+        lines.append(f"add_list firewall.{NOINT_IPSET}.entry='{mac}'")
     lines.extend([
         f"set firewall.{NOINT_RULE}=rule",
         f"set firewall.{NOINT_RULE}.name='fvpn NoInternet block WAN'",

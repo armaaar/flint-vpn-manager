@@ -56,11 +56,13 @@ def probe_servers_via_router(
     # BusyBox date doesn't support nanoseconds. curl is available on the
     # GL.iNet Flint 2 and gives precise connect time via %{time_connect}.
     # Output: "IP LATENCY_MS" or "IP FAIL" per line.
+    # IPv6 addresses need bracket notation in URLs: https://[::1]:443
     ip_list = " ".join(ips)
     cmd = (
         f'for ip in {ip_list}; do '
+        f'case "$ip" in *:*) url="https://[$ip]:{port}";; *) url="https://$ip:{port}";; esac; '
         f'T=$(curl -so /dev/null -w "%{{time_connect}}" '
-        f'--connect-timeout {timeout} "https://$ip:{port}" 2>/dev/null); '
+        f'--connect-timeout {timeout} "$url" 2>/dev/null); '
         f'if [ -n "$T" ] && [ "$T" != "0.000000" ]; then '
         f'MS=$(awk "BEGIN{{printf \\"%d\\", $T * 1000}}"); '
         f'echo "$ip $MS"; '

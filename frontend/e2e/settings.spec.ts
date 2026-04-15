@@ -33,6 +33,12 @@ test.describe('Settings Page', () => {
     await expect(page.locator('#alt-routing')).toBeVisible();
   });
 
+  test('General tab shows IPv6 toggle', async ({ page }) => {
+    await page.locator('.tab:has-text("General")').click();
+    await expect(page.locator('#ipv6-global')).toBeVisible();
+    await expect(page.locator('label[for="ipv6-global"]')).toContainText('Enable IPv6');
+  });
+
   test('Servers tab shows auto-optimize controls', async ({ page }) => {
     await page.locator('.tab:has-text("Servers")').click();
     await expect(page.locator('#ao-enabled')).toBeVisible();

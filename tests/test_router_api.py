@@ -576,3 +576,73 @@ class TestRouterAPIIntegration:
     def test_tunnel_status_no_rule(self, router):
         status = router.tunnel.get_tunnel_status("nonexistent_rule")
         assert status["up"] is False
+
+
+# ── Unit Tests: write_file SCP path ──────────────────────────────────────────
+
+
+class TestWriteFileScp:
+    """Test that large files (>=1MB) use scp -O instead of SSH stdin pipe."""
+
+    def test_small_file_uses_ssh_pipe(self):
+        """Files < 1MB should use SSH stdin pipe, not scp."""
+        router = RouterAPI("192.168.8.1", password="test")
+        router._client = MagicMock()
+        mock_stdout = MagicMock()
+        mock_stdout.channel.recv_exit_status.return_value = 0
+        router._client.exec_command.return_value = (None, mock_stdout, MagicMock())
+
+        router.write_file("/tmp/small.txt", "hello")
+
+        # connect() calls exec_command('echo ok') first, then write_file calls cat
+        cat_calls = [c for c in router._client.exec_command.call_args_list
+                     if "cat >" in str(c)]
+        assert len(cat_calls) == 1
+        assert "cat > /tmp/small.txt" in str(cat_calls[0])
+        mock_stdout.channel.sendall.assert_called_once_with(b"hello")
+
+    def test_large_file_uses_scp(self):
+        """Files >= 1MB should use scp -O to avoid Dropbear buffer overflow."""
+        from unittest.mock import patch
+        import subprocess
+
+        router = RouterAPI("192.168.8.1", password="test", key_filename="/tmp/key")
+        router._client = MagicMock()
+
+        large_content = "x" * 1_000_001  # Just over 1MB
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+
+        with patch("subprocess.run", return_value=mock_result) as mock_run, \
+             patch("os.unlink") as mock_unlink:
+            router.write_file("/tmp/large.txt", large_content)
+
+        # Should have called scp with -O flag
+        mock_run.assert_called_once()
+        scp_args = mock_run.call_args[0][0]
+        assert "scp" in scp_args
+        assert "-O" in scp_args
+        assert "-i" in scp_args
+        assert "/tmp/key" in scp_args
+        assert any("root@192.168.8.1:/tmp/large.txt" in arg for arg in scp_args)
+        # Should clean up temp file
+        mock_unlink.assert_called_once()
+
+    def test_large_file_scp_failure_raises(self):
+        """scp failure should raise RuntimeError."""
+        from unittest.mock import patch
+
+        router = RouterAPI("192.168.8.1", password="test")
+        router._client = MagicMock()
+
+        large_content = "x" * 1_000_001
+
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stderr = b"Permission denied"
+
+        with patch("subprocess.run", return_value=mock_result), \
+             patch("os.unlink"):
+            with pytest.raises(RuntimeError, match="scp failed"):
+                router.write_file("/tmp/large.txt", large_content)

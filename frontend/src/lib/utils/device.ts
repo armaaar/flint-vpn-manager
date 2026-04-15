@@ -57,6 +57,15 @@ export function deviceIcon(d: Device | string): string {
   return '💻';
 }
 
+/** Sort devices: online first, then alphabetically by display_name. */
+export function sortDevices<T extends Device>(arr: T[]): T[] {
+  return arr.slice().sort((a, b) => {
+    const ao = isOnline(a) ? 0 : 1, bo = isOnline(b) ? 0 : 1;
+    if (ao !== bo) return ao - bo;
+    return (a.display_name || '').localeCompare(b.display_name || '');
+  });
+}
+
 export function deviceTypeLabel(cls: string): string {
   if (cls && DEVICE_TYPES[cls]) return DEVICE_TYPES[cls].label;
   return '';

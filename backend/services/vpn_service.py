@@ -15,8 +15,12 @@ import persistence.profile_store as ps
 import router.noint_sync as noint_sync
 from consts import (
     HEALTH_RED,
+    PROFILE_TYPE_NO_INTERNET,
+    PROFILE_TYPE_NO_VPN,
     PROFILE_TYPE_VPN,
     PROTO_WIREGUARD,
+    PROTO_WIREGUARD_TCP,
+    PROTO_WIREGUARD_TLS,
 )
 from vpn.tunnel_strategy import get_strategy
 from vpn.protocol_limits import MAX_WG_GROUPS, MAX_OVPN_GROUPS, MAX_PWG_GROUPS
@@ -202,27 +206,39 @@ class VPNService:
     # ── DNS Ad Block Sync ───────────────────────────────────────────────────
 
     def sync_adblock_to_router(self):
-        """Sync DNS ad-block ipset + iptables rules to the router."""
+        """Sync DNS ad-block by injecting blocklists into per-tunnel dnsmasq instances."""
         try:
             store_data = ps.load()
-            assignments = self._resolve_device_assignments(store_data)
+            profiles = store_data.get("profiles", [])
 
-            profiles_by_id = {
-                p["id"]: p for p in store_data.get("profiles", [])
-            }
+            # Prefetch all route_policy rules in one SSH call
+            rp_rules = self.router.uci.show("route_policy")
 
-            adblock_macs = set()
-            for mac, pid in assignments.items():
-                p = profiles_by_id.get(pid)
-                from consts import PROFILE_TYPE_NO_INTERNET
-                if p and p.get("adblock") and p.get("type") != PROFILE_TYPE_NO_INTERNET:
-                    adblock_macs.add(mac.lower())
+            adblock_ifaces = set()
+            for p in profiles:
+                if not p.get("adblock"):
+                    continue
+                ptype = p.get("type")
+                if ptype == PROFILE_TYPE_NO_INTERNET:
+                    continue
+                if ptype == PROFILE_TYPE_VPN:
+                    ri = p.get("router_info", {})
+                    vpn_proto = ri.get("vpn_protocol", "")
+                    if vpn_proto in (PROTO_WIREGUARD_TCP, PROTO_WIREGUARD_TLS):
+                        # proton-wg tunnels have their own per-tunnel dnsmasq
+                        tunnel_name = ri.get("tunnel_name")
+                        if tunnel_name:
+                            adblock_ifaces.add(tunnel_name)
+                    else:
+                        rule_name = ri.get("rule_name")
+                        if rule_name:
+                            via = rp_rules.get(rule_name, {}).get("via", "")
+                            if via and via != "novpn":
+                                adblock_ifaces.add(via)
+                elif ptype == PROFILE_TYPE_NO_VPN:
+                    adblock_ifaces.add("main")
 
-            if not adblock_macs:
-                self.router.adblock.cleanup_adblock()
-            else:
-                self.router.adblock.ensure_adblock_dnsmasq()
-                self.router.adblock.sync_adblock_rules(adblock_macs)
+            self.router.adblock.sync_adblock(adblock_ifaces)
         except Exception as e:
             log.warning(f"Adblock sync failed: {e}")
 

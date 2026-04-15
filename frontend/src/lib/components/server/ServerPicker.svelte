@@ -18,7 +18,8 @@
   let lastInitProfileId = null;
 
   // Three independent selects + features filter. All start as "Fastest".
-  let features = { streaming: false, p2p: false, secure_core: false, tor: false };
+  let features = { streaming: false, p2p: false, secure_core: false, tor: false, ipv6: false };
+  let globalIpv6Enabled = false;
   let selCountry = null;     // null = Fastest
   let selCity = null;        // null = Fastest
   let selEntryCountry = null; // null = Fastest (only meaningful with secure_core)
@@ -31,12 +32,37 @@
   let searchServer = '';
 
   $: if (visible) {
-    loadServers();
-    openDropdown = null;
+    resetState();
+    initPicker();
   }
 
-  // Hydrate selections from the existing profile's scope when opening
-  $: if (visible && currentProfile && currentProfile.id !== lastInitProfileId) {
+  function resetState() {
+    selCountry = null;
+    selCity = null;
+    selEntryCountry = null;
+    selServerId = null;
+    features = { streaming: false, p2p: false, secure_core: false, tor: false, ipv6: false };
+    openDropdown = null;
+    searchCountry = '';
+    searchCity = '';
+    searchServer = '';
+    latencies = {};
+    lastInitProfileId = null;
+  }
+
+  async function initPicker() {
+    loadServers();
+    // Load global IPv6 setting BEFORE hydrating features
+    try {
+      const s = await api.getSettings();
+      globalIpv6Enabled = s.global_ipv6_enabled === true;
+    } catch { globalIpv6Enabled = false; }
+    // Hydrate features after global setting is known
+    hydrateFromProfile();
+  }
+
+  function hydrateFromProfile() {
+    if (!currentProfile) return;
     lastInitProfileId = currentProfile.id;
     const sc = currentProfile.server_scope || {};
     features = {
@@ -44,13 +70,15 @@
       p2p: !!(sc.features && sc.features.p2p),
       secure_core: !!(sc.features && sc.features.secure_core),
       tor: !!(sc.features && sc.features.tor),
+      // Default IPv6 filter ON when global IPv6 is enabled
+      ipv6: !!(sc.features && sc.features.ipv6) || globalIpv6Enabled,
     };
     selCountry = sc.country_code || null;
     selCity = sc.city || null;
     selEntryCountry = sc.entry_country_code || null;
     selServerId = sc.server_id || null;
   }
-  $: if (!visible) lastInitProfileId = null;
+  // lastInitProfileId is reset in resetState() when visible becomes true
 
   async function loadServers() {
     loading = true;
@@ -133,6 +161,7 @@
       if (features.p2p && !s.p2p) return false;
       if (features.secure_core !== !!s.secure_core) return false;
       if (features.tor !== !!s.tor) return false;
+      if (features.ipv6 && !s.ipv6) return false;
       return true;
     });
   })();
@@ -166,23 +195,27 @@
       .sort((a, b) => a.name.localeCompare(b.name));
   })();
 
-  // City options: distinct cities in the selected country (or all when
-  // Country=Fastest, but the cascade rule disables the City select then,
-  // so this only matters for option count display).
+  // City options: distinct cities in the selected country, or ALL cities
+  // across all countries when Country=Fastest.
   $: cityOptions = (() => {
-    if (!selCountry) return [];
-    const inCountry = featureFiltered.filter(s => s.country_code === selCountry);
+    const inCountry = selCountry
+      ? featureFiltered.filter(s => s.country_code === selCountry)
+      : featureFiltered;
     // For SC mode, group by (city, entry_country_code) so "Sydney via CH"
     // and "Sydney via SE" appear as separate options.
     const map = {};
     for (const s of inCountry) {
       const city = s.city || 'Unknown';
+      // When country=Fastest, include country_code in key so
+      // "Sydney, AU" and "Sydney, CA" appear as separate options.
       const key = features.secure_core
         ? `${city}::${s.entry_country_code}`
-        : city;
+        : selCountry ? city : `${city}::${s.country_code}`;
       if (!map[key]) {
         map[key] = {
           city,
+          country_code: s.country_code,
+          country_name: s.country,
           entry_country_code: features.secure_core ? s.entry_country_code : null,
           servers: 0,
           loadSum: 0,
@@ -205,16 +238,15 @@
       });
   })();
 
-  // Server options: specific servers in the selected country+city.
+  // Server options: servers matching the selected country+city scope.
+  // When country or city is Fastest, shows all servers within that scope.
   // Sorted by Proton's `score` (lower = better) — same metric the
   // backend's resolve_scope_to_server and the official Proton client use.
-  // Load bars stay in the UI as a separate, intuitive congestion signal.
   $: serverOptions = (() => {
-    if (!selCountry || !selCity) return [];
     return featureFiltered
       .filter(s => {
-        if (s.country_code !== selCountry) return false;
-        if (s.city !== selCity) return false;
+        if (selCountry && s.country_code !== selCountry) return false;
+        if (selCity && s.city !== selCity) return false;
         if (features.secure_core && selEntryCountry &&
             s.entry_country_code !== selEntryCountry) return false;
         return true;
@@ -283,12 +315,27 @@
       selCity = option.city;
       selEntryCountry = option.entry_country_code || null;
       selServerId = null;
+      // Auto-set country if currently Fastest
+      if (!selCountry && option.country_code) {
+        selCountry = option.country_code;
+      }
     }
     openDropdown = null;
   }
 
   function setServer(id) {
     selServerId = id;
+    if (id) {
+      // Auto-set country and city if currently Fastest
+      const match = featureFiltered.find(s => s.id === id);
+      if (match) {
+        if (!selCountry) selCountry = match.country_code;
+        if (!selCity) {
+          selCity = match.city;
+          selEntryCountry = match.entry_country_code || null;
+        }
+      }
+    }
     openDropdown = null;
   }
 
@@ -316,15 +363,46 @@
   }
 
   // ── Filtered option lists for the open dropdown's search ──────────────
-  $: filteredCountryOptions = countryOptions.filter(c =>
+  $: allFilteredCountryOptions = countryOptions.filter(c =>
     !searchCountry || c.name.toLowerCase().includes(searchCountry.toLowerCase())
   );
-  $: filteredCityOptions = cityOptions.filter(c =>
-    !searchCity || c.city.toLowerCase().includes(searchCity.toLowerCase())
-  );
-  $: filteredServerOptions = serverOptions.filter(s =>
+  $: allFilteredCityOptions = cityOptions.filter(c => {
+    if (!searchCity) return true;
+    const q = searchCity.toLowerCase();
+    return c.city.toLowerCase().includes(q) ||
+      (c.country_name && c.country_name.toLowerCase().includes(q));
+  });
+  $: allFilteredServerOptions = serverOptions.filter(s =>
     !searchServer || s.name.toLowerCase().includes(searchServer.toLowerCase())
   );
+
+  // ── Lazy rendering: render items in batches ───────────────────────────
+  const BATCH_SIZE = 50;
+  let visCountry = BATCH_SIZE;
+  let visCity = BATCH_SIZE;
+  let visServer = BATCH_SIZE;
+
+  // Reset visible count when search or options change
+  $: searchCountry, visCountry = BATCH_SIZE;
+  $: searchCity, visCity = BATCH_SIZE;
+  $: searchServer, visServer = BATCH_SIZE;
+
+  $: filteredCountryOptions = allFilteredCountryOptions.slice(0, visCountry);
+  $: filteredCityOptions = allFilteredCityOptions.slice(0, visCity);
+  $: filteredServerOptions = allFilteredServerOptions.slice(0, visServer);
+
+  function handleDropdownScroll(e, kind) {
+    const el = e.target;
+    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 40) {
+      if (kind === 'country' && visCountry < allFilteredCountryOptions.length) {
+        visCountry += BATCH_SIZE;
+      } else if (kind === 'city' && visCity < allFilteredCityOptions.length) {
+        visCity += BATCH_SIZE;
+      } else if (kind === 'server' && visServer < allFilteredServerOptions.length) {
+        visServer += BATCH_SIZE;
+      }
+    }
+  }
 
   function openDrop(name) {
     if (openDropdown === name) {
@@ -334,6 +412,9 @@
       searchCountry = '';
       searchCity = '';
       searchServer = '';
+      visCountry = BATCH_SIZE;
+      visCity = BATCH_SIZE;
+      visServer = BATCH_SIZE;
     }
   }
 
@@ -367,8 +448,8 @@
     return 'Fastest';
   })();
 
-  $: cityDisabled = !selCountry;
-  $: serverDisabled = !selCountry || !selCity;
+  // City and Server dropdowns are always enabled — selecting a child
+  // auto-populates the parent when it's set to Fastest.
 
   // ── Submit ────────────────────────────────────────────────────────────
 
@@ -402,7 +483,7 @@
 <svelte:window on:click={handleWindowClick} />
 
 {#if visible}
-<div class="modal-overlay active" on:click|self={close}>
+<div class="modal-overlay active">
   <div class="modal" style="max-width:560px">
     <div class="modal-header">
       <h2>{profileId ? 'Change Server' : 'Choose Server'}</h2>
@@ -426,6 +507,8 @@
                   on:click={() => setFeature('secure_core')}>🛡 Secure Core</button>
           <button class="filter-chip" class:active={features.tor}
                   on:click={() => setFeature('tor')}>🧅 Tor</button>
+          <button class="filter-chip" class:active={features.ipv6}
+                  on:click={() => setFeature('ipv6')}>🌐 IPv6</button>
         </div>
       </div>
 
@@ -448,14 +531,14 @@
             <div class="dropdown-pop" on:click|stopPropagation>
               <input class="dropdown-search" placeholder="Search country..."
                      bind:value={searchCountry} autofocus>
-              <div class="dropdown-list">
+              <div class="dropdown-list" on:scroll={(e) => handleDropdownScroll(e, 'country')}>
                 <button class="dropdown-item" class:selected={selCountry === null}
                         on:click={() => setCountry(null)}>
                   <span class="fastest-icon">⚡</span>
                   <span class="item-main">Fastest</span>
                   <span class="item-meta">{countryOptions.length} {countryOptions.length === 1 ? 'country' : 'countries'}</span>
                 </button>
-                {#if filteredCountryOptions.length === 0}
+                {#if allFilteredCountryOptions.length === 0}
                   <div class="empty">No countries match your filters</div>
                 {:else}
                   {#each filteredCountryOptions as c (c.code)}
@@ -469,6 +552,9 @@
                       <span class="score-pct" title="Average Proton score (lower = better)">{formatScore(c.avgScore)}</span>
                     </button>
                   {/each}
+                  {#if filteredCountryOptions.length < allFilteredCountryOptions.length}
+                    <div class="load-more">Scroll for more ({allFilteredCountryOptions.length - filteredCountryOptions.length} remaining)</div>
+                  {/if}
                 {/if}
               </div>
             </div>
@@ -480,13 +566,10 @@
       <div class="form-group">
         <label>City</label>
         <div class="dropdown-wrap">
-          <button class="dropdown-trigger" class:disabled={cityDisabled}
-                  disabled={cityDisabled}
+          <button class="dropdown-trigger"
                   on:click={() => openDrop('city')}>
             <span class="trig-content">
-              {#if cityDisabled}
-                <span class="fastest-icon">⚡</span> Fastest city
-              {:else if selCity}
+              {#if selCity}
                 {cityLabel}
                 {#if features.secure_core && selEntryCountry}
                   <span class="sc-via">via <img class="flag-img" src={countryFlagUrl(selEntryCountry)} alt="" /> {scEntryName(selEntryCountry)}</span>
@@ -495,26 +578,29 @@
                 <span class="fastest-icon">⚡</span> Fastest city
               {/if}
             </span>
-            {#if !cityDisabled}<span class="caret">▾</span>{/if}
+            <span class="caret">▾</span>
           </button>
-          {#if openDropdown === 'city' && !cityDisabled}
+          {#if openDropdown === 'city'}
             <div class="dropdown-pop" on:click|stopPropagation>
               <input class="dropdown-search" placeholder="Search city..."
                      bind:value={searchCity} autofocus>
-              <div class="dropdown-list">
+              <div class="dropdown-list" on:scroll={(e) => handleDropdownScroll(e, 'city')}>
                 <button class="dropdown-item" class:selected={selCity === null}
                         on:click={() => setCity(null)}>
                   <span class="fastest-icon">⚡</span>
                   <span class="item-main">Fastest</span>
                   <span class="item-meta">{cityOptions.length} {cityOptions.length === 1 ? 'option' : 'options'}</span>
                 </button>
-                {#if filteredCityOptions.length === 0}
+                {#if allFilteredCityOptions.length === 0}
                   <div class="empty">No cities match your filters</div>
                 {:else}
-                  {#each filteredCityOptions as c (`${c.city}::${c.entry_country_code || ''}`)}
+                  {#each filteredCityOptions as c (`${c.city}::${c.country_code}::${c.entry_country_code || ''}`)}
                     <button class="dropdown-item"
                             class:selected={selCity === c.city && selEntryCountry === c.entry_country_code}
                             on:click={() => setCity(c)}>
+                      {#if !selCountry}
+                        <img class="flag-img" src={countryFlagUrl(c.country_code)} alt="" />
+                      {/if}
                       <span class="item-main">
                         {c.city}
                         {#if c.entry_country_code}
@@ -527,6 +613,9 @@
                       <span class="score-pct" title="Average Proton score (lower = better)">{formatScore(c.avgScore)}</span>
                     </button>
                   {/each}
+                  {#if filteredCityOptions.length < allFilteredCityOptions.length}
+                    <div class="load-more">Scroll for more ({allFilteredCityOptions.length - filteredCityOptions.length} remaining)</div>
+                  {/if}
                 {/if}
               </div>
             </div>
@@ -538,40 +627,35 @@
       <div class="form-group">
         <label class="server-label">
           Server
-          {#if !serverDisabled}
-            <span class="label-action" on:click|stopPropagation={probeVisibleServers}
-                  role="button" tabindex="-1">
-              {#if probing}testing...{:else}Test latency{/if}
-            </span>
-          {/if}
+          <span class="label-action" on:click|stopPropagation={probeVisibleServers}
+                role="button" tabindex="-1">
+            {#if probing}testing...{:else}Test latency{/if}
+          </span>
         </label>
         <div class="dropdown-wrap">
-          <button class="dropdown-trigger" class:disabled={serverDisabled}
-                  disabled={serverDisabled}
+          <button class="dropdown-trigger"
                   on:click={() => openDrop('server')}>
             <span class="trig-content">
-              {#if serverDisabled}
-                <span class="fastest-icon">⚡</span> Fastest server
-              {:else if selServerId}
+              {#if selServerId}
                 {serverLabel}
               {:else}
                 <span class="fastest-icon">⚡</span> Fastest server
               {/if}
             </span>
-            {#if !serverDisabled}<span class="caret">▾</span>{/if}
+            <span class="caret">▾</span>
           </button>
-          {#if openDropdown === 'server' && !serverDisabled}
+          {#if openDropdown === 'server'}
             <div class="dropdown-pop" on:click|stopPropagation>
               <input class="dropdown-search" placeholder="Search server..."
                      bind:value={searchServer} autofocus>
-              <div class="dropdown-list">
+              <div class="dropdown-list" on:scroll={(e) => handleDropdownScroll(e, 'server')}>
                 <button class="dropdown-item" class:selected={selServerId === null}
                         on:click={() => setServer(null)}>
                   <span class="fastest-icon">⚡</span>
                   <span class="item-main">Fastest</span>
                   <span class="item-meta">{serverOptions.length} server{serverOptions.length !== 1 ? 's' : ''}</span>
                 </button>
-                {#if filteredServerOptions.length === 0}
+                {#if allFilteredServerOptions.length === 0}
                   <div class="empty">No servers match</div>
                 {:else}
                   {#each filteredServerOptions as s (s.id)}
@@ -587,6 +671,7 @@
                         {#if s.p2p}<span class="srv-badge p2p">P2P</span>{/if}
                         {#if s.secure_core}<span class="srv-badge sc">SC</span>{/if}
                         {#if s.tor}<span class="srv-badge tor">TOR</span>{/if}
+                        {#if s.ipv6}<span class="srv-badge v6">v6</span>{/if}
                       </span>
                       <div class="load-bar"><div class="load-fill" style="width:{s.load}%;background:{loadBarColor(s.load)}"></div></div>
                       <span class="load-pct">{s.load}%</span>
@@ -604,6 +689,9 @@
                               on:click={(e) => toggleBlacklist(s.id, e)}>&#128683;</span>
                     </button>
                   {/each}
+                  {#if filteredServerOptions.length < allFilteredServerOptions.length}
+                    <div class="load-more">Scroll for more ({allFilteredServerOptions.length - filteredServerOptions.length} remaining)</div>
+                  {/if}
                 {/if}
               </div>
             </div>
@@ -616,16 +704,36 @@
         <div class="preview-label">Currently resolves to</div>
         {#if resolvedServer}
           <div class="preview-server">
+            <span class="pref-btn" class:active={resolvedServer.favourite} role="button" tabindex="-1"
+                  title={resolvedServer.favourite ? 'Remove from favourites' : 'Add to favourites'}
+                  on:click={(e) => toggleFavourite(resolvedServer.id, e)}>&#9733;</span>
             <img class="flag-img" src={countryFlagUrl(resolvedServer.country_code)} alt="" />
             <strong>{resolvedServer.name}</strong>
             <span class="preview-meta">· {resolvedServer.city || resolvedServer.country}</span>
+            <span class="srv-badges">
+              {#if resolvedServer.streaming}<span class="srv-badge str">STR</span>{/if}
+              {#if resolvedServer.p2p}<span class="srv-badge p2p">P2P</span>{/if}
+              {#if resolvedServer.secure_core}<span class="srv-badge sc">SC</span>{/if}
+              {#if resolvedServer.tor}<span class="srv-badge tor">TOR</span>{/if}
+              {#if resolvedServer.ipv6}<span class="srv-badge v6">v6</span>{/if}
+            </span>
             {#if resolvedServer.secure_core}
-              <span class="srv-badge sc">SC</span>
               <span class="sc-via-inline">via <img class="flag-img" src={countryFlagUrl(resolvedServer.entry_country_code)} alt="" /> {scEntryName(resolvedServer.entry_country_code)}</span>
             {/if}
             <div class="load-bar"><div class="load-fill" style="width:{resolvedServer.load}%;background:{loadBarColor(resolvedServer.load)}"></div></div>
             <span class="load-pct">{resolvedServer.load}%</span>
             <span class="score-pct" title="Proton score (lower = better)">{formatScore(resolvedServer.score)}</span>
+            {#if latencies[resolvedServer.id] !== undefined}
+              <span class="latency-badge" class:good={latencies[resolvedServer.id] !== null && latencies[resolvedServer.id] < 50}
+                    class:warn={latencies[resolvedServer.id] !== null && latencies[resolvedServer.id] >= 50 && latencies[resolvedServer.id] < 150}
+                    class:bad={latencies[resolvedServer.id] === null || latencies[resolvedServer.id] >= 150}
+                    title="TCP connect latency from router">
+                {latencies[resolvedServer.id] !== null ? Math.round(latencies[resolvedServer.id]) + 'ms' : 'fail'}
+              </span>
+            {/if}
+            <span class="pref-btn ban-btn" class:active={resolvedServer.blacklisted} role="button" tabindex="-1"
+                  title={resolvedServer.blacklisted ? 'Remove from blacklist' : 'Block this server'}
+                  on:click={(e) => toggleBlacklist(resolvedServer.id, e)}>&#128683;</span>
           </div>
         {:else}
           <div class="preview-empty">No server matches your filters. Try removing a feature or picking a different country.</div>
@@ -680,7 +788,6 @@
     cursor: pointer; text-align: left; transition: var(--transition);
   }
   .dropdown-trigger:hover:not(.disabled) { border-color: var(--accent); }
-  .dropdown-trigger.disabled { opacity: .5; cursor: not-allowed; background: var(--bg2); }
   .trig-content { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; }
   .fastest-icon { color: #f39c12; }
   .caret { color: var(--fg3); font-size: .8rem; }
@@ -717,6 +824,7 @@
   .srv-badge.p2p { background: rgba(46, 204, 113, .2); color: #2ecc71; }
   .srv-badge.sc { background: rgba(243, 156, 18, .2); color: #f39c12; }
   .srv-badge.tor { background: rgba(124, 77, 255, .2); color: #9b59b6; }
+  .srv-badge.v6 { background: rgba(52, 152, 219, .2); color: #3498db; }
 
   .load-bar { width: 50px; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; flex-shrink: 0; }
   .load-fill { height: 100%; }
@@ -763,6 +871,7 @@
   .latency-badge.bad { background: rgba(231, 76, 60, .15); color: #e74c3c; }
 
   .empty { padding: 16px; text-align: center; color: var(--fg3); font-size: .82rem; }
+  .load-more { padding: 8px; text-align: center; color: var(--fg3); font-size: .72rem; }
 
   .preview {
     margin-top: 16px; padding: 12px;

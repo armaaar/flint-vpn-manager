@@ -35,7 +35,7 @@ class SshExecutor(Protocol):
 
 from router.tools.uci import Uci
 from router.tools.ipset import Ipset
-from router.tools.iptables import Iptables
+from router.tools.iptables import Iptables, Ip6tables
 from router.tools.iproute import Iproute
 from router.tools.service_ctl import ServiceCtl
 
@@ -44,6 +44,7 @@ __all__ = [
     "Uci",
     "Ipset",
     "Iptables",
+    "Ip6tables",
     "Iproute",
     "ServiceCtl",
 ]

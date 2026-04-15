@@ -70,6 +70,17 @@ def api_set_lan_isolation(zone_id):
         return jsonify({"error": str(e)}), 404
 
 
+@lan_bp.route("/api/lan-access/ipv6/<zone_id>", methods=["PUT"])
+@require_unlocked
+def api_set_lan_ipv6(zone_id):
+    data = request.json
+    enabled = data.get("enabled", False)
+    try:
+        return jsonify(_get_lan_service().set_ipv6(zone_id, enabled))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+
+
 @lan_bp.route("/api/lan-access/exceptions", methods=["GET"])
 @require_unlocked
 def api_get_lan_exceptions():

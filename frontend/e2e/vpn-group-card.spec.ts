@@ -42,7 +42,8 @@ test.describe('VPN Group Card Details', () => {
   test.beforeEach(async ({ page }) => {
     await unlockApp(page);
     await expect(page.locator('.loading-groups')).not.toBeVisible({ timeout: 15_000 });
-    await expect(page.locator('.group-card').first()).toBeVisible({ timeout: 10_000 });
+    // Wait for a VPN group card (has connect/disconnect area) to render
+    await expect(page.locator('.group-card .group-connect-area').first()).toBeVisible({ timeout: 10_000 });
   });
 
   test('VPN group card shows status label', async ({ page }) => {

@@ -158,6 +158,16 @@ class DeviceService:
             if not d.get("hostname") and details.get("name"):
                 d["hostname"] = details["name"]
 
+        # Merge IPv6 addresses from NDP neighbor table
+        try:
+            ndp = router.devices.get_ndp_neighbors()
+            for mac, ipv6_addrs in ndp.items():
+                mac = mac.lower()
+                d = devices.setdefault(mac, default_device(mac, assignment_map.get(mac)))
+                d["ipv6_addresses"] = ipv6_addrs
+        except Exception:
+            pass
+
         # Router-only MACs (e.g. assigned via SSH but never seen via DHCP)
         for mac, pid in assignment_map.items():
             if mac not in devices:

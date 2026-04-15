@@ -62,6 +62,6 @@ def download_and_merge_blocklists():
     content += f"# Sources: {', '.join(sources)}\n"
     content += f"# Domains: {len(sorted_domains)}\n\n"
     for d in sorted_domains:
-        content += f"0.0.0.0 {d}\n"
+        content += f"0.0.0.0 {d}\n:: {d}\n"
 
     return content, len(sorted_domains), failed

@@ -75,6 +75,7 @@ def filter_servers_by_scope(scope: dict, servers: list) -> list:
     want_p2p = bool(features.get("p2p"))
     want_secure_core = bool(features.get("secure_core"))
     want_tor = bool(features.get("tor"))
+    want_ipv6 = bool(features.get("ipv6"))
 
     out = []
     for s in servers:
@@ -88,6 +89,8 @@ def filter_servers_by_scope(scope: dict, servers: list) -> list:
         # tor is binary like secure_core: enabled = Tor only, disabled = non-Tor only.
         # Tor servers have very different performance characteristics.
         if want_tor != bool(s.get("tor")):
+            continue
+        if want_ipv6 and not s.get("ipv6"):
             continue
 
         cc = scope.get("country_code")

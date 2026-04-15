@@ -40,8 +40,6 @@ class DeviceTracker:
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._known_macs: set[str] = set()
-        self._prev_device_ips: dict[str, str] = {}
-        self.noint_stale = False
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -129,11 +127,6 @@ class DeviceTracker:
             if guest_type in (PROFILE_TYPE_NO_VPN, PROFILE_TYPE_NO_INTERNET):
                 profile_store.save(data)
 
-        # Detect IP changes so the SSE tick can reconcile the NoInternet ipset.
-        new_ips = {l["mac"].lower(): l.get("ip", "") for l in leases}
-        if new_ips != self._prev_device_ips:
-            self.noint_stale = True
-        self._prev_device_ips = new_ips
 
 
 def get_tracker() -> Optional[DeviceTracker]:
