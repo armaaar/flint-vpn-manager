@@ -232,7 +232,7 @@
           </span>
         {/if}
         {#if profile.adblock}<span class="opt-pill ab-on" title="DNS Ad Blocker">🚫 Ads</span>{/if}
-        {#if bypassCount > 0}<span class="opt-pill bp-on" title="{bypassCount} bypass rule{bypassCount > 1 ? 's' : ''}">⚡ {bypassCount}</span>{/if}
+        {#if bypassCount > 0}<span class="opt-pill bp-on" title="{bypassCount} bypass rule{bypassCount > 1 ? 's' : ''}">🔀 {bypassCount}</span>{/if}
         {#if profile.options?.smart_protocol}<span class="opt-pill sp-on" title="Smart Protocol">⚡ SP</span>{/if}
         {#if profile.server_scope?.features?.tor}<span class="opt-pill tor-on" title="Tor routing">🧅</span>{/if}
       </span>

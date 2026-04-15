@@ -223,7 +223,7 @@
     <div class="sidebar-nav">
       <a href="#" class:active={dashboardView === 'dashboard'} on:click|preventDefault={() => navigateTo('dashboard')}><span class="nav-icon">☰</span> Dashboard</a>
       <a href="#networks" class:active={dashboardView === 'networks'} on:click|preventDefault={() => navigateTo('networks')}><span class="nav-icon">🔗</span> Networks</a>
-      <a href="#bypass" class:active={dashboardView === 'bypass'} on:click|preventDefault={() => navigateTo('bypass')}><span class="nav-icon">⚡</span> VPN Bypass</a>
+      <a href="#bypass" class:active={dashboardView === 'bypass'} on:click|preventDefault={() => navigateTo('bypass')}><span class="nav-icon">🔀</span> VPN Bypass</a>
       <a href="#settings" class:active={dashboardView === 'settings'} on:click|preventDefault={() => navigateTo('settings')}><span class="nav-icon">⚙</span> Settings</a>
       <a href="#" on:click|preventDefault={() => showLogs = true}><span class="nav-icon">📋</span> Logs</a>
     </div>
