@@ -52,10 +52,8 @@ class VpnBypassService:
         for pid, p in vb.get("custom_presets", {}).items():
             presets[pid] = {**p, "id": pid, "builtin": False}
 
-        exceptions = [self._migrate(e) for e in vb.get("exceptions", [])]
-
         return {
-            "exceptions": exceptions,
+            "exceptions": vb.get("exceptions", []),
             "presets": presets,
             "dnsmasq_full_installed": dnsmasq_full,
         }
@@ -195,8 +193,7 @@ class VpnBypassService:
         """Reapply all bypass rules to router. Called on unlock."""
         config = sm.get_config()
         vb = config.get("vpn_bypass", {})
-        exceptions = [self._migrate(e) for e in vb.get("exceptions", [])]
-        self._apply(exceptions)
+        self._apply(vb.get("exceptions", []))
 
     def on_group_deleted(self, profile_id: str) -> None:
         """Handle VPN group deletion — disable affected exceptions."""
@@ -222,9 +219,8 @@ class VpnBypassService:
 
     def _apply(self, exceptions: list[dict]) -> None:
         """Build group ipset map and delegate to router facade."""
-        migrated = [self._migrate(e) for e in exceptions]
         group_map = self._build_group_ipset_map()
-        self.router.vpn_bypass.apply_all(migrated, group_map)
+        self.router.vpn_bypass.apply_all(exceptions, group_map)
 
     def _build_group_ipset_map(self) -> dict[str, str]:
         """Map profile_id → MAC ipset name for group-scoped exceptions."""
@@ -265,25 +261,6 @@ class VpnBypassService:
         config = sm.get_config()
         vb = config.get("vpn_bypass", {})
         return vb.get("custom_presets", {}).get(preset_id)
-
-    @staticmethod
-    def _migrate(exc: dict) -> dict:
-        """Migrate old flat ``rules`` format to ``rule_blocks``.
-
-        Old format: ``{"rules": [{type, value}, ...]}``
-        New format: ``{"rule_blocks": [{"rules": [...]}]}``
-
-        Each old rule becomes its own single-rule block (preserving
-        the old OR semantics).
-        """
-        if "rule_blocks" in exc:
-            return exc
-        if "rules" in exc:
-            exc["rule_blocks"] = [
-                {"label": "", "rules": [r]}
-                for r in exc.pop("rules")
-            ]
-        return exc
 
     @staticmethod
     def _find_exception(exceptions: list[dict], exc_id: str) -> dict | None:

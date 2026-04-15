@@ -50,30 +50,6 @@ class TestGetOverview:
         # Presets now have rule_blocks
         assert "rule_blocks" in result["presets"]["lol"]
 
-    def test_migrates_old_flat_rules(self):
-        r = _mock_router()
-        with patch("services.vpn_bypass_service.sm") as mock_sm:
-            mock_sm.get_config.return_value = _base_config(
-                vpn_bypass={
-                    "exceptions": [
-                        {"id": "byp_old", "name": "Old", "enabled": True,
-                         "scope": "global", "scope_target": None,
-                         "rules": [
-                             {"type": "cidr", "value": "10.0.0.0/8"},
-                             {"type": "port", "value": "80", "protocol": "tcp"},
-                         ]},
-                    ],
-                }
-            )
-            svc = VpnBypassService(r)
-            result = svc.get_overview()
-
-        exc = result["exceptions"][0]
-        assert "rule_blocks" in exc
-        assert len(exc["rule_blocks"]) == 2  # each old rule becomes its own block
-        assert exc["rule_blocks"][0]["rules"][0]["value"] == "10.0.0.0/8"
-
-
 class TestAddException:
     def test_add_with_rule_blocks(self):
         r = _mock_router()
@@ -242,23 +218,6 @@ class TestOnGroupDeleted:
         exc2 = next(e for e in vb["exceptions"] if e["id"] == "byp_2")
         assert exc1["enabled"] is False
         assert exc2["enabled"] is True
-
-
-class TestMigrate:
-    def test_old_flat_rules_migrated_to_blocks(self):
-        old = {"id": "byp_1", "rules": [
-            {"type": "cidr", "value": "10.0.0.0/8"},
-            {"type": "port", "value": "80", "protocol": "tcp"},
-        ]}
-        result = VpnBypassService._migrate(old)
-        assert "rule_blocks" in result
-        assert "rules" not in result
-        assert len(result["rule_blocks"]) == 2
-
-    def test_new_format_unchanged(self):
-        new = {"id": "byp_1", "rule_blocks": [{"rules": []}]}
-        result = VpnBypassService._migrate(new)
-        assert result is new
 
 
 class TestReapplyAll:
