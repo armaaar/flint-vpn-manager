@@ -1,6 +1,6 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
-  import type { BypassException, BypassPreset, BypassRule, Profile, Device } from '../../types';
+  import type { BypassException, BypassPreset, BypassRule, BypassRuleBlock, Profile, Device } from '../../types';
 
   export let exception: BypassException | null = null;
   export let presets: Record<string, BypassPreset> = {};
@@ -10,11 +10,13 @@
   const dispatch = createEventDispatcher();
 
   // Form state
-  let step = exception ? 2 : 1; // Skip preset picker when editing
+  let step = exception ? 2 : 1;
   let name = exception?.name || '';
   let scope: string = exception?.scope || 'global';
   let scopeTarget: string = exception?.scope_target || '';
-  let rules: BypassRule[] = exception?.rules ? [...exception.rules.map(r => ({...r}))] : [];
+  let ruleBlocks: BypassRuleBlock[] = exception?.rule_blocks
+    ? exception.rule_blocks.map(b => ({ label: b.label || '', rules: b.rules.map(r => ({...r})) }))
+    : [];
   let presetId: string | null = exception?.preset_id || null;
 
   function selectPreset(id: string) {
@@ -22,33 +24,54 @@
     if (!preset) return;
     name = preset.name;
     presetId = id;
-    rules = preset.rules.map(r => ({...r}));
+    ruleBlocks = (preset.rule_blocks || []).map(b => ({
+      label: b.label || '',
+      rules: (b.rules || []).map(r => ({...r})),
+    }));
     step = 2;
   }
 
   function startCustom() {
     name = '';
     presetId = null;
-    rules = [];
+    ruleBlocks = [{ label: '', rules: [] }];
     step = 2;
   }
 
-  function addRule() {
-    rules = [...rules, { type: 'cidr', value: '' }];
+  function addBlock() {
+    ruleBlocks = [...ruleBlocks, { label: '', rules: [] }];
   }
 
-  function removeRule(i: number) {
-    rules = rules.filter((_, idx) => idx !== i);
+  function removeBlock(bi: number) {
+    ruleBlocks = ruleBlocks.filter((_, i) => i !== bi);
+  }
+
+  function addRule(bi: number) {
+    ruleBlocks[bi].rules = [...ruleBlocks[bi].rules, { type: 'cidr', value: '' }];
+    ruleBlocks = ruleBlocks;
+  }
+
+  function removeRule(bi: number, ri: number) {
+    ruleBlocks[bi].rules = ruleBlocks[bi].rules.filter((_, i) => i !== ri);
+    ruleBlocks = ruleBlocks;
   }
 
   function save() {
-    if (!name.trim()) { name = 'Untitled'; }
+    if (!name.trim()) name = 'Untitled';
+    // Filter out empty rules and empty blocks
+    const cleanBlocks = ruleBlocks
+      .map(b => ({
+        label: b.label,
+        rules: b.rules.filter(r => r.value.trim()),
+      }))
+      .filter(b => b.rules.length > 0);
+
     const data: Record<string, unknown> = {
       name,
       scope,
       scope_target: scope === 'global' ? null : scopeTarget,
       preset_id: presetId,
-      rules: rules.filter(r => r.value.trim()),
+      rule_blocks: cleanBlocks,
     };
     dispatch('save', data);
   }
@@ -61,12 +84,15 @@
 
   function isValidRule(rule: BypassRule): boolean {
     const v = rule.value.trim();
-    if (!v) return true; // empty is handled by save filter
+    if (!v) return true;
     if (rule.type === 'cidr') return CIDR_RE.test(v);
     if (rule.type === 'domain') return DOMAIN_RE.test(v);
     if (rule.type === 'port') return PORT_RE.test(v);
     return false;
   }
+
+  $: hasValidRules = ruleBlocks.some(b => b.rules.some(r => r.value.trim()));
+  $: scopeValid = scope === 'global' || !!scopeTarget;
 </script>
 
 <!-- svelte-ignore a11y-click-events-have-key-events -->
@@ -78,14 +104,13 @@
     </div>
 
     {#if step === 1}
-      <!-- Step 1: Choose preset or custom -->
       <div class="modal-body">
         <p class="step-label">Choose a preset or create custom rules:</p>
         <div class="preset-picker">
           {#each Object.entries(presets) as [id, preset]}
             <button class="preset-pick-card" on:click={() => selectPreset(id)}>
               <span class="pick-name">{preset.name}</span>
-              <span class="pick-meta">{preset.rules.length} rules</span>
+              <span class="pick-meta">{(preset.rule_blocks || []).length} blocks</span>
             </button>
           {/each}
           <button class="preset-pick-card custom-card" on:click={startCustom}>
@@ -96,7 +121,6 @@
       </div>
 
     {:else}
-      <!-- Step 2: Configure -->
       <div class="modal-body">
         <div class="form-group">
           <label for="exc-name">Name</label>
@@ -143,32 +167,46 @@
         {/if}
 
         <div class="form-group">
-          <label>Rules</label>
-          <p class="rules-hint">Domain rules match all subdomains (e.g. "riotgames.com" also matches "auth.riotgames.com")</p>
-          <div class="rules-editor">
-            {#each rules as rule, i}
-              {@const invalid = rule.value.trim() && !isValidRule(rule)}
-              <div class="rule-edit-row" class:rule-invalid={invalid}>
-                <select bind:value={rule.type} class="rule-type-sel">
-                  <option value="cidr">IP / CIDR</option>
-                  <option value="domain">Domain</option>
-                  <option value="port">Port</option>
-                </select>
-                <input type="text" bind:value={rule.value} class="rule-value-input"
-                  class:input-error={invalid}
-                  placeholder={rule.type === 'cidr' ? '10.0.0.0/8' : rule.type === 'domain' ? 'example.com' : '5000:5500'}
-                  title={rule.type === 'domain' ? 'Matches domain and all subdomains' : rule.type === 'cidr' ? 'IP address or CIDR range' : 'Port or port range (e.g. 5000:5500)'} />
-                {#if rule.type === 'port'}
-                  <select bind:value={rule.protocol} class="rule-proto-sel">
-                    <option value="tcp">TCP</option>
-                    <option value="udp">UDP</option>
-                  </select>
+          <label>Rule Blocks</label>
+          <p class="rules-hint">Rules within a block are ANDed (all must match). Blocks are ORed (any block can match). Domain rules match all subdomains.</p>
+
+          {#each ruleBlocks as block, bi}
+            {#if bi > 0}<div class="block-or-divider"><span>OR</span></div>{/if}
+            <div class="block-editor">
+              <div class="block-header">
+                <input type="text" class="block-label-input" bind:value={block.label} placeholder="Block label (optional)" />
+                {#if ruleBlocks.length > 1}
+                  <button class="btn-icon btn-danger" title="Remove block" on:click={() => removeBlock(bi)}>✕</button>
                 {/if}
-                <button class="btn-icon btn-danger" on:click={() => removeRule(i)}>✕</button>
               </div>
-            {/each}
-            <button class="btn-add-rule" on:click={addRule}>+ Add Rule</button>
-          </div>
+              <div class="rules-editor">
+                {#each block.rules as rule, ri}
+                  {@const invalid = rule.value.trim() && !isValidRule(rule)}
+                  <div class="rule-edit-row" class:rule-invalid={invalid}>
+                    <select bind:value={rule.type} class="rule-type-sel">
+                      <option value="cidr">IP / CIDR</option>
+                      <option value="domain">Domain</option>
+                      <option value="port">Port</option>
+                    </select>
+                    <input type="text" bind:value={rule.value} class="rule-value-input"
+                      class:input-error={invalid}
+                      placeholder={rule.type === 'cidr' ? '10.0.0.0/8' : rule.type === 'domain' ? 'example.com' : '5000:5500'}
+                      title={rule.type === 'domain' ? 'Matches domain and all subdomains' : rule.type === 'cidr' ? 'IP address or CIDR range' : 'Port or port range (e.g. 5000:5500)'} />
+                    {#if rule.type === 'port'}
+                      <select bind:value={rule.protocol} class="rule-proto-sel">
+                        <option value="tcp">TCP</option>
+                        <option value="udp">UDP</option>
+                      </select>
+                    {/if}
+                    <button class="btn-icon btn-danger" on:click={() => removeRule(bi, ri)}>✕</button>
+                  </div>
+                {/each}
+                <button class="btn-add-rule" on:click={() => addRule(bi)}>+ Add Rule</button>
+              </div>
+            </div>
+          {/each}
+
+          <button class="btn-add-block" on:click={addBlock}>+ Add Block (OR)</button>
         </div>
       </div>
 
@@ -177,7 +215,7 @@
           <button class="btn-back" on:click={() => { step = 1; }}>Back</button>
         {/if}
         <button class="btn-save" on:click={save}
-          disabled={!name.trim() || rules.filter(r => r.value.trim()).length === 0 || (scope !== 'global' && !scopeTarget)}>
+          disabled={!name.trim() || !hasValidRules || !scopeValid}>
           {exception ? 'Save Changes' : 'Create Exception'}
         </button>
       </div>
@@ -192,7 +230,7 @@
   }
   .modal {
     background: var(--bg2); border: 1px solid var(--border); border-radius: 12px;
-    width: 680px; max-width: 95vw; max-height: 85vh; overflow-y: auto;
+    width: 700px; max-width: 95vw; max-height: 85vh; overflow-y: auto;
     box-shadow: 0 10px 40px rgba(0,0,0,0.4);
   }
   .modal-header {
@@ -220,10 +258,10 @@
   .pick-meta { color: var(--fg3); font-size: 0.8rem; }
 
   .form-group { margin-bottom: 16px; }
-  .form-group label { display: block; font-weight: 500; color: var(--fg2); margin-bottom: 6px; font-size: 0.88rem; text-transform: uppercase; letter-spacing: 0.2px; }
+  .form-group > label { display: block; font-weight: 500; color: var(--fg2); margin-bottom: 6px; font-size: 0.88rem; text-transform: uppercase; letter-spacing: 0.2px; }
   .form-group input[type="text"], .form-group select {
     width: 100%; padding: 8px 12px; background: var(--surface); border: 1px solid var(--border);
-    border-radius: 6px; color: var(--fg); font-size: 0.95rem; font-family: var(--font-ui);
+    border-radius: 6px; color: var(--fg); font-size: 0.95rem; font-family: var(--font-ui); box-sizing: border-box;
   }
   .form-group input:focus, .form-group select:focus { outline: none; border-color: var(--accent); }
 
@@ -231,22 +269,49 @@
   .radio-label { display: flex; align-items: center; gap: 6px; color: var(--fg); font-size: 0.9rem; cursor: pointer; }
   .radio-label input[type="radio"] { accent-color: var(--accent); }
 
-  .rules-editor { display: flex; flex-direction: column; gap: 8px; }
-  .rule-edit-row { display: grid; grid-template-columns: 110px 1fr auto auto; gap: 6px; align-items: center; }
-  .rule-type-sel { padding: 6px 8px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; color: var(--fg); font-size: 0.88rem; }
-  .rule-value-input { width: 100%; padding: 6px 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; color: var(--fg); font-family: var(--font-mono); font-size: 0.88rem; box-sizing: border-box; }
-  .rule-proto-sel { width: 70px; padding: 6px 8px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; color: var(--fg); font-size: 0.88rem; }
-  .rule-value-input:focus, .rule-type-sel:focus, .rule-proto-sel:focus { outline: none; border-color: var(--accent); }
+  .rules-hint { color: var(--fg3); font-size: 0.8rem; margin-bottom: 12px; margin-top: 0; }
 
-  .rules-hint { color: var(--fg3); font-size: 0.8rem; margin-bottom: 8px; margin-top: 0; }
+  /* Block editor */
+  .block-editor {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px; margin-bottom: 4px;
+  }
+  .block-header { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .block-label-input {
+    flex: 1; padding: 4px 8px; background: transparent; border: 1px solid transparent;
+    border-radius: 4px; color: var(--fg2); font-size: 0.82rem; font-weight: 500;
+    text-transform: uppercase; letter-spacing: 0.2px;
+  }
+  .block-label-input:focus { border-color: var(--border); background: var(--bg3); outline: none; }
+  .block-label-input::placeholder { color: var(--fg3); text-transform: none; letter-spacing: normal; }
+
+  .block-or-divider { text-align: center; padding: 6px 0; }
+  .block-or-divider span {
+    color: var(--amber); font-size: 0.75rem; font-weight: 700;
+    background: var(--bg2); padding: 2px 12px; border-radius: 4px;
+  }
+
+  .rules-editor { display: flex; flex-direction: column; gap: 6px; }
+  .rule-edit-row { display: grid; grid-template-columns: 110px 1fr auto auto; gap: 6px; align-items: center; }
+  .rule-type-sel { padding: 6px 8px; background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; color: var(--fg); font-size: 0.88rem; }
+  .rule-value-input { width: 100%; padding: 6px 10px; background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; color: var(--fg); font-family: var(--font-mono); font-size: 0.88rem; box-sizing: border-box; }
+  .rule-proto-sel { width: 70px; padding: 6px 8px; background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; color: var(--fg); font-size: 0.88rem; }
+  .rule-value-input:focus, .rule-type-sel:focus, .rule-proto-sel:focus { outline: none; border-color: var(--accent); }
   .input-error { border-color: var(--red) !important; }
   .rule-invalid { opacity: 0.9; }
 
   .btn-add-rule {
     background: none; border: 1px dashed var(--border); border-radius: 6px;
-    color: var(--fg3); padding: 8px; cursor: pointer; font-size: 0.88rem; text-align: center;
+    color: var(--fg3); padding: 6px; cursor: pointer; font-size: 0.82rem; text-align: center;
   }
   .btn-add-rule:hover { border-color: var(--accent); color: var(--accent); }
+
+  .btn-add-block {
+    background: none; border: 1px dashed var(--amber); border-radius: 8px;
+    color: var(--amber); padding: 10px; cursor: pointer; font-size: 0.85rem;
+    text-align: center; width: 100%; margin-top: 8px; font-weight: 500;
+  }
+  .btn-add-block:hover { background: var(--amber-bg); }
 
   .btn-icon { background: none; border: none; cursor: pointer; color: var(--fg3); font-size: 0.9rem; padding: 4px; border-radius: 4px; }
   .btn-danger { color: var(--red); }

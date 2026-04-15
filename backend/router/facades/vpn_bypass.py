@@ -4,6 +4,10 @@ Allows specific traffic (by destination IP/CIDR, domain, or port) to bypass
 VPN tunnels and route directly via WAN.  Works by pre-marking matching packets
 with fwmark 0x8000/0xf000 in a dedicated ``FVPN_BYPASS`` mangle chain that
 evaluates before tunnel chains in ``ROUTE_POLICY``.
+
+Each exception contains **rule blocks**.  Rules within a block are ANDed
+(one iptables rule with multiple ``-m`` matches).  Blocks within an
+exception are ORed (separate iptables rules — any match marks the packet).
 """
 
 from __future__ import annotations
@@ -105,24 +109,19 @@ class RouterVpnBypass:
 
     def cleanup(self) -> None:
         """Remove all bypass artifacts from the router."""
-        # Remove mangle chain
         self._iptables.delete_chain("mangle", "ROUTE_POLICY", BYPASS_CHAIN)
         if self._ip6tables:
             self._ip6tables.delete_chain("mangle", "ROUTE_POLICY", BYPASS_CHAIN)
 
-        # Remove all bypass ipsets
         for name in self._ipset.list_names(BYPASS_IPSET_PREFIX):
             self._ipset.destroy(name)
 
-        # Remove routing rules and table
         self._iproute.rule_del(BYPASS_MARK, BYPASS_MASK, BYPASS_TABLE)
         self._iproute.route_flush_table(BYPASS_TABLE)
 
-        # Remove dnsmasq config
         self._ssh.exec(f"rm -f {BYPASS_DNSMASQ_CONF}")
         self._ssh.exec("killall -HUP dnsmasq 2>/dev/null; true")
 
-        # Remove firewall include script
         self._ssh.exec(f"rm -f {BYPASS_SCRIPT_PATH}")
         self._uci.delete(f"firewall.fvpn_vpn_bypass")
         self._uci.commit("firewall")
@@ -153,22 +152,20 @@ class RouterVpnBypass:
         """Generate the full list of shell commands for all enabled exceptions."""
         cmds: list[str] = []
 
-        # 1. Create and populate per-exception ipsets (for CIDR + domain rules)
+        # 1. Create and populate per-block ipsets
         for exc in enabled:
-            cidrs = [
-                r["value"] for r in exc.get("rules", [])
-                if r.get("type") == "cidr" and _SAFE_CIDR_RE.match(r.get("value", ""))
-            ]
-            domains = [
-                r["value"] for r in exc.get("rules", [])
-                if r.get("type") == "domain" and _SAFE_DOMAIN_RE.match(r.get("value", ""))
-            ]
-            if cidrs or domains:
-                ipset_name = self._ipset_name(exc["id"])
-                cmds.append(f"ipset create {ipset_name} hash:net -exist")
-                cmds.append(f"ipset flush {ipset_name}")
-                for cidr in cidrs:
-                    cmds.append(f"ipset add {ipset_name} {cidr} -exist")
+            for bi, block in enumerate(exc.get("rule_blocks", [])):
+                cidrs = [
+                    r["value"] for r in block.get("rules", [])
+                    if r.get("type") == "cidr"
+                    and _SAFE_CIDR_RE.match(r.get("value", ""))
+                ]
+                if cidrs:
+                    ipset_name = self._block_ipset_name(exc["id"], bi)
+                    cmds.append(f"ipset create {ipset_name} hash:net -exist")
+                    cmds.append(f"ipset flush {ipset_name}")
+                    for cidr in cidrs:
+                        cmds.append(f"ipset add {ipset_name} {cidr} -exist")
 
         # 2. Delete old bypass jump + create/flush chain
         cmds.append(
@@ -177,7 +174,7 @@ class RouterVpnBypass:
         cmds.append(f"iptables -t mangle -N {BYPASS_CHAIN} 2>/dev/null || true")
         cmds.append(f"iptables -t mangle -F {BYPASS_CHAIN}")
 
-        # 3. Build per-exception rules in the chain
+        # 3. Build per-block iptables rules (blocks ORed, rules within ANDed)
         for exc in enabled:
             src_match = self._source_match(
                 exc.get("scope", "global"),
@@ -185,48 +182,14 @@ class RouterVpnBypass:
                 group_ipset_map,
             )
             if src_match is None:
-                # Invalid scope (e.g., group no longer exists) — skip
                 continue
 
-            rules = exc.get("rules", [])
-            has_ipset = any(
-                r.get("type") in ("cidr", "domain")
-                for r in rules
-            )
-            port_rules = [
-                r for r in rules
-                if r.get("type") == "port"
-                and _SAFE_PORT_RE.match(r.get("value", "").replace(":", ","))
-            ]
-
-            # IP/domain match via ipset
-            if has_ipset:
-                ipset_name = self._ipset_name(exc["id"])
-                rule_parts = [f"-m set --match-set {ipset_name} dst"]
-                if src_match:
-                    rule_parts.insert(0, src_match)
-                rule_parts.append(
-                    f"-j MARK --set-xmark {BYPASS_MARK}/{BYPASS_MASK}"
+            for bi, block in enumerate(exc.get("rule_blocks", [])):
+                rule_cmd = self._build_block_rule(
+                    exc["id"], bi, block, src_match,
                 )
-                cmds.append(
-                    f"iptables -t mangle -A {BYPASS_CHAIN} {' '.join(rule_parts)}"
-                )
-
-            # Port match rules
-            for pr in port_rules:
-                proto = pr.get("protocol", "tcp")
-                if proto not in ("tcp", "udp"):
-                    continue
-                ports = pr["value"]
-                rule_parts = [f"-p {proto}", f"-m multiport --dports {ports}"]
-                if src_match:
-                    rule_parts.insert(0, src_match)
-                rule_parts.append(
-                    f"-j MARK --set-xmark {BYPASS_MARK}/{BYPASS_MASK}"
-                )
-                cmds.append(
-                    f"iptables -t mangle -A {BYPASS_CHAIN} {' '.join(rule_parts)}"
-                )
+                if rule_cmd:
+                    cmds.append(rule_cmd)
 
         # 4. Insert bypass chain jump at position 1 of ROUTE_POLICY
         cmds.append(
@@ -238,14 +201,69 @@ class RouterVpnBypass:
 
         return cmds
 
+    def _build_block_rule(
+        self,
+        exc_id: str,
+        block_index: int,
+        block: dict,
+        src_match: str,
+    ) -> str | None:
+        """Build a single iptables rule for one block (rules ANDed).
+
+        Within a block:
+        - Multiple CIDRs → one ipset (destination matches ANY)
+        - Multiple domains → same ipset (resolved IPs added by dnsmasq)
+        - Multiple port rules → combined multiport (ANY port matches)
+        - CIDR/domain ipset AND port match = both must match (AND)
+        """
+        rules = block.get("rules", [])
+        if not rules:
+            return None
+
+        parts: list[str] = []
+
+        # Source scope match
+        if src_match:
+            parts.append(src_match)
+
+        # IP/domain match via per-block ipset
+        has_cidr = any(r.get("type") == "cidr" for r in rules)
+        has_domain = any(r.get("type") == "domain" for r in rules)
+        if has_cidr or has_domain:
+            ipset_name = self._block_ipset_name(exc_id, block_index)
+            parts.append(f"-m set --match-set {ipset_name} dst")
+
+        # Port match — combine all port rules in the block
+        port_rules = [
+            r for r in rules
+            if r.get("type") == "port"
+            and r.get("protocol") in ("tcp", "udp")
+            and _SAFE_PORT_RE.match(r.get("value", "").replace(":", ","))
+        ]
+        if port_rules:
+            # Group by protocol
+            for proto in ("tcp", "udp"):
+                proto_ports = [
+                    r["value"] for r in port_rules
+                    if r.get("protocol") == proto
+                ]
+                if proto_ports:
+                    ports_str = ",".join(proto_ports)
+                    parts.append(f"-p {proto} -m multiport --dports {ports_str}")
+                    break  # iptables allows only one -p per rule
+
+        if not parts or (not has_cidr and not has_domain and not port_rules):
+            return None
+
+        parts.append(f"-j MARK --set-xmark {BYPASS_MARK}/{BYPASS_MASK}")
+        return f"iptables -t mangle -A {BYPASS_CHAIN} {' '.join(parts)}"
+
     def _routing_commands(self) -> list[str]:
         """Commands to set up the WAN bypass routing table."""
         return [
-            # Remove stale rule first (idempotent)
             f"ip rule del fwmark {BYPASS_MARK}/{BYPASS_MASK} lookup {BYPASS_TABLE} 2>/dev/null; true",
             f"ip rule add fwmark {BYPASS_MARK}/{BYPASS_MASK} lookup {BYPASS_TABLE} priority {BYPASS_PRIORITY}",
             f"ip route flush table {BYPASS_TABLE} 2>/dev/null; true",
-            # Read WAN gateway dynamically
             "WAN_GW=$(ip route show default | awk '{print $3}' | head -1)",
             "WAN_DEV=$(ip route show default | awk '{print $5}' | head -1)",
             f'[ -n "$WAN_GW" ] && ip route add default via $WAN_GW dev $WAN_DEV table {BYPASS_TABLE} || true',
@@ -257,12 +275,7 @@ class RouterVpnBypass:
         scope_target: str | None,
         group_ipset_map: dict[str, str],
     ) -> str | None:
-        """Build the iptables source match fragment for a scope.
-
-        Returns:
-            Empty string for global scope, a match fragment for group/device,
-            or None if the scope target is invalid.
-        """
+        """Build the iptables source match fragment for a scope."""
         if scope == "global":
             return ""
         if scope == "group":
@@ -288,9 +301,7 @@ class RouterVpnBypass:
             "# Re-applied on every firewall reload",
             "",
         ]
-        for cmd in cmds:
-            lines.append(cmd)
-
+        lines.extend(cmds)
         script = "\n".join(lines) + "\n"
         self._ssh.exec("mkdir -p /etc/fvpn")
         self._ssh.write_file(BYPASS_SCRIPT_PATH, script)
@@ -299,33 +310,29 @@ class RouterVpnBypass:
     def _write_dnsmasq_config(self, enabled: list[dict]) -> bool:
         """Write dnsmasq ipset config for domain-based bypass rules.
 
-        Returns True if any domain rules were written.
+        Each block with domain rules gets its own ipset→dnsmasq mapping.
         """
-        # Collect domain→ipset mappings
-        lines = [
-            "# FlintVPN bypass — auto-generated dnsmasq ipset config",
-        ]
+        lines = ["# FlintVPN bypass — auto-generated dnsmasq ipset config"]
         has_domains = False
 
         for exc in enabled:
-            domains = [
-                r["value"] for r in exc.get("rules", [])
-                if r.get("type") == "domain"
-                and _SAFE_DOMAIN_RE.match(r.get("value", ""))
-            ]
-            if not domains:
-                continue
-            has_domains = True
-            ipset_name = self._ipset_name(exc["id"])
-            # dnsmasq-full ipset syntax: ipset=/domain1/domain2/.../ipset_name
-            domain_path = "/".join(domains)
-            lines.append(f"ipset=/{domain_path}/{ipset_name}")
+            for bi, block in enumerate(exc.get("rule_blocks", [])):
+                domains = [
+                    r["value"] for r in block.get("rules", [])
+                    if r.get("type") == "domain"
+                    and _SAFE_DOMAIN_RE.match(r.get("value", ""))
+                ]
+                if not domains:
+                    continue
+                has_domains = True
+                ipset_name = self._block_ipset_name(exc["id"], bi)
+                domain_path = "/".join(domains)
+                lines.append(f"ipset=/{domain_path}/{ipset_name}")
 
         if has_domains:
             self._ssh.exec("mkdir -p /etc/dnsmasq.d")
             self._ssh.write_file(BYPASS_DNSMASQ_CONF, "\n".join(lines) + "\n")
         else:
-            # Clean up stale config
             self._ssh.exec(f"rm -f {BYPASS_DNSMASQ_CONF}")
 
         return has_domains
@@ -333,7 +340,10 @@ class RouterVpnBypass:
     # ── Helpers ─────────────────────────────────────────────────────────
 
     @staticmethod
-    def _ipset_name(exc_id: str) -> str:
-        """Derive the ipset name for an exception ID."""
-        # Use the short ID part (e.g., "byp_a1b2c3d4" → "fvpn_byp_a1b2c3d4")
-        return f"{BYPASS_IPSET_PREFIX}{exc_id.replace('byp_', '')}"
+    def _block_ipset_name(exc_id: str, block_index: int) -> str:
+        """Derive the ipset name for an exception block.
+
+        Format: ``fvpn_byp_{short_id}_b{index}``
+        """
+        short = exc_id.replace("byp_", "")
+        return f"{BYPASS_IPSET_PREFIX}{short}_b{block_index}"

@@ -207,6 +207,11 @@ export interface BypassRule {
   protocol?: string;   // 'tcp' | 'udp' (port rules only)
 }
 
+export interface BypassRuleBlock {
+  label?: string;
+  rules: BypassRule[];
+}
+
 export interface BypassException {
   id: string;
   name: string;
@@ -214,14 +219,14 @@ export interface BypassException {
   enabled: boolean;
   scope: 'global' | 'group' | 'device';
   scope_target: string | null;
-  rules: BypassRule[];
+  rule_blocks: BypassRuleBlock[];
 }
 
 export interface BypassPreset {
   id: string;
   name: string;
   builtin: boolean;
-  rules: BypassRule[];
+  rule_blocks: BypassRuleBlock[];
 }
 
 export interface BypassOverview {

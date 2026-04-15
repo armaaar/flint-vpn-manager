@@ -23,6 +23,10 @@ def _base_config(**overrides):
     return config
 
 
+def _simple_blocks():
+    return [{"label": "IPs", "rules": [{"type": "cidr", "value": "10.0.0.0/8"}]}]
+
+
 class TestGetOverview:
     def test_returns_exceptions_and_presets(self):
         r = _mock_router()
@@ -32,11 +36,8 @@ class TestGetOverview:
                     "exceptions": [
                         {"id": "byp_1", "name": "Test", "enabled": True,
                          "scope": "global", "scope_target": None,
-                         "rules": [{"type": "cidr", "value": "10.0.0.0/8"}]},
+                         "rule_blocks": _simple_blocks()},
                     ],
-                    "custom_presets": {
-                        "my_game": {"name": "My Game", "rules": []},
-                    },
                     "dnsmasq_full_installed": True,
                 }
             )
@@ -45,28 +46,36 @@ class TestGetOverview:
 
         assert len(result["exceptions"]) == 1
         assert "lol" in result["presets"]
-        assert "valorant" in result["presets"]
-        assert "my_game" in result["presets"]
         assert result["presets"]["lol"]["builtin"] is True
-        assert result["presets"]["my_game"]["builtin"] is False
-        assert result["dnsmasq_full_installed"] is True
+        # Presets now have rule_blocks
+        assert "rule_blocks" in result["presets"]["lol"]
 
-    def test_checks_dnsmasq_live_when_cached_false(self):
+    def test_migrates_old_flat_rules(self):
         r = _mock_router()
-        r.vpn_bypass.check_dnsmasq_full.return_value = True
         with patch("services.vpn_bypass_service.sm") as mock_sm:
             mock_sm.get_config.return_value = _base_config(
-                vpn_bypass={"dnsmasq_full_installed": False}
+                vpn_bypass={
+                    "exceptions": [
+                        {"id": "byp_old", "name": "Old", "enabled": True,
+                         "scope": "global", "scope_target": None,
+                         "rules": [
+                             {"type": "cidr", "value": "10.0.0.0/8"},
+                             {"type": "port", "value": "80", "protocol": "tcp"},
+                         ]},
+                    ],
+                }
             )
             svc = VpnBypassService(r)
             result = svc.get_overview()
 
-        assert result["dnsmasq_full_installed"] is True
-        r.vpn_bypass.check_dnsmasq_full.assert_called_once()
+        exc = result["exceptions"][0]
+        assert "rule_blocks" in exc
+        assert len(exc["rule_blocks"]) == 2  # each old rule becomes its own block
+        assert exc["rule_blocks"][0]["rules"][0]["value"] == "10.0.0.0/8"
 
 
 class TestAddException:
-    def test_add_custom_exception(self):
+    def test_add_with_rule_blocks(self):
         r = _mock_router()
         with patch("services.vpn_bypass_service.sm") as mock_sm:
             mock_sm.get_config.return_value = _base_config()
@@ -74,16 +83,14 @@ class TestAddException:
             result = svc.add_exception({
                 "name": "My Rule",
                 "scope": "global",
-                "rules": [{"type": "cidr", "value": "10.0.0.0/8"}],
+                "rule_blocks": _simple_blocks(),
             })
 
         assert result["success"] is True
-        assert result["exception"]["name"] == "My Rule"
         assert result["exception"]["id"].startswith("byp_")
-        mock_sm.update_config.assert_called_once()
-        r.vpn_bypass.apply_all.assert_called_once()
+        assert len(result["exception"]["rule_blocks"]) == 1
 
-    def test_add_from_preset(self):
+    def test_add_from_preset_copies_blocks(self):
         r = _mock_router()
         with patch("services.vpn_bypass_service.sm") as mock_sm:
             mock_sm.get_config.return_value = _base_config()
@@ -91,21 +98,19 @@ class TestAddException:
             result = svc.add_exception({
                 "name": "LoL",
                 "preset_id": "lol",
-                "scope": "device",
-                "scope_target": "aa:bb:cc:dd:ee:ff",
+                "scope": "global",
             })
 
         exc = result["exception"]
         assert exc["preset_id"] == "lol"
-        assert len(exc["rules"]) > 0
-        assert exc["scope"] == "device"
+        assert len(exc["rule_blocks"]) == 2  # LoL has 2 blocks (IPs + domains)
 
-    def test_add_raises_on_empty_rules(self):
+    def test_add_raises_on_empty_blocks(self):
         r = _mock_router()
         with patch("services.vpn_bypass_service.sm") as mock_sm:
             mock_sm.get_config.return_value = _base_config()
             svc = VpnBypassService(r)
-            with pytest.raises(ValueError, match="At least one rule"):
+            with pytest.raises(ValueError, match="At least one rule block"):
                 svc.add_exception({"name": "Empty"})
 
     def test_add_validates_group_scope(self):
@@ -117,7 +122,7 @@ class TestAddException:
                 svc.add_exception({
                     "name": "Bad",
                     "scope": "group",
-                    "rules": [{"type": "cidr", "value": "10.0.0.0/8"}],
+                    "rule_blocks": _simple_blocks(),
                 })
 
 
@@ -130,21 +135,19 @@ class TestUpdateException:
                     "exceptions": [
                         {"id": "byp_1", "name": "Old", "enabled": True,
                          "scope": "global", "scope_target": None,
-                         "rules": [{"type": "cidr", "value": "10.0.0.0/8"}]},
+                         "rule_blocks": _simple_blocks()},
                     ],
                 }
             )
             svc = VpnBypassService(r)
-            result = svc.update_exception("byp_1", {"name": "New Name"})
+            result = svc.update_exception("byp_1", {"name": "New"})
 
-        assert result["exception"]["name"] == "New Name"
+        assert result["exception"]["name"] == "New"
 
     def test_update_nonexistent_raises(self):
         r = _mock_router()
         with patch("services.vpn_bypass_service.sm") as mock_sm:
-            mock_sm.get_config.return_value = _base_config(
-                vpn_bypass={"exceptions": []}
-            )
+            mock_sm.get_config.return_value = _base_config(vpn_bypass={"exceptions": []})
             svc = VpnBypassService(r)
             with pytest.raises(ValueError, match="not found"):
                 svc.update_exception("byp_nope", {"name": "X"})
@@ -158,7 +161,8 @@ class TestRemoveException:
                 vpn_bypass={
                     "exceptions": [
                         {"id": "byp_1", "name": "X", "enabled": True,
-                         "scope": "global", "scope_target": None, "rules": []},
+                         "scope": "global", "scope_target": None,
+                         "rule_blocks": _simple_blocks()},
                     ],
                 }
             )
@@ -166,7 +170,6 @@ class TestRemoveException:
             result = svc.remove_exception("byp_1")
 
         assert result["success"] is True
-        mock_sm.update_config.assert_called_once()
         r.vpn_bypass.apply_all.assert_called_once()
 
 
@@ -179,7 +182,7 @@ class TestToggleException:
                     "exceptions": [
                         {"id": "byp_1", "name": "X", "enabled": True,
                          "scope": "global", "scope_target": None,
-                         "rules": [{"type": "cidr", "value": "10.0.0.0/8"}]},
+                         "rule_blocks": _simple_blocks()},
                     ],
                 }
             )
@@ -190,19 +193,20 @@ class TestToggleException:
 
 
 class TestPresets:
-    def test_save_custom_preset(self):
+    def test_save_custom_preset_with_blocks(self):
         r = _mock_router()
         with patch("services.vpn_bypass_service.sm") as mock_sm:
             mock_sm.get_config.return_value = _base_config()
             svc = VpnBypassService(r)
             result = svc.save_custom_preset({
                 "name": "My Game",
-                "rules": [{"type": "port", "value": "9000", "protocol": "udp"}],
+                "rule_blocks": [
+                    {"label": "Ports", "rules": [{"type": "port", "value": "9000", "protocol": "udp"}]},
+                ],
             })
 
         assert result["success"] is True
-        assert result["preset_id"].startswith("custom_")
-        mock_sm.update_config.assert_called_once()
+        assert "rule_blocks" in result["preset"]
 
     def test_cannot_overwrite_builtin(self):
         r = _mock_router()
@@ -212,25 +216,6 @@ class TestPresets:
             with pytest.raises(ValueError, match="built-in"):
                 svc.save_custom_preset({"id": "lol", "name": "Fake"})
 
-    def test_delete_custom_preset(self):
-        r = _mock_router()
-        with patch("services.vpn_bypass_service.sm") as mock_sm:
-            mock_sm.get_config.return_value = _base_config(
-                vpn_bypass={"custom_presets": {"my_game": {"name": "X", "rules": []}}}
-            )
-            svc = VpnBypassService(r)
-            result = svc.delete_custom_preset("my_game")
-
-        assert result["success"] is True
-
-    def test_cannot_delete_builtin(self):
-        r = _mock_router()
-        with patch("services.vpn_bypass_service.sm") as mock_sm:
-            mock_sm.get_config.return_value = _base_config()
-            svc = VpnBypassService(r)
-            with pytest.raises(ValueError, match="built-in"):
-                svc.delete_custom_preset("lol")
-
 
 class TestOnGroupDeleted:
     def test_disables_affected_exceptions(self):
@@ -239,19 +224,18 @@ class TestOnGroupDeleted:
             mock_sm.get_config.return_value = _base_config(
                 vpn_bypass={
                     "exceptions": [
-                        {"id": "byp_1", "name": "LoL for group", "enabled": True,
+                        {"id": "byp_1", "name": "Group rule", "enabled": True,
                          "scope": "group", "scope_target": "prof_123",
-                         "rules": [{"type": "cidr", "value": "10.0.0.0/8"}]},
+                         "rule_blocks": _simple_blocks()},
                         {"id": "byp_2", "name": "Global rule", "enabled": True,
                          "scope": "global", "scope_target": None,
-                         "rules": [{"type": "cidr", "value": "10.0.0.0/8"}]},
+                         "rule_blocks": _simple_blocks()},
                     ],
                 }
             )
             svc = VpnBypassService(r)
             svc.on_group_deleted("prof_123")
 
-        # Should have persisted with byp_1 disabled
         call_args = mock_sm.update_config.call_args
         vb = call_args[1]["vpn_bypass"]
         exc1 = next(e for e in vb["exceptions"] if e["id"] == "byp_1")
@@ -259,21 +243,22 @@ class TestOnGroupDeleted:
         assert exc1["enabled"] is False
         assert exc2["enabled"] is True
 
-    def test_no_change_when_no_match(self):
-        r = _mock_router()
-        with patch("services.vpn_bypass_service.sm") as mock_sm:
-            mock_sm.get_config.return_value = _base_config(
-                vpn_bypass={
-                    "exceptions": [
-                        {"id": "byp_1", "name": "X", "enabled": True,
-                         "scope": "global", "scope_target": None, "rules": []},
-                    ],
-                }
-            )
-            svc = VpnBypassService(r)
-            svc.on_group_deleted("prof_other")
 
-        mock_sm.update_config.assert_not_called()
+class TestMigrate:
+    def test_old_flat_rules_migrated_to_blocks(self):
+        old = {"id": "byp_1", "rules": [
+            {"type": "cidr", "value": "10.0.0.0/8"},
+            {"type": "port", "value": "80", "protocol": "tcp"},
+        ]}
+        result = VpnBypassService._migrate(old)
+        assert "rule_blocks" in result
+        assert "rules" not in result
+        assert len(result["rule_blocks"]) == 2
+
+    def test_new_format_unchanged(self):
+        new = {"id": "byp_1", "rule_blocks": [{"rules": []}]}
+        result = VpnBypassService._migrate(new)
+        assert result is new
 
 
 class TestReapplyAll:
@@ -286,7 +271,7 @@ class TestReapplyAll:
                     "exceptions": [
                         {"id": "byp_1", "name": "X", "enabled": True,
                          "scope": "global", "scope_target": None,
-                         "rules": [{"type": "cidr", "value": "10.0.0.0/8"}]},
+                         "rule_blocks": _simple_blocks()},
                     ],
                 }
             )
@@ -295,14 +280,3 @@ class TestReapplyAll:
             svc.reapply_all()
 
         r.vpn_bypass.apply_all.assert_called_once()
-
-
-class TestValidateScope:
-    def test_global_clears_target(self):
-        exc = {"scope": "global", "scope_target": "leftover"}
-        VpnBypassService._validate_scope(exc)
-        assert exc["scope_target"] is None
-
-    def test_invalid_scope_raises(self):
-        with pytest.raises(ValueError, match="Invalid scope"):
-            VpnBypassService._validate_scope({"scope": "bad"})

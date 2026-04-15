@@ -110,13 +110,18 @@
   }
 
   function rulesSummary(exc: BypassException): string {
+    const blocks = exc.rule_blocks || [];
     const counts = { cidr: 0, domain: 0, port: 0 };
-    for (const r of exc.rules) counts[r.type] = (counts[r.type] || 0) + 1;
+    for (const b of blocks) {
+      for (const r of b.rules || []) counts[r.type] = (counts[r.type] || 0) + 1;
+    }
     const parts: string[] = [];
     if (counts.cidr) parts.push(`${counts.cidr} IP`);
     if (counts.domain) parts.push(`${counts.domain} domain`);
     if (counts.port) parts.push(`${counts.port} port`);
-    return parts.join(', ') || 'No rules';
+    const blockCount = blocks.length;
+    const suffix = blockCount > 1 ? ` in ${blockCount} blocks` : '';
+    return (parts.join(', ') || 'No rules') + suffix;
   }
 </script>
 
@@ -178,13 +183,19 @@
 
             {#if expandedId === exc.id}
               <div class="exc-details">
-                {#each exc.rules as rule}
-                  <div class="rule-row">
-                    <span class="rule-type">{rule.type.toUpperCase()}</span>
-                    <span class="rule-value">{rule.value}</span>
-                    {#if rule.protocol}
-                      <span class="rule-proto">{rule.protocol}</span>
-                    {/if}
+                {#each (exc.rule_blocks || []) as block, bi}
+                  {#if bi > 0}<div class="block-divider"><span>OR</span></div>{/if}
+                  <div class="rule-block">
+                    {#if block.label}<div class="block-label">{block.label}</div>{/if}
+                    {#each block.rules as rule}
+                      <div class="rule-row">
+                        <span class="rule-type">{rule.type.toUpperCase()}</span>
+                        <span class="rule-value">{rule.value}</span>
+                        {#if rule.protocol}
+                          <span class="rule-proto">{rule.protocol}</span>
+                        {/if}
+                      </div>
+                    {/each}
                   </div>
                 {/each}
               </div>
@@ -202,7 +213,7 @@
       {#each Object.entries(overview.presets) as [id, preset]}
         <div class="preset-card">
           <div class="preset-name">{preset.name}</div>
-          <div class="preset-meta">{preset.rules.length} rules {preset.builtin ? '' : '(custom)'}</div>
+          <div class="preset-meta">{(preset.rule_blocks || []).reduce((n, b) => n + (b.rules?.length || 0), 0)} rules in {(preset.rule_blocks || []).length} blocks {preset.builtin ? '' : '(custom)'}</div>
           {#if !preset.builtin}
             <button class="btn-icon btn-danger btn-xs" title="Delete preset"
               on:click={async () => { await api.deleteCustomPreset(id); showToast('Preset deleted'); await loadData(); }}>✕</button>
@@ -302,6 +313,10 @@
   .rule-type { font-weight: 700; color: var(--accent); min-width: 60px; font-size: 0.75rem; text-transform: uppercase; }
   .rule-value { color: var(--fg); }
   .rule-proto { color: var(--fg3); font-size: 0.8rem; }
+  .rule-block { padding: 4px 0; }
+  .block-label { color: var(--fg2); font-size: 0.8rem; font-weight: 600; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.2px; }
+  .block-divider { text-align: center; padding: 4px 0; }
+  .block-divider span { color: var(--amber); font-size: 0.75rem; font-weight: 700; background: var(--surface); padding: 2px 10px; border-radius: 4px; }
 
   /* Presets grid */
   .preset-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
