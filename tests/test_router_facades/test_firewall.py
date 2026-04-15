@@ -52,28 +52,46 @@ class TestFvpnIpsetCreateDestroy:
         ipset.destroy.assert_called_once_with("myset")
 
 
-class TestSetupMdnsReflection:
-    def test_enables_avahi_reflection(self, fw, ssh, service_ctl):
+class TestSetupMdnsForNetworks:
+    def test_enables_avahi_and_adds_firewall_rules(self, fw, ssh, uci, service_ctl):
+        networks = [
+            {"zone": "fvpn_iot", "bridge": "br-fvpn_iot"},
+        ]
         ssh.exec.side_effect = lambda cmd, **kw: (
             "/usr/sbin/avahi-daemon" if "which" in cmd
-            else "wgclient1" if "ifstatus" in cmd
+            # _ensure_mdns_firewall_rules: parse_show returns a zone with REJECT input
+            else "firewall.fvpn_iot_zone=zone\n"
+                 "firewall.fvpn_iot_zone.name='fvpn_iot'\n"
+                 "firewall.fvpn_iot_zone.input='REJECT'\n"
+            if "uci show firewall" in cmd
             else ""
         )
-        fw.setup_mdns_reflection("wgclient1")
+        fw.setup_mdns_for_networks(networks)
         service_ctl.restart.assert_called_once_with("avahi-daemon", background=True)
+        # Should have created a firewall rule for the REJECT zone
+        uci.set_type.assert_called()
+        uci.commit.assert_called_with("firewall")
+        service_ctl.reload.assert_called_with("firewall")
 
     def test_skips_when_avahi_not_installed(self, fw, ssh, service_ctl):
         ssh.exec.return_value = ""
-        fw.setup_mdns_reflection("wgclient1")
+        fw.setup_mdns_for_networks([{"zone": "fvpn_iot", "bridge": "br-fvpn_iot"}])
         service_ctl.restart.assert_not_called()
 
-    def test_skips_when_no_l3_device(self, fw, ssh, service_ctl):
+    def test_skips_firewall_rule_for_accept_zone(self, fw, ssh, uci, service_ctl):
+        networks = [{"zone": "lan", "bridge": "br-lan"}]
         ssh.exec.side_effect = lambda cmd, **kw: (
             "/usr/sbin/avahi-daemon" if "which" in cmd
+            else "firewall.cfg0=zone\n"
+                 "firewall.cfg0.name='lan'\n"
+                 "firewall.cfg0.input='ACCEPT'\n"
+            if "uci show firewall" in cmd
             else ""
         )
-        fw.setup_mdns_reflection("wgclient1")
-        service_ctl.restart.assert_not_called()
+        fw.setup_mdns_for_networks(networks)
+        # Avahi enabled but no firewall rule needed (lan already accepts)
+        service_ctl.restart.assert_called_once_with("avahi-daemon", background=True)
+        uci.set_type.assert_not_called()
 
 
 class TestEnsureIpv6LeakProtection:

@@ -142,6 +142,7 @@ class RouterDevices:
                     "total_rx": int(info.get("total_rx", 0)),
                     "total_tx": int(info.get("total_tx", 0)),
                     "ip": info.get("ip", ""),
+                    "online_time": info.get("online_time"),
                 }
         except Exception:
             pass
@@ -320,7 +321,8 @@ class RouterDevices:
             self._uci.commit("route_policy")
 
         # Also remove from proton-wg ipsets (managed outside route_policy)
-        for ipset_name in self._ipset.list_names("src_mac_"):
+        # Check both pwg_mac_ (current) and src_mac_ (legacy) prefixes
+        for ipset_name in self._ipset.list_names("pwg_mac_") + self._ipset.list_names("src_mac_"):
             self._ssh.exec(
                 f"ipset del {ipset_name} {mac_upper} 2>/dev/null; "
                 f"ipset del {ipset_name} {mac_lower} 2>/dev/null; true"

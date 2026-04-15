@@ -10,7 +10,7 @@ def next_tunnel_id(ssh) -> int:
 
     Scans three sources to avoid collisions:
     - route_policy tunnel_id fields (kernel WG + OpenVPN)
-    - ipset names ``src_mac_<id>`` (proton-wg runtime)
+    - ipset names ``pwg_mac_<id>`` (proton-wg runtime)
     - proton-wg .env files ``FVPN_TUNNEL_ID=<id>`` (proton-wg persistent)
 
     Args:
@@ -27,13 +27,14 @@ def next_tunnel_id(ssh) -> int:
             used.add(int(line.strip()))
         except ValueError:
             pass
-    # IDs used by proton-wg (ipset names are src_mac_<tunnel_id>)
+    # IDs used by proton-wg (ipset names are pwg_mac_<tunnel_id>)
+    # Also check legacy src_mac_ prefix for backwards compatibility
     ipsets = ssh.exec(
-        "ipset list -n 2>/dev/null | grep '^src_mac_'"
+        "ipset list -n 2>/dev/null | grep -E '^(pwg_mac_|src_mac_)'"
     )
     for line in ipsets.strip().splitlines():
         line = line.strip()
-        if line.startswith("src_mac_"):
+        if line.startswith(("pwg_mac_", "src_mac_")):
             try:
                 used.add(int(line.split("_")[-1]))
             except ValueError:

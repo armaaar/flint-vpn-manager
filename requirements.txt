@@ -4,5 +4,6 @@ requests>=2.31.0
 cryptography>=42.0.0
 python-glinet>=0.2.0
 proton-vpn-api-core>=4.0.0
-click>=8.0.0
+mcp[cli]>=1.27.0
+httpx>=0.28.0
 pytest>=8.0.0

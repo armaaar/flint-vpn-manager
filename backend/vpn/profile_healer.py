@@ -57,8 +57,9 @@ class ProfileHealer:
             return
 
         iface = ri.get("tunnel_name", "")
-        old_ipset = ri.get("ipset_name", f"src_mac_{old_tid}")
-        new_ipset = f"src_mac_{new_tid}"
+        from router.facades.proton_wg import PWG_IPSET_PREFIX
+        old_ipset = ri.get("ipset_name", f"{PWG_IPSET_PREFIX}{old_tid}")
+        new_ipset = f"{PWG_IPSET_PREFIX}{new_tid}"
         log.warning(
             "Healing duplicate tunnel_id %d for profile %s (%s) -> %d",
             old_tid, profile.get("id", "?")[:8], iface, new_tid,

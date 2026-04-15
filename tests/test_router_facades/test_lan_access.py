@@ -174,8 +174,8 @@ class TestCreateNetwork:
 
         uci.batch_sections.assert_called_once()
         sections = uci.batch_sections.call_args[0][0]
-        # Should create: 2x wireless, 1x network, 1x zone, 2x rules (dhcp+dns), 1x forwarding, 1x dhcp
-        assert len(sections) == 8
+        # Should create: 2x wireless, 1x network, 1x zone, 3x rules (dhcp+dns+mdns), 1x forwarding, 1x dhcp
+        assert len(sections) == 9
 
     def test_rejects_invalid_zone_id(self, lan):
         with pytest.raises(ValueError, match="Invalid zone ID"):

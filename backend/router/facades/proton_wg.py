@@ -19,6 +19,9 @@ from consts import (
 PROTON_WG_MARKS = ["0x6000", "0x7000", "0x9000", "0xf000"]
 PROTON_WG_DIR = "/etc/fvpn/protonwg"
 PROTON_WG_BIN = "/usr/bin/proton-wg"
+# Proton-wg ipsets use a distinct prefix so vpn-client restart (which
+# flushes all src_mac_* ipsets) never touches proton-wg device assignments.
+PWG_IPSET_PREFIX = "pwg_mac_"
 
 
 class RouterProtonWG:
@@ -32,6 +35,54 @@ class RouterProtonWG:
         self._service_ctl = service_ctl
         self._alloc_tunnel_id = alloc_tunnel_id
         self._ssh = ssh  # raw exec for wg, pidof, kill, cat, ip link show, etc.; write_file for configs
+
+    # ── Persistent MAC file management ──────────────────────────────────────
+    #
+    # Each proton-wg tunnel has a .macs file on the router containing the
+    # MAC addresses of devices assigned to it (one per line, lowercase).
+    # The firewall include script reads these files to populate ipsets,
+    # making device routing survive firewall reloads, vpn-client restarts,
+    # and reboots WITHOUT the app needing to intervene.
+
+    def write_tunnel_macs(self, iface: str, macs: list[str]) -> None:
+        """Write the full MAC list for a tunnel (overwrites)."""
+        content = "\n".join(m.lower() for m in macs if m) + ("\n" if macs else "")
+        self._ssh.write_file(f"{PROTON_WG_DIR}/{iface}.macs", content)
+
+    def add_tunnel_mac(self, iface: str, mac: str) -> None:
+        """Append a MAC to a tunnel's persistent .macs file + ipset add."""
+        mac = mac.lower()
+        self._ssh.exec(
+            f"grep -qxF '{mac}' {PROTON_WG_DIR}/{iface}.macs 2>/dev/null || "
+            f"echo '{mac}' >> {PROTON_WG_DIR}/{iface}.macs"
+        )
+
+    def remove_tunnel_mac(self, iface: str, mac: str) -> None:
+        """Remove a MAC from a tunnel's persistent .macs file."""
+        mac = mac.lower()
+        self._ssh.exec(
+            f"sed -i '/^{mac}$/d' {PROTON_WG_DIR}/{iface}.macs 2>/dev/null; true"
+        )
+
+    def remove_mac_from_all_tunnels(self, mac: str) -> None:
+        """Remove a MAC from ALL proton-wg .macs files (used on unassign)."""
+        mac = mac.lower()
+        self._ssh.exec(
+            f"for f in {PROTON_WG_DIR}/*.macs; do "
+            f"[ -f \"$f\" ] && sed -i '/^{mac}$/d' \"$f\"; "
+            f"done 2>/dev/null; true"
+        )
+
+    def read_tunnel_macs(self, iface: str) -> list[str]:
+        """Read the MAC list for a tunnel from the router."""
+        raw = self._ssh.exec(
+            f"cat {PROTON_WG_DIR}/{iface}.macs 2>/dev/null || true"
+        ).strip()
+        if not raw:
+            return []
+        return [m.strip().lower() for m in raw.splitlines() if m.strip()]
+
+    # ── Tunnel discovery ────────────────────────────────────────────────────
 
     def list_tunnel_confs(self) -> set[str]:
         """Return the set of proton-wg interface names that have a .conf on the router.
@@ -130,13 +181,16 @@ class RouterProtonWG:
             f"PROTON_WG_SERVER_NAME_STRATEGY=1\n"
             f"FVPN_TUNNEL_ID={tunnel_id}\n"
             f"FVPN_MARK={mark}\n"
-            f"FVPN_IPSET=src_mac_{tunnel_id}\n"
+            f"FVPN_IPSET={PWG_IPSET_PREFIX}{tunnel_id}\n"
             f"FVPN_IPV6={ipv6_flag}\n"
         )
         self._ssh.write_file(f"{PROTON_WG_DIR}/{iface}.env", env)
 
-        ipset_name = f"src_mac_{tunnel_id}"
+        ipset_name = f"{PWG_IPSET_PREFIX}{tunnel_id}"
         self._ipset.create(ipset_name, "hash:mac")
+
+        # Create empty .macs file (populated when devices are assigned)
+        self._ssh.write_file(f"{PROTON_WG_DIR}/{iface}.macs", "")
 
         return {
             "tunnel_name": iface,
@@ -155,7 +209,7 @@ class RouterProtonWG:
         """Start a proton-wg tunnel: process, interface, routing, firewall."""
         conf_path = f"{PROTON_WG_DIR}/{iface}.conf"
         env_path = f"{PROTON_WG_DIR}/{iface}.env"
-        ipset_name = f"src_mac_{tunnel_id}"
+        ipset_name = f"{PWG_IPSET_PREFIX}{tunnel_id}"
 
         bin_check = self._ssh.exec(f"[ -x {PROTON_WG_BIN} ] && echo ok || echo missing").strip()
         if bin_check != "ok":
@@ -451,6 +505,14 @@ class RouterProtonWG:
         cmds = []
         for iface, mark, ipset_name, tid in tunnels:
             cmds.append(f"ipset create {ipset_name} hash:mac -exist")
+            cmds.append(f"ipset flush {ipset_name}")
+            # Populate ipset from persistent .macs file (survives any flush)
+            cmds.append(
+                f"[ -f {PROTON_WG_DIR}/{iface}.macs ] && "
+                f"while IFS= read -r mac; do "
+                f"[ -n \"$mac\" ] && ipset add {ipset_name} \"$mac\" -exist; "
+                f"done < {PROTON_WG_DIR}/{iface}.macs || true"
+            )
         for iface, mark, ipset_name, tid in tunnels:
             chain = f"TUNNEL{tid}_ROUTE_POLICY"
             cmds.append(f"iptables -t mangle -N {chain} 2>/dev/null")
@@ -581,6 +643,14 @@ class RouterProtonWG:
 
             chain = f"FVPN_V6_{tid}"
             cmds.append(f"ipset create {ipset_name} hash:mac -exist")
+            # Populate ipset from persistent .macs file (proton-wg tunnels only)
+            macs_path = f"{PROTON_WG_DIR}/{iface}.macs"
+            cmds.append(
+                f"[ -f {macs_path} ] && "
+                f"while IFS= read -r mac; do "
+                f"[ -n \"$mac\" ] && ipset add {ipset_name} \"$mac\" -exist; "
+                f"done < {macs_path} || true"
+            )
             cmds.append(f"ip6tables -t mangle -N {chain} 2>/dev/null || true")
             cmds.append(f"ip6tables -t mangle -F {chain}")
             cmds.append(
@@ -621,9 +691,10 @@ class RouterProtonWG:
 
     def delete_proton_wg_config(self, iface: str, tunnel_id: int) -> None:
         """Delete proton-wg config files, ipset, and rebuild mangle rules."""
-        ipset_name = f"src_mac_{tunnel_id}"
+        ipset_name = f"{PWG_IPSET_PREFIX}{tunnel_id}"
         self._ssh.exec(
-            f"rm -f {PROTON_WG_DIR}/{iface}.conf {PROTON_WG_DIR}/{iface}.env"
+            f"rm -f {PROTON_WG_DIR}/{iface}.conf {PROTON_WG_DIR}/{iface}.env "
+            f"{PROTON_WG_DIR}/{iface}.macs"
         )
         self._ipset.destroy(ipset_name)
         self._rebuild_proton_wg_mangle_rules()
@@ -733,5 +804,5 @@ start_service() {
         env_path = f"{PROTON_WG_DIR}/{iface}.env"
         self._ssh.exec(
             f"sed -i 's/^FVPN_TUNNEL_ID=.*/FVPN_TUNNEL_ID={tunnel_id}/' {env_path}; "
-            f"sed -i 's/^FVPN_IPSET=.*/FVPN_IPSET=src_mac_{tunnel_id}/' {env_path}"
+            f"sed -i 's/^FVPN_IPSET=.*/FVPN_IPSET={PWG_IPSET_PREFIX}{tunnel_id}/' {env_path}"
         )

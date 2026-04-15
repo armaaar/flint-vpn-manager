@@ -140,7 +140,7 @@ class ProfileService:
         for mac in macs:
             try:
                 if is_proton_wg:
-                    ipset_name = router_info.get("ipset_name", f"src_mac_{router_info.get('tunnel_id', 0)}")
+                    ipset_name = router_info.get("ipset_name", f"pwg_mac_{router_info.get('tunnel_id', 0)}")
                     self._ipset.ensure_and_add(ipset_name, mac)
                 else:
                     self.router.devices.set_device_vpn(mac, router_info["rule_name"])

@@ -8,6 +8,7 @@ labeling, and TTL-based caching.
 import logging
 import time
 import threading
+from datetime import datetime, timezone
 
 import persistence.profile_store as ps
 from consts import (
@@ -81,17 +82,34 @@ class DeviceService:
                 out[mac] = pid
             # Else: orphan rule on router -- device shows as unassigned
 
-        # proton-wg profiles: read ipset membership directly
+        # proton-wg profiles: merge ipset membership + local store.
+        # Ipsets are ephemeral (lost on firewall reload / vpn-client restart),
+        # so the local store is the durable backup.  If the ipset is missing
+        # members that the local store has, re-add them (self-healing).
         for p in store_data.get("profiles", []):
             ri = p.get("router_info") or {}
             if not ri.get("vpn_protocol", "").startswith("wireguard-"):
                 continue
-            ipset_name = ri.get("ipset_name", f"src_mac_{ri.get('tunnel_id', 0)}")
+            ipset_name = ri.get("ipset_name", f"pwg_mac_{ri.get('tunnel_id', 0)}")
+            ipset_macs = set()
             try:
                 for mac_val in self._ipset.list_members(ipset_name):
-                    out[mac_val.lower()] = p["id"]
+                    m = mac_val.lower()
+                    ipset_macs.add(m)
+                    out[m] = p["id"]
             except Exception:
                 pass
+            # Merge from local store (durable) and self-heal ipset
+            for mac_val, pid in store_data.get("device_assignments", {}).items():
+                if pid != p["id"]:
+                    continue
+                m = mac_val.lower()
+                out[m] = p["id"]
+                if m not in ipset_macs:
+                    try:
+                        self._ipset.ensure_and_add(ipset_name, m)
+                    except Exception:
+                        pass
 
         # Non-VPN: local store
         for mac, pid in store_data.get("device_assignments", {}).items():
@@ -150,6 +168,9 @@ class DeviceService:
             d["signal_dbm"] = details.get("signal_dbm")
             d["link_speed_mbps"] = details.get("link_speed_mbps")
             d["iface"] = details.get("iface", "")
+            ot = details.get("online_time")
+            if ot:
+                d["_online_time"] = int(ot)
             if details.get("ip") and not d.get("ip"):
                 d["ip"] = details["ip"]
             # gl-clients exposes a 'name' field (mDNS/Bonjour discovered hostname)
@@ -179,7 +200,11 @@ class DeviceService:
         out = []
         for mac, d in sorted(devices.items()):
             d["display_name"] = d.get("label") or d.get("hostname") or mac
-            d["last_seen"] = None  # legacy field, no longer tracked
+            ot = d.pop("_online_time", None)
+            if ot:
+                d["last_seen"] = datetime.fromtimestamp(ot, tz=timezone.utc).isoformat()
+            else:
+                d["last_seen"] = None
             net_info = network_map.get(d.get("ip", ""), {})
             d["network"] = net_info.get("label", "")
             d["network_zone"] = net_info.get("zone", "")
@@ -231,6 +256,11 @@ class DeviceService:
             self._router.devices.remove_device_from_all_vpn(mac)
         except Exception as e:
             log.warning(f"remove_device_from_all_vpn({mac}) failed: {e}")
+        # Also remove from proton-wg persistent .macs files
+        try:
+            self._router.proton_wg.remove_mac_from_all_tunnels(mac)
+        except Exception as e:
+            log.warning(f"remove_mac_from_all_tunnels({mac}) failed: {e}")
 
         # Apply new assignment
         if profile_id:
@@ -248,10 +278,14 @@ class DeviceService:
                     del store_data["device_assignments"][mac]
                     ps.save(store_data)
                 if proto.startswith("wireguard-"):
-                    # proton-wg: add MAC to ipset directly (no route_policy rule).
-                    # Also persist locally — ipsets are ephemeral and lost on
-                    # firewall reload / app restart. Local store is the backup.
-                    ipset_name = ri.get("ipset_name", f"src_mac_{ri.get('tunnel_id', 0)}")
+                    # proton-wg: triple-write for zero-gap reliability.
+                    # 1. Router .macs file — persistent, survives any flush
+                    # 2. ipset add — immediate kernel routing effect
+                    # 3. Local store — backup for app-level resolution
+                    iface = ri.get("tunnel_name", "")
+                    ipset_name = ri.get("ipset_name", f"pwg_mac_{ri.get('tunnel_id', 0)}")
+                    if iface:
+                        self._router.proton_wg.add_tunnel_mac(iface, mac)
                     self._ipset.ensure_and_add(ipset_name, mac)
                     ps.assign_device(mac, profile_id)
                 else:

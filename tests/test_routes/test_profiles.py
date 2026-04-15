@@ -172,3 +172,57 @@ class TestProbeLatency:
         resp = client.post("/api/probe-latency", json={"server_ids": []})
         assert resp.status_code == 200
         assert resp.json["latencies"] == {}
+
+
+class TestServerCountries:
+    def test_returns_countries(self, client, mock_registry):
+        mock_registry.get_service.return_value.proton.is_logged_in = True
+        mock_registry.get_service.return_value.proton.get_countries.return_value = [
+            {"code": "US", "name": "United States", "server_count": 500,
+             "cities": [{"name": "New York", "server_count": 50}]},
+            {"code": "CH", "name": "Switzerland", "server_count": 100,
+             "cities": [{"name": "Zurich", "server_count": 30}]},
+        ]
+        resp = client.get("/api/server-countries")
+        assert resp.status_code == 200
+        assert len(resp.json) == 2
+        assert resp.json[0]["code"] == "US"
+
+    def test_not_logged_in(self, client, mock_registry):
+        mock_registry.get_service.return_value.proton.is_logged_in = False
+        resp = client.get("/api/server-countries")
+        assert resp.status_code == 400
+
+    def test_locked(self, locked_client):
+        resp = locked_client.get("/api/server-countries")
+        assert resp.status_code == 401
+
+
+class TestVpnStatus:
+    def test_returns_status_logged_in(self, client, mock_registry):
+        proton = mock_registry.get_service.return_value.proton
+        proton.is_logged_in = True
+        proton.account_name = "user@proton.me"
+        proton.user_tier = 2
+        sl = MagicMock()
+        sl.__len__ = lambda self: 1500
+        sl.expired = False
+        sl.loads_expired = False
+        proton.server_list = sl
+        resp = client.get("/api/vpn-status")
+        assert resp.status_code == 200
+        assert resp.json["logged_in"] is True
+        assert resp.json["account_name"] == "user@proton.me"
+        assert resp.json["tier_name"] == "Plus"
+        assert resp.json["server_count"] == 1500
+
+    def test_returns_status_not_logged_in(self, client, mock_registry):
+        mock_registry.get_service.return_value.proton.is_logged_in = False
+        resp = client.get("/api/vpn-status")
+        assert resp.status_code == 200
+        assert resp.json["logged_in"] is False
+        assert "account_name" not in resp.json
+
+    def test_locked(self, locked_client):
+        resp = locked_client.get("/api/vpn-status")
+        assert resp.status_code == 401

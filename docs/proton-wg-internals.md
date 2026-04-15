@@ -22,7 +22,7 @@ The firewall include at `/etc/fvpn/protonwg/mangle_rules.sh` has `option reload 
 
 `_next_tunnel_id()` must check BOTH:
 1. `route_policy` UCI sections (for kernel WG and OVPN tunnels)
-2. Existing `src_mac_*` ipsets on the router (for proton-wg tunnels)
+2. Existing `pwg_mac_*` ipsets on the router (for proton-wg tunnels)
 
 Checking only route_policy will produce tunnel_id collisions because proton-wg tunnels have no route_policy entry. This was a real bug where two proton-wg tunnels got the same tunnel_id.
 
@@ -33,6 +33,20 @@ proton-wg tunnels have no `route_policy` entry. This means:
 - `display_order` is local-only (can't use `uci reorder`)
 - Device assignment uses `ipset add` directly (not `uci add_list from_mac`)
 - Kill switch is always-on via blackhole route (not UCI `killswitch` flag)
+
+## Ipset naming and vpn-client isolation
+
+proton-wg ipsets use the `pwg_mac_` prefix (e.g. `pwg_mac_303`) instead of the `src_mac_` prefix used by kernel WG/OVPN. This is critical because `/etc/init.d/vpn-client restart` flushes all `src_mac_*` ipsets. The distinct prefix makes proton-wg device assignments immune to vpn-client restarts — zero downtime, zero traffic leaks.
+
+## Persistent device assignments (.macs files)
+
+Device-to-tunnel MAC assignments are stored in three places (triple-write):
+
+1. **Router `.macs` file** (`/etc/fvpn/protonwg/{iface}.macs`) — one MAC per line, persistent on router filesystem. The firewall include script reads these to populate ipsets on every firewall reload, reboot, or manual invocation. This is the primary persistence layer — it works without the app running.
+2. **Router ipset** (`pwg_mac_{tunnel_id}`) — kernel-level, provides immediate routing effect on assignment. Ephemeral but rebuilt from `.macs` files by the firewall include.
+3. **Local store** (`profile_store.json` → `device_assignments`) — backup used by app-level resolution and self-healing.
+
+The firewall include (`mangle_rules.sh`) is fully self-contained: it creates ipsets, populates them from `.macs` files, and applies mangle rules. No app intervention required for recovery.
 
 ## Device registration names
 

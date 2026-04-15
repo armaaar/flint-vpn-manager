@@ -74,7 +74,7 @@
           {#if online}
             <span class="status-online">Online</span>
           {:else}
-            Offline ({timeAgo(device.last_seen)})
+            Offline{#if device.last_seen} ({timeAgo(device.last_seen)}){/if}
           {/if}
         </span>
         {#if device.network}

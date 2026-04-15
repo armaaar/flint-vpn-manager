@@ -117,4 +117,4 @@ During normal operation, every `ps.save()` pushes the updated store back to the 
 
 **Ghost profiles**: Only appear mid-session when a router rule is deleted while the app is running (never on startup). Ghosts show `_ghost: true`, `health: red`, with UI guidance to change server (recreate tunnel) or delete.
 
-`python cli.py reset-local-state` wipes both local and router copies.
+A factory reset wipes both local and router copies.

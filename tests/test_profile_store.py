@@ -45,7 +45,7 @@ class TestNormalizeServerScope:
         assert scope["city"] is None
         assert scope["entry_country_code"] is None
         assert scope["server_id"] is None
-        assert scope["features"] == {"streaming": False, "p2p": False, "secure_core": False, "tor": False}
+        assert scope["features"] == {"streaming": False, "p2p": False, "secure_core": False, "tor": False, "ipv6": False}
 
     def test_new_shape_passes_through(self):
         scope = ps.normalize_server_scope({

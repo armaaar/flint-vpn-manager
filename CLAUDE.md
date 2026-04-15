@@ -67,7 +67,7 @@ cd frontend && npx playwright test --ui                 # E2E with interactive U
 
 ### SAFE commands (OK to run via SSH):
 - `uci show/get/set/add_list/del_list/delete/commit/reorder/rename` — config reads/writes
-- `/etc/init.d/vpn-client restart` — only when no tunnels are stuck connecting. **Side effect**: flushes ALL `src_mac_*` ipsets, including proton-wg ones managed by FlintVPN. `_reconcile_proton_wg_ipset_members()` re-adds proton-wg MACs from local store after every kernel WG/OVPN connect/disconnect. `reconcile_proton_wg_ipsets()` runs on app unlock for full recovery.
+- `/etc/init.d/vpn-client restart` — only when no tunnels are stuck connecting. **Side effect**: flushes ALL `src_mac_*` ipsets (kernel WG/OVPN). Proton-wg ipsets use `pwg_mac_*` prefix and are **immune** to vpn-client restart. Device assignments are also persisted in `.macs` files on the router — the firewall include script (`mangle_rules.sh`) repopulates ipsets from these files on every firewall reload.
 - `ipset add/del` — MAC-assignment ipsets
 - `/etc/init.d/firewall reload` — safe (~0.22s, WG survives). **NOT** `firewall restart` (re-runs rtp2.sh). See [docs/proton-wg-internals.md](docs/proton-wg-internals.md).
 - `wg show`, `ifstatus`, `ipset list`, `iptables -L -n`, `ubus call gl-clients list/status`, `cat`, `grep`, `ls`, `ps` — read-only

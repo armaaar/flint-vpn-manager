@@ -73,11 +73,11 @@ class TestUploadProtonWgConfig:
         assert result["tunnel_name"] == "protonwg0"
         assert result["vpn_protocol"] == PROTO_WIREGUARD_TCP
         assert result["mark"] == "0x6000"
-        assert result["ipset_name"] == "src_mac_100"
+        assert result["ipset_name"] == "pwg_mac_100"
         assert result["rule_name"] == "fvpn_pwg_protonwg0"
-        # Config files written: .conf, .env, init.d script
-        assert ssh.write_file.call_count == 3
-        ipset.create.assert_called_once_with("src_mac_100", "hash:mac")
+        # Config files written: .conf, .env, init.d script, .macs
+        assert ssh.write_file.call_count == 4
+        ipset.create.assert_called_once_with("pwg_mac_100", "hash:mac")
 
     def test_tls_protocol(self, pwg, ssh, ipset):
         ssh.exec.return_value = ""
@@ -146,7 +146,7 @@ class TestDeleteProtonWgConfig:
     def test_removes_files_ipset_and_rebuilds(self, pwg, ssh, ipset):
         ssh.exec.return_value = ""
         pwg.delete_proton_wg_config("protonwg0", 100)
-        ipset.destroy.assert_called_once_with("src_mac_100")
+        ipset.destroy.assert_called_once_with("pwg_mac_100")
 
 
 class TestGetProtonWgHealth:
@@ -202,7 +202,7 @@ class TestUpdateTunnelEnv:
         pwg.update_tunnel_env("protonwg0", 200)
         cmd = ssh.exec.call_args[0][0]
         assert "FVPN_TUNNEL_ID=200" in cmd
-        assert "FVPN_IPSET=src_mac_200" in cmd
+        assert "FVPN_IPSET=pwg_mac_200" in cmd
 
 
 # ── IPv6 Tests ───────────────────────────────────────────────────────────

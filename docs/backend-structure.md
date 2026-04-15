@@ -1,13 +1,12 @@
 # Backend Package Structure
 
-The backend is organized into 8 packages, each with a single responsibility. This document explains what each package owns, how packages depend on each other, and how to find the right place for new code.
+The backend is organized into 9 packages, each with a single responsibility. This document explains what each package owns, how packages depend on each other, and how to find the right place for new code.
 
 ## Directory Layout
 
 ```
 backend/
 ├── app.py                          # Flask entry point (~84 lines: logging + blueprint registration)
-├── cli.py                          # Click CLI entry point
 ├── consts.py                       # Shared constants (protocols, profile types, health states)
 ├── service_registry.py             # Runtime singleton lifecycle (RouterAPI, ProtonAPI, VPNService, LanAccessService)
 │
@@ -72,16 +71,30 @@ backend/
 │   ├── profile_store.py            # Atomic JSON read/write for profile_store.json
 │   └── secrets_manager.py          # Fernet-encrypted credentials (secrets.enc)
 │
-└── background/                     # Daemon threads
-    ├── auto_optimizer.py            # Server switch + cert renewal + score refresh + blocklist
-    └── device_tracker.py            # New-device auto-assignment (polls DHCP every 30s)
+├── background/                     # Daemon threads
+│   ├── auto_optimizer.py            # Server switch + cert renewal + score refresh + blocklist
+│   └── device_tracker.py            # New-device auto-assignment (polls DHCP every 30s)
+│
+└── mcp_server/                     # MCP server for Claude AI integration
+    ├── server.py                    # FastMCP entry point + tool registration
+    ├── api_client.py                # HTTP client wrapping the Flask REST API
+    └── tools/                       # One module per tool domain
+        ├── session.py               # status, unlock, lock
+        ├── groups.py                # CRUD, reorder, guest
+        ├── tunnels.py               # connect, disconnect, switch, protocol, type
+        ├── servers.py               # browse, countries, ports, latency, preferences
+        ├── devices.py               # list, assign, label, refresh
+        ├── settings.py              # get, update, location, vpn-status
+        ├── adblock.py               # get, update, force-update, search
+        ├── lan_access.py            # networks, rules, isolation, IPv6, exceptions
+        └── logs.py                  # list, read, clear
 ```
 
 ## Package Dependency Graph
 
 ```
                     ┌──────────┐
-                    │  app.py  │  cli.py  service_registry.py
+                    │  app.py  │  service_registry.py
                     └────┬─────┘
                          │ uses
           ┌──────────────┼──────────────┐

@@ -16,7 +16,6 @@ A self-hosted web dashboard for managing **ProtonVPN** WireGuard and OpenVPN tun
 - **Guest group** — newly seen MACs are auto-assigned to your chosen group.
 - **Device labels & types** sync bidirectionally with the GL.iNet UI (`gl-client.alias` / `.class`).
 - **Encrypted credentials** — Fernet (AES-128 + HMAC) with PBKDF2, unlocked by a master password.
-- **CLI included** — every dashboard action is also a `cli.py` command.
 
 ## Architecture
 
@@ -80,10 +79,6 @@ After that, every restart only needs the master password to unlock.
 source venv/bin/activate
 nohup python app.py > /tmp/flintvpn.log 2>&1 &
 
-# Or use the CLI for one-off actions
-python cli.py status
-python cli.py profile list
-python cli.py device assign aa:bb:cc:dd:ee:ff <profile-id>
 ```
 
 ## Development
@@ -123,7 +118,7 @@ device_tracker.py   Background new-device auto-assigner
 auto_optimizer.py   Background daily server-load optimizer
 server_optimizer.py Pure server comparison logic
 secrets_manager.py  Fernet-encrypted credential vault
-cli.py              Click-based CLI mirroring the dashboard
+mcp_server/         MCP server — 46 tools for Claude AI network management
 frontend/           Svelte 5 + Vite source
 static/             Built frontend (served by Flask, gitignored)
 tests/              pytest backend tests

@@ -137,7 +137,7 @@ def _migrate_legacy_ipset(router) -> None:
 def wipe_noint(router) -> None:
     """Remove all NoInternet UCI sections and kernel ipset.
 
-    Used by ``cli.py reset-local-state``.
+    Remove all NoInternet firewall config and kernel ipset from the router.
     """
     try:
         router.uci.delete(f"firewall.{NOINT_IPSET}")

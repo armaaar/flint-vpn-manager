@@ -42,41 +42,64 @@ class IpsetOps:
         self.add_mac(ipset_name, mac)
 
     def reconcile_proton_wg_members(self, store_data=None):
-        """Re-add proton-wg device MACs to their ipsets from local store.
+        """Sync persistent .macs files on router and repopulate ipsets.
 
-        Called after vpn-client restart, which flushes ALL src_mac_* ipsets
-        (including proton-wg ones managed by FlintVPN, not vpn-client).
-        Lightweight: only does ipset add, no mangle rebuild.
+        Called after vpn-client restart (which flushes src_mac_* ipsets).
+        Writes .macs files from local store (the durable source), then runs
+        the mangle script which creates ipsets and populates from those files.
         """
         if store_data is None:
             store_data = ps.load()
-        for p in store_data.get("profiles", []):
-            ri = p.get("router_info") or {}
-            if not ri.get("vpn_protocol", "").startswith("wireguard-"):
-                continue
-            tunnel_id = ri.get("tunnel_id", 0)
-            ipset_name = ri.get("ipset_name", f"src_mac_{tunnel_id}")
-            for mac, pid in store_data.get("device_assignments", {}).items():
-                if pid == p["id"]:
-                    self.add_mac(ipset_name, mac)
+        self._sync_macs_to_router(store_data)
+        self._run_mangle_script()
 
     def reconcile_proton_wg_full(self, store_data=None):
-        """Ensure proton-wg ipsets exist, populate members, and rebuild mangle rules.
+        """Full reconciliation: sync .macs files, rebuild mangle rules + ipsets.
 
-        Ipsets are ephemeral — they vanish on firewall reload or app restart.
-        This recreates them from device assignments in the local store and
-        rebuilds the mangle rules script. Called on app unlock.
+        Called on app unlock. Writes .macs files from local store, then
+        rebuilds the entire mangle rules script (which includes ipset
+        creation and population from those files).
         """
         if store_data is None:
             store_data = ps.load()
+        self._sync_macs_to_router(store_data)
+        self._router.proton_wg._rebuild_proton_wg_mangle_rules()
+
+    def _sync_macs_to_router(self, store_data):
+        """Write .macs files on the router from local store assignments.
+
+        For each proton-wg profile, collect assigned MACs from the local
+        device_assignments and write them to the corresponding .macs file.
+        This ensures the router has a persistent copy even if the app dies.
+        """
         for p in store_data.get("profiles", []):
             ri = p.get("router_info") or {}
             if not ri.get("vpn_protocol", "").startswith("wireguard-"):
                 continue
-            tunnel_id = ri.get("tunnel_id", 0)
-            ipset_name = ri.get("ipset_name", f"src_mac_{tunnel_id}")
-            self.ensure_mac_set(ipset_name)
-            for mac, pid in store_data.get("device_assignments", {}).items():
-                if pid == p["id"]:
-                    self.add_mac(ipset_name, mac)
-        self._router.proton_wg._rebuild_proton_wg_mangle_rules()
+            iface = ri.get("tunnel_name", "")
+            if not iface:
+                continue
+            macs = [
+                mac for mac, pid in store_data.get("device_assignments", {}).items()
+                if pid == p["id"]
+            ]
+            try:
+                self._router.proton_wg.write_tunnel_macs(iface, macs)
+            except Exception as e:
+                log.warning(f"Failed to sync .macs for {iface}: {e}")
+
+    def _run_mangle_script(self):
+        """Run the proton-wg mangle script on the router.
+
+        The script creates ipsets, populates them from .macs files, and
+        applies mangle rules. This is the single recovery action for any
+        ipset flush event.
+        """
+        from router.facades.proton_wg import PROTON_WG_DIR
+        try:
+            self._router.exec(
+                f"[ -x {PROTON_WG_DIR}/mangle_rules.sh ] && "
+                f"sh {PROTON_WG_DIR}/mangle_rules.sh || true"
+            )
+        except Exception as e:
+            log.warning(f"Failed to run mangle script: {e}")

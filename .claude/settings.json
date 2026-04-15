@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "mcp__playwright"
+      "mcp__playwright",
+      "mcp__flint-vpn"
     ]
   },
   "enableAllProjectMcpServers": true

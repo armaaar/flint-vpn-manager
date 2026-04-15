@@ -333,7 +333,8 @@ class TestCreateProfile:
 class TestDeleteProfile:
     """Tests for VPNService.delete_profile."""
 
-    @patch("services.vpn_service.noint_sync.sync_noint_to_router")
+    @patch("services.vpn_service.noint_sync.sync_noint_to_router",
+           return_value={"applied": False, "adds": 0, "removes": 0, "reload": False})
     @patch("services.profile_service.ps.delete_profile")
     @patch("services.profile_service.ps.get_profile")
     def test_delete_non_vpn(self, mock_get, mock_delete, mock_noint_sync, service):
@@ -345,7 +346,8 @@ class TestDeleteProfile:
         mock_delete.assert_called_once_with("novpn-1")
         mock_noint_sync.assert_called_once()
 
-    @patch("services.vpn_service.noint_sync.sync_noint_to_router")
+    @patch("services.vpn_service.noint_sync.sync_noint_to_router",
+           return_value={"applied": False, "adds": 0, "removes": 0, "reload": False})
     @patch("services.profile_service.ps.delete_profile")
     @patch("services.profile_service.ps.get_profile")
     @patch("services.profile_service.get_strategy")
@@ -529,7 +531,8 @@ class TestDevices:
 class TestAssignDevice:
     """Tests for VPNService.assign_device."""
 
-    @patch("services.vpn_service.noint_sync.sync_noint_to_router")
+    @patch("services.vpn_service.noint_sync.sync_noint_to_router",
+           return_value={"applied": False, "adds": 0, "removes": 0, "reload": False})
     @patch("services.vpn_service.ps.get_profile")
     @patch("services.vpn_service.ps.load")
     @patch("services.vpn_service.ps.validate_mac")
@@ -548,7 +551,8 @@ class TestAssignDevice:
         )
         mock_noint_sync.assert_called_once()
 
-    @patch("services.vpn_service.noint_sync.sync_noint_to_router")
+    @patch("services.vpn_service.noint_sync.sync_noint_to_router",
+           return_value={"applied": False, "adds": 0, "removes": 0, "reload": False})
     @patch("services.vpn_service.ps.assign_device")
     @patch("services.vpn_service.ps.get_profile")
     @patch("services.vpn_service.ps.load")
@@ -565,7 +569,8 @@ class TestAssignDevice:
         mock_assign.assert_called_once_with("aa:bb:cc:dd:ee:01", "novpn-1")
         mock_router.devices.set_device_vpn.assert_not_called()
 
-    @patch("services.vpn_service.noint_sync.sync_noint_to_router")
+    @patch("services.vpn_service.noint_sync.sync_noint_to_router",
+           return_value={"applied": False, "adds": 0, "removes": 0, "reload": False})
     @patch("services.vpn_service.ps.assign_device")
     @patch("services.vpn_service.ps.get_profile")
     @patch("services.vpn_service.ps.load")

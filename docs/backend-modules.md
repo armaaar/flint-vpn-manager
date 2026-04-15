@@ -7,14 +7,14 @@ Detailed descriptions of every module in the backend. For the package layout and
 ### `app.py` — Flask REST API + SSE
 Main server. Thin routing layer that delegates to `VPNService`. All API endpoints, SSE stream. Backup-to-router and auto-restore-on-unlock helpers. Runtime state (router, proton, service instances) lives in `service_registry.py`.
 
-### `cli.py` — Click-based terminal interface
-Wraps the same backend. Commands: setup, unlock, status, server browse, router status/devices/tunnels, profile CRUD, device assignment, settings.
-
 ### `service_registry.py` — Runtime service singleton lifecycle
 Holds `ProtonAPI`, `RouterAPI`, and `VPNService` instances plus the `session_unlocked` flag. Lazy-init for router and proton; explicit `reset()` on lock. Tests patch `registry.*` fields instead of module-level globals.
 
 ### `consts.py` — Shared constants
 `PROFILE_TYPES`, `LAN_STATES`, `PROTOCOLS`, `ADBLOCK_*` — used across modules to avoid magic strings.
+
+### `mcp_server/` — MCP server for Claude AI integration
+Exposes the FlintVPN REST API as 46 MCP tools so a Claude session with no project context can manage the local network. Uses `FastMCP` (from the `mcp` SDK) with stdio transport. The server is a thin HTTP client that calls `localhost:5000` — no direct service imports. Tool modules: session, groups, tunnels, servers, devices, settings, adblock, lan_access, logs.
 
 ---
 

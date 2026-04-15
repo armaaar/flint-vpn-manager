@@ -135,6 +135,38 @@ def api_get_servers(profile_id):
     return jsonify(servers)
 
 
+@profiles_bp.route("/api/server-countries")
+@require_unlocked
+def api_get_server_countries():
+    """Get all available ProtonVPN countries with server counts and cities."""
+    proton = get_service().proton
+    if not proton.is_logged_in:
+        return jsonify({"error": "Not logged into ProtonVPN"}), 400
+    try:
+        countries = proton.get_countries()
+        return jsonify(countries)
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@profiles_bp.route("/api/vpn-status")
+@require_unlocked
+def api_get_vpn_status():
+    """Get ProtonVPN account/session status: login state, tier, server list freshness."""
+    proton = get_service().proton
+    result = {"logged_in": proton.is_logged_in}
+    if proton.is_logged_in:
+        result["account_name"] = proton.account_name
+        result["user_tier"] = proton.user_tier
+        result["tier_name"] = "Plus" if proton.user_tier >= 2 else "Free"
+        sl = proton.server_list
+        if sl:
+            result["server_count"] = len(sl)
+            result["server_list_expired"] = sl.expired
+            result["loads_expired"] = sl.loads_expired
+    return jsonify(result)
+
+
 @profiles_bp.route("/api/available-ports")
 @require_unlocked
 def api_available_ports():

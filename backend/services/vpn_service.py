@@ -143,8 +143,9 @@ class VPNService:
             health = strategy.connect(self.router, ri)
             log.info(f"Profile '{profile['name']}' connect issued (health={health})")
 
-            # vpn-client restart (kernel WG / OVPN) flushes ALL src_mac_* ipsets
-            # including proton-wg ones. Re-add members from local store.
+            # vpn-client restart (kernel WG / OVPN) flushes src_mac_* ipsets.
+            # proton-wg now uses pwg_mac_* prefix (immune), but run the
+            # mangle script for robustness in case of any ipset drift.
             if not proto.startswith("wireguard-"):
                 self._reconcile_proton_wg_ipset_members()
 
@@ -179,7 +180,8 @@ class VPNService:
             strategy.disconnect(self.router, ri)
             log.info(f"Profile '{profile['name']}' disconnected")
 
-            # vpn-client restart (kernel WG / OVPN) flushes ALL src_mac_* ipsets
+            # vpn-client restart (kernel WG / OVPN) flushes src_mac_* ipsets.
+            # proton-wg uses pwg_mac_* (immune), but reconcile for robustness.
             if not proto.startswith("wireguard-"):
                 self._reconcile_proton_wg_ipset_members()
 

@@ -19,7 +19,7 @@
   <div class="device-info">
     <div class="device-name">
       <span class="online-dot" class:on={online} class:off={!online}
-            title={online ? 'Online' : 'Offline — last seen ' + timeAgo(device.last_seen)}></span>
+            title={online ? 'Online' : device.last_seen ? 'Offline — last seen ' + timeAgo(device.last_seen) : 'Offline'}></span>
       {device.display_name}
       {#if !device.label && device.hostname}
         <span class="auto-tag">(auto)</span>
@@ -31,7 +31,7 @@
       {#if online && (device.rx_speed || device.tx_speed)}
         &middot; ↓{formatSpeed(device.rx_speed)} ↑{formatSpeed(device.tx_speed)}
       {/if}
-      {#if !online}
+      {#if !online && device.last_seen}
         &middot; {timeAgo(device.last_seen)}
       {/if}
     </div>

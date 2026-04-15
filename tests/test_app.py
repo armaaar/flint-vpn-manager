@@ -51,6 +51,9 @@ def client(tmp_data):
     flask_app.app.config["TESTING"] = True
     registry.session_unlocked = False
     registry.router = MagicMock()
+    registry.router.read_file.return_value = ""  # safe default for auto-restore
+    registry.router.get_router_fingerprint.return_value = ""  # safe default for backup
+    registry.router.exec.return_value = ""  # safe default for mkdir -p
     registry.proton = MagicMock()
     registry.service = None
 
@@ -1328,7 +1331,7 @@ class TestProtonWgConnectDisconnect:
                     "tunnel_id": 303,
                     "mark": "0x6000",
                     "table_num": 1006,
-                    "ipset_name": "src_mac_303",
+                    "ipset_name": "pwg_mac_303",
                     "socket_type": "tcp",
                     "vpn_protocol": proto,
                     "rule_name": "fvpn_pwg_protonwg0",
@@ -1483,5 +1486,5 @@ class TestProtonWgConnectDisconnect:
         # Verify ipset tool-layer calls were made
         ipset_create_calls = [str(c) for c in app_mod._reg.router.ipset_tool.create.call_args_list]
         ipset_add_calls = [str(c) for c in app_mod._reg.router.ipset_tool.add.call_args_list]
-        assert any("src_mac_303" in s for s in ipset_create_calls)
-        assert any("src_mac_303" in s for s in ipset_add_calls)
+        assert any("pwg_mac_303" in s for s in ipset_create_calls)
+        assert any("pwg_mac_303" in s for s in ipset_add_calls)

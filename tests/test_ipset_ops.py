@@ -1,7 +1,7 @@
 """Tests for ipset_ops.py — Centralized ipset operations.
 
 IpsetOps now delegates to router.ipset_tool (Ipset tool layer).
-Tests assert on ipset_tool method calls instead of raw router.exec.
+Reconciliation writes .macs files on the router and runs the mangle script.
 """
 
 from unittest.mock import MagicMock, patch, call
@@ -61,13 +61,14 @@ class TestEnsureAndAdd:
 
 class TestReconcileProtonWgMembers:
     @patch("router.ipset_ops.ps.load")
-    def test_readds_members_from_store(self, mock_load, ipset, router):
+    def test_syncs_macs_and_runs_script(self, mock_load, ipset, router):
         mock_load.return_value = {
             "profiles": [{
                 "id": "p1",
                 "router_info": {
                     "vpn_protocol": "wireguard-tcp",
                     "tunnel_id": 42,
+                    "tunnel_name": "protonwg0",
                     "ipset_name": "src_mac_42",
                 },
             }],
@@ -78,10 +79,13 @@ class TestReconcileProtonWgMembers:
             },
         }
         ipset.reconcile_proton_wg_members()
-        # Should add only the two MACs assigned to p1
-        assert router.ipset_tool.add.call_count == 2
-        router.ipset_tool.add.assert_any_call("src_mac_42", "aa:bb:cc:dd:ee:ff")
-        router.ipset_tool.add.assert_any_call("src_mac_42", "11:22:33:44:55:66")
+        # Should write .macs file with the two MACs assigned to p1
+        router.proton_wg.write_tunnel_macs.assert_called_once()
+        args = router.proton_wg.write_tunnel_macs.call_args[0]
+        assert args[0] == "protonwg0"
+        assert set(args[1]) == {"aa:bb:cc:dd:ee:ff", "11:22:33:44:55:66"}
+        # Should run the mangle script
+        router.exec.assert_called()
 
     @patch("router.ipset_ops.ps.load")
     def test_skips_non_proton_wg(self, mock_load, ipset, router):
@@ -93,7 +97,7 @@ class TestReconcileProtonWgMembers:
             "device_assignments": {"aa:bb:cc:dd:ee:ff": "p1"},
         }
         ipset.reconcile_proton_wg_members()
-        router.ipset_tool.add.assert_not_called()
+        router.proton_wg.write_tunnel_macs.assert_not_called()
 
     def test_accepts_store_data_arg(self, ipset, router):
         store = {
@@ -102,32 +106,37 @@ class TestReconcileProtonWgMembers:
                 "router_info": {
                     "vpn_protocol": "wireguard-tls",
                     "tunnel_id": 7,
+                    "tunnel_name": "protonwg0",
                     "ipset_name": "src_mac_7",
                 },
             }],
             "device_assignments": {"aa:bb:cc:dd:ee:ff": "p1"},
         }
         ipset.reconcile_proton_wg_members(store)
-        router.ipset_tool.add.assert_called_once_with("src_mac_7", "aa:bb:cc:dd:ee:ff")
+        router.proton_wg.write_tunnel_macs.assert_called_once_with(
+            "protonwg0", ["aa:bb:cc:dd:ee:ff"]
+        )
 
 
 class TestReconcileProtonWgFull:
     @patch("router.ipset_ops.ps.load")
-    def test_creates_ipsets_adds_members_rebuilds_mangle(self, mock_load, ipset, router):
+    def test_syncs_macs_and_rebuilds_mangle(self, mock_load, ipset, router):
         mock_load.return_value = {
             "profiles": [{
                 "id": "p1",
                 "router_info": {
                     "vpn_protocol": "wireguard-tcp",
                     "tunnel_id": 42,
+                    "tunnel_name": "protonwg0",
                     "ipset_name": "src_mac_42",
                 },
             }],
             "device_assignments": {"aa:bb:cc:dd:ee:ff": "p1"},
         }
         ipset.reconcile_proton_wg_full()
-        router.ipset_tool.create.assert_called_with("src_mac_42", "hash:mac")
-        router.ipset_tool.add.assert_called_with("src_mac_42", "aa:bb:cc:dd:ee:ff")
+        # Should write .macs file
+        router.proton_wg.write_tunnel_macs.assert_called_once()
+        # Should rebuild mangle rules (which includes ipset creation + population)
         router.proton_wg._rebuild_proton_wg_mangle_rules.assert_called_once()
 
     @patch("router.ipset_ops.ps.load")
