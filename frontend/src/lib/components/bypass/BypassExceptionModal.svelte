@@ -168,7 +168,9 @@
 
         <div class="form-group">
           <label>Rule Blocks</label>
-          <p class="rules-hint">Rules within a block are ANDed (all must match). Blocks are ORed (any block can match). Domain rules match all subdomains.</p>
+          <p class="rules-hint">
+            Traffic matches a block when <strong>all conditions</strong> are met: destination matches <strong>any</strong> listed IP/domain <strong>and</strong> port matches <strong>any</strong> listed port. If a block has only IPs, all traffic to those IPs bypasses. If it has IPs + ports, only traffic on those ports to those IPs bypasses. Multiple blocks act as alternatives — matching <strong>any one</strong> block is enough. Domain rules include all subdomains.
+          </p>
 
           {#each ruleBlocks as block, bi}
             {#if bi > 0}<div class="block-or-divider"><span>OR</span></div>{/if}
