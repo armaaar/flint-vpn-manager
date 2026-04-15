@@ -218,7 +218,7 @@ export interface BypassException {
   preset_id: string | null;
   enabled: boolean;
   scope: 'global' | 'group' | 'device';
-  scope_target: string | null;
+  scope_target: string[] | null;
   rule_blocks: BypassRuleBlock[];
 }
 

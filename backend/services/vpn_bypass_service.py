@@ -203,11 +203,20 @@ class VpnBypassService:
 
         changed = False
         for exc in exceptions:
-            if exc.get("scope") == "group" and exc.get("scope_target") == profile_id:
-                exc["enabled"] = False
+            if exc.get("scope") != "group":
+                continue
+            target = exc.get("scope_target")
+            targets = target if isinstance(target, list) else [target]
+            if profile_id in targets:
+                # Remove the deleted group from the target list
+                new_targets = [t for t in targets if t != profile_id]
+                if new_targets:
+                    exc["scope_target"] = new_targets
+                else:
+                    exc["enabled"] = False
                 changed = True
                 log.warning(
-                    "Disabled bypass exception '%s' — group %s was deleted",
+                    "Bypass exception '%s' — removed deleted group %s",
                     exc.get("name"), profile_id,
                 )
 
@@ -289,11 +298,13 @@ class VpnBypassService:
         target = exc.get("scope_target")
         if scope == "global":
             exc["scope_target"] = None
-        elif scope == "group":
-            if not target:
-                raise ValueError("scope_target (profile_id) required for group scope")
-        elif scope == "device":
-            if not target:
-                raise ValueError("scope_target (MAC address) required for device scope")
+        elif scope in ("group", "device"):
+            # Normalise single string to list
+            if isinstance(target, str):
+                target = [target]
+                exc["scope_target"] = target
+            if not target or not any(t for t in target):
+                label = "profile_id(s)" if scope == "group" else "MAC address(es)"
+                raise ValueError(f"scope_target ({label}) required for {scope} scope")
         else:
             raise ValueError(f"Invalid scope: {scope}")

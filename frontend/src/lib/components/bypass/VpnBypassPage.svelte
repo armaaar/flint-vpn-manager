@@ -92,13 +92,14 @@
 
   function scopeLabel(exc: BypassException): string {
     if (exc.scope === 'global') return 'Global';
+    const targets = exc.scope_target || [];
     if (exc.scope === 'group') {
-      const p = $profiles.find(p => p.id === exc.scope_target);
-      return p ? `Group: ${p.name}` : 'Group (deleted)';
+      const names = targets.map(t => $profiles.find(p => p.id === t)?.name || '?').join(', ');
+      return targets.length > 1 ? `Groups: ${names}` : `Group: ${names}`;
     }
     if (exc.scope === 'device') {
-      const d = $devices.find(d => d.mac === exc.scope_target);
-      return d ? `Device: ${d.display_name}` : `Device: ${exc.scope_target}`;
+      const names = targets.map(t => $devices.find(d => d.mac === t)?.display_name || t).join(', ');
+      return targets.length > 1 ? `Devices: ${names}` : `Device: ${names}`;
     }
     return exc.scope;
   }

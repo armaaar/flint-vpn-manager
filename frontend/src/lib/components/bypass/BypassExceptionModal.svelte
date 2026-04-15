@@ -13,7 +13,7 @@
   let step = exception ? 2 : 1;
   let name = exception?.name || '';
   let scope: string = exception?.scope || 'global';
-  let scopeTarget: string = exception?.scope_target || '';
+  let scopeTargets: string[] = exception?.scope_target || [];
   let ruleBlocks: BypassRuleBlock[] = exception?.rule_blocks
     ? exception.rule_blocks.map(b => ({ label: b.label || '', rules: b.rules.map(r => ({...r})) }))
     : [];
@@ -69,7 +69,7 @@
     const data: Record<string, unknown> = {
       name,
       scope,
-      scope_target: scope === 'global' ? null : scopeTarget,
+      scope_target: scope === 'global' ? null : scopeTargets,
       preset_id: presetId,
       rule_blocks: cleanBlocks,
     };
@@ -92,7 +92,15 @@
   }
 
   $: hasValidRules = ruleBlocks.some(b => b.rules.some(r => r.value.trim()));
-  $: scopeValid = scope === 'global' || !!scopeTarget;
+  $: scopeValid = scope === 'global' || scopeTargets.length > 0;
+
+  function toggleTarget(value: string) {
+    if (scopeTargets.includes(value)) {
+      scopeTargets = scopeTargets.filter(t => t !== value);
+    } else {
+      scopeTargets = [...scopeTargets, value];
+    }
+  }
 </script>
 
 <!-- svelte-ignore a11y-click-events-have-key-events -->
@@ -144,25 +152,37 @@
 
         {#if scope === 'group'}
           <div class="form-group">
-            <label for="scope-group">VPN Group</label>
-            <select id="scope-group" bind:value={scopeTarget}>
-              <option value="">Select a group...</option>
+            <label>VPN Groups</label>
+            <div class="target-list">
               {#each vpnProfiles as p}
-                <option value={p.id}>{p.name} ({p.icon})</option>
+                <label class="target-check">
+                  <input type="checkbox" checked={scopeTargets.includes(p.id)}
+                    on:change={() => toggleTarget(p.id)} />
+                  {p.icon} {p.name}
+                </label>
               {/each}
-            </select>
+              {#if vpnProfiles.length === 0}
+                <span class="no-targets">No VPN groups available</span>
+              {/if}
+            </div>
           </div>
         {/if}
 
         {#if scope === 'device'}
           <div class="form-group">
-            <label for="scope-device">Device</label>
-            <select id="scope-device" bind:value={scopeTarget}>
-              <option value="">Select a device...</option>
+            <label>Devices</label>
+            <div class="target-list">
               {#each devices as d}
-                <option value={d.mac}>{d.display_name} ({d.mac})</option>
+                <label class="target-check">
+                  <input type="checkbox" checked={scopeTargets.includes(d.mac)}
+                    on:change={() => toggleTarget(d.mac)} />
+                  {d.display_name} <span class="target-mac">{d.mac}</span>
+                </label>
               {/each}
-            </select>
+              {#if devices.length === 0}
+                <span class="no-targets">No devices available</span>
+              {/if}
+            </div>
           </div>
         {/if}
 
@@ -270,6 +290,13 @@
   .scope-radios { display: flex; gap: 16px; flex-wrap: wrap; }
   .radio-label { display: flex; align-items: center; gap: 6px; color: var(--fg); font-size: 0.9rem; cursor: pointer; }
   .radio-label input[type="radio"] { accent-color: var(--accent); }
+
+  .target-list { display: flex; flex-direction: column; gap: 4px; max-height: 180px; overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 8px; }
+  .target-check { display: flex; align-items: center; gap: 8px; color: var(--fg); font-size: 0.9rem; cursor: pointer; padding: 4px 6px; border-radius: 4px; }
+  .target-check:hover { background: var(--bg3); }
+  .target-check input[type="checkbox"] { accent-color: var(--accent); }
+  .target-mac { color: var(--fg3); font-family: var(--font-mono); font-size: 0.8rem; }
+  .no-targets { color: var(--fg3); font-size: 0.85rem; padding: 8px; }
 
   .rules-hint { color: var(--fg3); font-size: 0.8rem; margin-bottom: 12px; margin-top: 0; }
 

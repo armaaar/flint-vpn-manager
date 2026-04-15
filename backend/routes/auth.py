@@ -1,6 +1,7 @@
 """Auth blueprint — Status, setup, unlock, and lock endpoints."""
 
 import logging
+import time
 
 from flask import Blueprint, request, jsonify
 
@@ -56,13 +57,19 @@ def api_unlock():
         return jsonify({"error": "master_password required"}), 400
 
     try:
+        t_total = time.time()
+
+        t = time.time()
         sm.unlock(data["master_password"])
         _registry.session_unlocked = True
+        log.info(f"Unlock timing: decrypt={time.time()-t:.2f}s")
 
         # Create the VPN service
+        t = time.time()
         router = get_router()
         proton = get_proton()
         _registry.service = VPNService(router, proton)
+        log.info(f"Unlock timing: service_init={time.time()-t:.2f}s")
 
         # Register backup callback so every save() pushes to router
         ps.register_save_callback(
@@ -72,10 +79,12 @@ def api_unlock():
         # Auto-restore local state from router backup if newer (silent disaster
         # recovery — must run BEFORE the device tracker / LAN sync since they
         # depend on the local store).
+        t = time.time()
         try:
             check_and_auto_restore(router)
         except Exception as e:
             log.warning(f"Auto-restore check failed: {e}")
+        log.info(f"Unlock timing: auto_restore={time.time()-t:.2f}s")
 
         # Apply alternative routing setting
         config = sm.get_config()
@@ -83,11 +92,14 @@ def api_unlock():
             proton.set_alternative_routing(False)
 
         # Start device tracker and poll immediately so devices are ready
+        t = time.time()
         tracker = start_tracker(router)
         tracker.poll_once()
+        log.info(f"Unlock timing: tracker={time.time()-t:.2f}s")
 
         # Apply global IPv6 setting — enable router IPv6 if user opted in,
         # otherwise ensure leak protection blocks all IPv6 forwarding.
+        t = time.time()
         config = sm.get_config()
         if config.get("global_ipv6_enabled"):
             try:
@@ -98,33 +110,43 @@ def api_unlock():
             router.firewall.ensure_ipv6_leak_protection()
         except Exception as e:
             log.warning(f"IPv6 leak protection setup failed: {e}")
+        log.info(f"Unlock timing: ipv6={time.time()-t:.2f}s")
 
         # Reconcile router LAN execution layer (UCI ipsets + rules) with the
         # restored / local intent.
+        t = time.time()
         try:
             _registry.service.sync_noint_to_router()
         except Exception as e:
             log.warning(f"NoInternet sync on unlock failed: {e}")
+        log.info(f"Unlock timing: noint_sync={time.time()-t:.2f}s")
 
         # Reconcile proton-wg ipsets (ephemeral, lost on restart/reload)
+        t = time.time()
         try:
             _registry.service.reconcile_proton_wg_ipsets()
         except Exception as e:
             log.warning(f"proton-wg ipset reconciliation failed: {e}")
+        log.info(f"Unlock timing: pwg_ipsets={time.time()-t:.2f}s")
 
         # Reapply LAN access exceptions from config
+        t = time.time()
         try:
             _registry.get_lan_service().reapply_all()
         except Exception as e:
             log.warning(f"LAN access reapply on unlock failed: {e}")
+        log.info(f"Unlock timing: lan_access={time.time()-t:.2f}s")
 
         # Reapply VPN bypass exceptions from config
+        t = time.time()
         try:
             _registry.get_bypass_service().reapply_all()
         except Exception as e:
             log.warning(f"VPN bypass reapply on unlock failed: {e}")
+        log.info(f"Unlock timing: vpn_bypass={time.time()-t:.2f}s")
 
         # Start auto-optimizer
+        t = time.time()
         try:
             start_optimizer(
                 get_proton=lambda: _registry.service.proton,
@@ -134,7 +156,9 @@ def api_unlock():
             )
         except Exception as e:
             log.warning(f"Auto-optimizer start failed: {e}")
+        log.info(f"Unlock timing: optimizer={time.time()-t:.2f}s")
 
+        log.info(f"Unlock timing: TOTAL={time.time()-t_total:.2f}s")
         return jsonify({"success": True})
     except (ValueError, FileNotFoundError) as e:
         return jsonify({"error": str(e)}), 401

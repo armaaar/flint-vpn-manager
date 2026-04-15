@@ -79,7 +79,7 @@ class TestAddException:
 
         exc = result["exception"]
         assert exc["preset_id"] == "lol"
-        assert len(exc["rule_blocks"]) == 2  # LoL has 2 blocks (IPs + domains)
+        assert len(exc["rule_blocks"]) == 3  # LoL has 3 blocks (IPs + domains + chat ports)
 
     def test_add_raises_on_empty_blocks(self):
         r = _mock_router()
@@ -201,7 +201,7 @@ class TestOnGroupDeleted:
                 vpn_bypass={
                     "exceptions": [
                         {"id": "byp_1", "name": "Group rule", "enabled": True,
-                         "scope": "group", "scope_target": "prof_123",
+                         "scope": "group", "scope_target": ["prof_123"],
                          "rule_blocks": _simple_blocks()},
                         {"id": "byp_2", "name": "Global rule", "enabled": True,
                          "scope": "global", "scope_target": None,

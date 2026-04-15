@@ -186,20 +186,21 @@ class RouterVpnBypass:
 
         # 3. Build per-block iptables rules (blocks ORed, rules within ANDed)
         for exc in enabled:
-            src_match = self._source_match(
+            src_matches = self._source_matches(
                 exc.get("scope", "global"),
                 exc.get("scope_target"),
                 group_ipset_map,
             )
-            if src_match is None:
+            if not src_matches:
                 continue
 
-            for bi, block in enumerate(exc.get("rule_blocks", [])):
-                rule_cmd = self._build_block_rule(
-                    exc["id"], bi, block, src_match,
-                )
-                if rule_cmd:
-                    cmds.append(rule_cmd)
+            for src_match in src_matches:
+                for bi, block in enumerate(exc.get("rule_blocks", [])):
+                    rule_cmd = self._build_block_rule(
+                        exc["id"], bi, block, src_match,
+                    )
+                    if rule_cmd:
+                        cmds.append(rule_cmd)
 
         # 4. Insert bypass chain jump at position 1 of ROUTE_POLICY
         cmds.append(
@@ -279,27 +280,37 @@ class RouterVpnBypass:
             f'[ -n "$WAN_GW" ] && ip route add default via $WAN_GW dev $WAN_DEV table {BYPASS_TABLE} || true',
         ]
 
-    def _source_match(
+    def _source_matches(
         self,
         scope: str,
-        scope_target: str | None,
+        scope_target: str | list | None,
         group_ipset_map: dict[str, str],
-    ) -> str | None:
-        """Build the iptables source match fragment for a scope."""
+    ) -> list[str]:
+        """Build iptables source match fragments for a scope.
+
+        Returns a list of match fragments — one per target.  For global
+        scope returns ``[""]``.  For multi-target group/device scopes,
+        returns one fragment per target so each gets its own iptables rule.
+        """
         if scope == "global":
-            return ""
-        if scope == "group":
-            if not scope_target:
-                return None
-            ipset_name = group_ipset_map.get(scope_target)
-            if not ipset_name:
-                return None
-            return f"-m set --match-set {ipset_name} src"
-        if scope == "device":
-            if not scope_target or not _SAFE_MAC_RE.match(scope_target):
-                return None
-            return f"-m mac --mac-source {scope_target}"
-        return None
+            return [""]
+
+        # Normalise to list
+        targets = scope_target if isinstance(scope_target, list) else [scope_target]
+        targets = [t for t in targets if t]
+        if not targets:
+            return []
+
+        result: list[str] = []
+        for target in targets:
+            if scope == "group":
+                ipset_name = group_ipset_map.get(target)
+                if ipset_name:
+                    result.append(f"-m set --match-set {ipset_name} src")
+            elif scope == "device":
+                if _SAFE_MAC_RE.match(target):
+                    result.append(f"-m mac --mac-source {target}")
+        return result
 
     # ── Internal: persistence ──────────────────────────────────────────
 

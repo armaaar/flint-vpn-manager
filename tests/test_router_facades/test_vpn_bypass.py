@@ -137,7 +137,7 @@ class TestApplyAll:
     def test_device_scope_adds_mac_match(self, bypass, ssh):
         exc = _make_exception(
             scope="device",
-            scope_target="aa:bb:cc:dd:ee:ff",
+            scope_target=["aa:bb:cc:dd:ee:ff"],
             rule_blocks=[{"rules": [{"type": "cidr", "value": "1.2.3.0/24"}]}],
         )
         bypass.apply_all([exc], {})
@@ -147,7 +147,7 @@ class TestApplyAll:
     def test_group_scope_adds_ipset_src_match(self, bypass, ssh):
         exc = _make_exception(
             scope="group",
-            scope_target="prof_abc",
+            scope_target=["prof_abc"],
             rule_blocks=[{"rules": [{"type": "cidr", "value": "1.2.3.0/24"}]}],
         )
         bypass.apply_all([exc], {"prof_abc": "src_mac_300"})
@@ -157,7 +157,7 @@ class TestApplyAll:
     def test_group_scope_missing_profile_skips(self, bypass, ssh):
         exc = _make_exception(
             scope="group",
-            scope_target="prof_nonexistent",
+            scope_target=["prof_nonexistent"],
             rule_blocks=[{"rules": [{"type": "cidr", "value": "1.2.3.0/24"}]}],
         )
         bypass.apply_all([exc], {})
@@ -262,23 +262,38 @@ class TestCleanup:
         )
 
 
-class TestSourceMatch:
-    def test_global_returns_empty(self, bypass):
-        assert bypass._source_match("global", None, {}) == ""
+class TestSourceMatches:
+    def test_global_returns_empty_string(self, bypass):
+        assert bypass._source_matches("global", None, {}) == [""]
 
-    def test_device_returns_mac_match(self, bypass):
-        result = bypass._source_match("device", "aa:bb:cc:dd:ee:ff", {})
-        assert result == "-m mac --mac-source aa:bb:cc:dd:ee:ff"
+    def test_device_single_returns_mac_match(self, bypass):
+        result = bypass._source_matches("device", ["aa:bb:cc:dd:ee:ff"], {})
+        assert result == ["-m mac --mac-source aa:bb:cc:dd:ee:ff"]
 
-    def test_device_invalid_mac_returns_none(self, bypass):
-        assert bypass._source_match("device", "invalid", {}) is None
+    def test_device_multiple_returns_multiple(self, bypass):
+        result = bypass._source_matches("device", ["aa:bb:cc:dd:ee:ff", "11:22:33:44:55:66"], {})
+        assert len(result) == 2
+        assert "-m mac --mac-source aa:bb:cc:dd:ee:ff" in result
+        assert "-m mac --mac-source 11:22:33:44:55:66" in result
 
-    def test_group_returns_ipset_match(self, bypass):
-        result = bypass._source_match("group", "prof_1", {"prof_1": "src_mac_300"})
-        assert result == "-m set --match-set src_mac_300 src"
+    def test_device_invalid_mac_skipped(self, bypass):
+        result = bypass._source_matches("device", ["invalid", "aa:bb:cc:dd:ee:ff"], {})
+        assert len(result) == 1
 
-    def test_group_missing_returns_none(self, bypass):
-        assert bypass._source_match("group", "prof_missing", {}) is None
+    def test_group_single_returns_ipset_match(self, bypass):
+        result = bypass._source_matches("group", ["prof_1"], {"prof_1": "src_mac_300"})
+        assert result == ["-m set --match-set src_mac_300 src"]
+
+    def test_group_multiple_returns_multiple(self, bypass):
+        result = bypass._source_matches("group", ["prof_1", "prof_2"], {"prof_1": "src_mac_300", "prof_2": "src_mac_301"})
+        assert len(result) == 2
+
+    def test_group_missing_returns_empty(self, bypass):
+        assert bypass._source_matches("group", ["prof_missing"], {}) == []
+
+    def test_empty_target_returns_empty(self, bypass):
+        assert bypass._source_matches("device", [], {}) == []
+        assert bypass._source_matches("device", None, {}) == []
 
 
 class TestBlockIpsetName:
