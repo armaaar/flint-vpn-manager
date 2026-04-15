@@ -24,6 +24,7 @@ class ServiceRegistry:
         self.service: Optional[VPNService] = None
         self.session_unlocked: bool = False
         self._lan_service = None
+        self._bypass_service = None
 
     def get_proton(self) -> ProtonAPI:
         """Lazy-init ProtonAPI."""
@@ -55,11 +56,19 @@ class ServiceRegistry:
             self._lan_service = LanAccessService(self.get_router())
         return self._lan_service
 
+    def get_bypass_service(self):
+        """Lazy-init and return the VpnBypassService instance."""
+        if self._bypass_service is None:
+            from services.vpn_bypass_service import VpnBypassService
+            self._bypass_service = VpnBypassService(self.get_router())
+        return self._bypass_service
+
     def reset(self):
         """Called on lock — clears service but keeps router/proton for re-unlock."""
         self.session_unlocked = False
         self.service = None
         self._lan_service = None
+        self._bypass_service = None
 
 
 # Module-level singleton (one per process).

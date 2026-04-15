@@ -27,6 +27,7 @@ from mcp_server.tools import (
     adblock,
     lan_access,
     logs,
+    vpn_bypass,
 )
 
 BASE_URL = os.environ.get("FLINTVPN_API_URL", "http://localhost:5000")
@@ -59,6 +60,7 @@ devices.register(mcp, api)
 settings.register(mcp, api)
 adblock.register(mcp, api)
 lan_access.register(mcp, api)
+vpn_bypass.register(mcp, api)
 logs.register(mcp, api)
 
 if __name__ == "__main__":

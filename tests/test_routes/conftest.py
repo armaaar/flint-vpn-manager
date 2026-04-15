@@ -22,6 +22,7 @@ def _create_test_app():
     from routes.lan_access import lan_bp
     from routes.settings import settings_bp
     from routes.logs import logs_bp
+    from routes.vpn_bypass import bypass_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(profiles_bp)
@@ -29,6 +30,7 @@ def _create_test_app():
     app.register_blueprint(lan_bp)
     app.register_blueprint(settings_bp)
     app.register_blueprint(logs_bp)
+    app.register_blueprint(bypass_bp)
 
     return app
 
@@ -45,6 +47,7 @@ def mock_registry():
     reg.get_proton.return_value = reg.proton
     reg.get_router.return_value = reg.router
     reg.get_lan_service.return_value = MagicMock()
+    reg.get_bypass_service.return_value = MagicMock()
     return reg
 
 
@@ -56,7 +59,8 @@ def client(mock_registry):
     with patch("routes._helpers._registry", mock_registry), \
          patch("routes.auth._registry", mock_registry), \
          patch("routes.settings._registry", mock_registry), \
-         patch("routes.lan_access._registry", mock_registry):
+         patch("routes.lan_access._registry", mock_registry), \
+         patch("routes.vpn_bypass._registry", mock_registry):
         with app.test_client() as c:
             yield c
 
@@ -70,6 +74,7 @@ def locked_client(mock_registry):
     with patch("routes._helpers._registry", mock_registry), \
          patch("routes.auth._registry", mock_registry), \
          patch("routes.settings._registry", mock_registry), \
-         patch("routes.lan_access._registry", mock_registry):
+         patch("routes.lan_access._registry", mock_registry), \
+         patch("routes.vpn_bypass._registry", mock_registry):
         with app.test_client() as c:
             yield c

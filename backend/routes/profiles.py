@@ -5,6 +5,7 @@ import time
 from flask import Blueprint, request, jsonify
 
 import persistence.secrets_manager as sm
+from service_registry import registry as _registry
 from services.vpn_service import (
     NotFoundError, ConflictError, LimitExceededError, NotLoggedInError,
 )
@@ -103,6 +104,11 @@ def api_delete_profile(profile_id):
     """Delete a profile and tear down its tunnel if VPN."""
     try:
         get_service().delete_profile(profile_id)
+        # Disable any bypass exceptions scoped to the deleted group
+        try:
+            _registry.get_bypass_service().on_group_deleted(profile_id)
+        except Exception:
+            pass
         return jsonify({"success": True})
     except NotFoundError:
         return jsonify({"error": "Profile not found"}), 404

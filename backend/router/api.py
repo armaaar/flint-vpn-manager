@@ -300,6 +300,17 @@ class RouterAPI:
         return self._openvpn_facade
 
     @property
+    def vpn_bypass(self):
+        if not hasattr(self, "_vpn_bypass_facade"):
+            from router.facades.vpn_bypass import RouterVpnBypass
+            self._vpn_bypass_facade = RouterVpnBypass(
+                self.uci, self.ipset_tool, self.iptables, self.iproute,
+                self.service_ctl, self,
+                ip6tables=self.ip6tables,
+            )
+        return self._vpn_bypass_facade
+
+    @property
     def proton_wg(self):
         if not hasattr(self, "_proton_wg_facade"):
             from router.facades.proton_wg import RouterProtonWG

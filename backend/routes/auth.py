@@ -118,6 +118,12 @@ def api_unlock():
         except Exception as e:
             log.warning(f"LAN access reapply on unlock failed: {e}")
 
+        # Reapply VPN bypass exceptions from config
+        try:
+            _registry.get_bypass_service().reapply_all()
+        except Exception as e:
+            log.warning(f"VPN bypass reapply on unlock failed: {e}")
+
         # Start auto-optimizer
         try:
             start_optimizer(

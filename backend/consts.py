@@ -70,3 +70,62 @@ HEALTH_GREEN = "green"
 HEALTH_AMBER = "amber"
 HEALTH_RED = "red"
 HEALTH_CONNECTING = "connecting"
+
+# VPN Bypass Exceptions
+BYPASS_MARK = "0x8000"
+BYPASS_MASK = "0xf000"
+BYPASS_TABLE = 1008
+BYPASS_PRIORITY = 100
+BYPASS_CHAIN = "FVPN_BYPASS"
+BYPASS_IPSET_PREFIX = "fvpn_byp_"
+BYPASS_SCRIPT_PATH = "/etc/fvpn/vpn_bypass.sh"
+BYPASS_DNSMASQ_CONF = "/etc/dnsmasq.d/fvpn_bypass.conf"
+
+VPN_BYPASS_PRESETS: dict[str, dict] = {
+    "lol": {
+        "name": "League of Legends",
+        "rules": [
+            # Riot Games AS6507 IP ranges
+            {"type": "cidr", "value": "104.160.128.0/17"},
+            {"type": "cidr", "value": "162.249.72.0/21"},
+            {"type": "cidr", "value": "185.40.64.0/22"},
+            {"type": "cidr", "value": "192.64.168.0/21"},
+            {"type": "cidr", "value": "43.229.64.0/22"},
+            {"type": "cidr", "value": "45.7.36.0/22"},
+            {"type": "cidr", "value": "45.250.208.0/22"},
+            {"type": "cidr", "value": "103.219.128.0/22"},
+            {"type": "cidr", "value": "103.240.224.0/22"},
+            # Riot domains (auth, CDN, chat, voice)
+            {"type": "domain", "value": "riotgames.com"},
+            {"type": "domain", "value": "pvp.net"},
+            {"type": "domain", "value": "riotcdn.net"},
+            {"type": "domain", "value": "riotcdn.com"},
+            {"type": "domain", "value": "leagueoflegends.com"},
+            {"type": "domain", "value": "vivox.com"},
+            {"type": "domain", "value": "lolstatic.com"},
+            {"type": "domain", "value": "rgpub.io"},
+            # Game-specific ports
+            {"type": "port", "value": "5000:5500", "protocol": "udp"},
+            {"type": "port", "value": "8393:8400", "protocol": "tcp"},
+        ],
+    },
+    "valorant": {
+        "name": "Valorant",
+        "rules": [
+            # Same Riot AS6507 IP ranges
+            {"type": "cidr", "value": "104.160.128.0/17"},
+            {"type": "cidr", "value": "162.249.72.0/21"},
+            {"type": "cidr", "value": "185.40.64.0/22"},
+            {"type": "cidr", "value": "192.64.168.0/21"},
+            # Riot + Valorant domains
+            {"type": "domain", "value": "riotgames.com"},
+            {"type": "domain", "value": "playvalorant.com"},
+            {"type": "domain", "value": "riotcdn.net"},
+            {"type": "domain", "value": "pvp.net"},
+            {"type": "domain", "value": "vivox.com"},
+            {"type": "domain", "value": "rgpub.io"},
+            # Valorant game traffic
+            {"type": "port", "value": "7000:8000", "protocol": "udp"},
+        ],
+    },
+}
