@@ -42,7 +42,7 @@ mcp = FastMCP(
         "2. If locked, call flint_unlock with the master password.\n"
         "3. Use flint_list_groups and flint_list_devices to see the current state.\n"
         "4. Manage groups, tunnels, devices, servers, settings, adblock, "
-        "LAN networks, and logs.\n\n"
+        "LAN networks, VPN bypass exceptions, and logs.\n\n"
         "IMPORTANT: The router is the source of truth for tunnel state and "
         "device assignments. All reads are live from the router via SSH — "
         "data returned is a point-in-time snapshot, not a live stream."
