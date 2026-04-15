@@ -71,11 +71,12 @@
   // Health is the canonical state, read live from the router via SSE.
   // Possible values: 'green' | 'amber' | 'red' | 'connecting' | 'loading' | 'unknown'
   // 'green'/'amber' = connected, 'connecting'/'loading' = transitioning, others = disconnected.
+  $: isGhost = !!profile._ghost;
   $: connState = derivedConnState(profile);
   $: statusClass = getStatusClass(profile);
-  $: statusLabel = getStatusLabel(profile);
+  $: statusLabel = isGhost ? 'TUNNEL MISSING' : getStatusLabel(profile);
   $: headerGradient = buildGradient(profile, connState);
-  $: statusBorderColor = getStatusBorderColor(profile);
+  $: statusBorderColor = isGhost ? 'var(--amber)' : getStatusBorderColor(profile);
   $: isTransitioning = connState === 'transitioning';
   $: smartStatus = $smartProtocolStatus[profile.id] || null;
 
@@ -190,7 +191,19 @@
 
     {#if profile.type === 'vpn'}
       <div class="group-connect-area">
-        {#if isTransitioning}
+        {#if isGhost}
+          <div class="ghost-banner">
+            <div class="ghost-message">Tunnel no longer exists on the router.</div>
+            <div class="ghost-actions">
+              <button class="btn-ghost-action btn-ghost-server" on:click|stopPropagation={() => dispatch('pickserver', { profileId: profile.id })}>
+                Change Server
+              </button>
+              <button class="btn-ghost-action btn-ghost-delete" on:click|stopPropagation={() => dispatch('edit', profile)}>
+                Delete
+              </button>
+            </div>
+          </div>
+        {:else if isTransitioning}
           <button class="btn-transition btn-lg" disabled>
             <span class="btn-spinner"></span>
             {getStatusLabel(profile)}
@@ -305,7 +318,7 @@
       <span class="device-count-badge">{onlineCount}/{devs.length}</span>
     </div>
     <div class="device-drop-zone"
-         use:dndzone={{ items: deviceItems, type: 'devices', flipDurationMs: 150, dropTargetStyle: { outline: '2px dashed var(--accent)', outlineOffset: '-2px' } }}
+         use:dndzone={{ items: deviceItems, type: 'devices', flipDurationMs: 150, dropTargetStyle: { outline: '2px dashed var(--accent)', outlineOffset: '-2px' }, dropFromOthersDisabled: isGhost }}
          on:consider={handleDeviceDndConsider}
          on:finalize={handleDeviceDndFinalize}>
       {#each deviceItems as device (device.id)}
@@ -342,6 +355,14 @@
   .proto-tag.wg { background: rgba(46,204,113,.2); color: #2ecc71; }
   .proto-tag.ovpn { background: var(--accent-bg); color: var(--accent); }
   .group-connect-area { margin-top: 14px; }
+  .ghost-banner { background: var(--amber-bg); border-radius: var(--radius-sm); padding: 12px; }
+  .ghost-message { font-size: .8rem; color: var(--amber); font-weight: 500; margin-bottom: 10px; }
+  .ghost-actions { display: flex; gap: 8px; }
+  .btn-ghost-action { flex: 1; padding: 10px 0; border-radius: var(--radius-sm); font-weight: 700; font-size: .8rem; cursor: pointer; text-transform: uppercase; letter-spacing: .2px; border: none; }
+  .btn-ghost-server { background: #fff; color: var(--bg); }
+  .btn-ghost-server:hover { background: var(--accent); color: #fff; }
+  .btn-ghost-delete { background: var(--glass-bg); color: rgba(255,255,255,.85); backdrop-filter: var(--glass-blur); }
+  .btn-ghost-delete:hover { background: var(--red-bg); color: var(--red); }
 
   .vpn-options-toggle {
     display: flex; align-items: center; justify-content: space-between;

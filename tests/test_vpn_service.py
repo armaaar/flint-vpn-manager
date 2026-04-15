@@ -31,7 +31,6 @@ from services.vpn_service import (
     backup_local_state_to_router,
     check_and_auto_restore,
     ROUTER_BACKUP_PATH,
-    BACKUP_FORMAT_VERSION,
     _local_router_key,
     _router_rule_key,
 )
@@ -644,7 +643,7 @@ class TestBackupRestore:
         assert call_args[0][0] == ROUTER_BACKUP_PATH
         written = json.loads(call_args[0][1])
         assert "_meta" in written
-        assert written["_meta"]["version"] == BACKUP_FORMAT_VERSION
+        assert "saved_at" in written["_meta"]
         assert "data" in written
         assert written["data"]["profiles"] == []
 
@@ -657,23 +656,11 @@ class TestBackupRestore:
         mock_router.write_file.assert_not_called()
 
     @patch("services.backup_service.ps.save")
-    @patch("services.backup_service.ps.STORE_FILE", new_callable=PropertyMock)
-    def test_auto_restore_when_backup_newer(self, mock_store_file, mock_save,
-                                            tmp_path, mock_router):
-        """check_and_auto_restore restores when backup is newer than local."""
-        # Set up a local file with an old mtime
-        local_file = tmp_path / "profile_store.json"
-        local_file.write_text(json.dumps({"profiles": []}))
-        import os
-        os.utime(local_file, (1000000, 1000000))  # very old
-
-        mock_store_file.__get__ = lambda *_: local_file
-
-        # Router has a newer backup
+    def test_auto_restore_always_restores_from_router(self, mock_save, mock_router):
+        """check_and_auto_restore always overwrites local with router backup."""
         backup_data = {"profiles": [{"id": "restored"}], "device_assignments": {}}
         wrapped = {
             "_meta": {
-                "version": BACKUP_FORMAT_VERSION,
                 "saved_at": datetime.now(timezone.utc).isoformat(),
                 "router_fingerprint": "aa:bb:cc:dd:ee:ff",
             },
@@ -686,32 +673,30 @@ class TestBackupRestore:
         mock_save.assert_called_once_with(backup_data)
 
     @patch("services.backup_service.ps.save")
-    @patch("services.backup_service.ps.STORE_FILE", new_callable=PropertyMock)
-    def test_auto_restore_skips_fingerprint_mismatch(self, mock_store_file, mock_save,
-                                                     tmp_path, mock_router):
-        """check_and_auto_restore skips when router fingerprint doesn't match."""
-        local_file = tmp_path / "profile_store.json"
-        local_file.write_text(json.dumps({"profiles": []}))
-        mock_store_file.__get__ = lambda *_: local_file
+    def test_auto_restore_resets_on_new_router(self, mock_save, mock_router):
+        """check_and_auto_restore resets to empty store when no backup exists."""
+        mock_router.read_file.return_value = ""
 
-        wrapped = {
-            "_meta": {
-                "version": BACKUP_FORMAT_VERSION,
-                "saved_at": datetime.now(timezone.utc).isoformat(),
-                "router_fingerprint": "different:fingerprint",
-            },
-            "data": {"profiles": [{"id": "should-not-restore"}]},
-        }
-        mock_router.read_file.return_value = json.dumps(wrapped)
+        check_and_auto_restore(mock_router)
+
+        mock_save.assert_called_once()
+        saved_data = mock_save.call_args[0][0]
+        assert saved_data["profiles"] == []
+        assert saved_data["device_assignments"] == {}
+
+    @patch("services.backup_service.ps.save")
+    def test_auto_restore_leaves_local_on_unparseable(self, mock_save, mock_router):
+        """check_and_auto_restore leaves local alone if backup is corrupt."""
+        mock_router.read_file.return_value = "not valid json{{"
 
         check_and_auto_restore(mock_router)
 
         mock_save.assert_not_called()
 
     @patch("services.backup_service.ps.save")
-    def test_auto_restore_noop_when_no_backup(self, mock_save, mock_router):
-        """check_and_auto_restore is a no-op when router has no backup file."""
-        mock_router.read_file.return_value = ""
+    def test_auto_restore_leaves_local_on_ssh_failure(self, mock_save, mock_router):
+        """check_and_auto_restore leaves local alone if SSH read fails."""
+        mock_router.read_file.side_effect = Exception("SSH connection refused")
 
         check_and_auto_restore(mock_router)
 

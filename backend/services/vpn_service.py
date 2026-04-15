@@ -43,7 +43,6 @@ from services.backup_service import (  # noqa: E402, F401
     backup_local_state_to_router,
     check_and_auto_restore,
     ROUTER_BACKUP_PATH,
-    BACKUP_FORMAT_VERSION,
 )
 
 # Backward-compatible aliases for imports from other modules / tests.
@@ -238,9 +237,28 @@ class VPNService:
                 elif ptype == PROFILE_TYPE_NO_VPN:
                     adblock_ifaces.add("main")
 
+            # If profiles want adblock but the blocklist is missing on the
+            # router (e.g. after a router replacement), re-download it from
+            # the configured sources before syncing.
+            if adblock_ifaces and not self.router.adblock._blocklist_has_content():
+                self._redownload_blocklist()
+
             self.router.adblock.sync_adblock(adblock_ifaces)
         except Exception as e:
             log.warning(f"Adblock sync failed: {e}")
+
+    def _redownload_blocklist(self):
+        """Re-download and upload the blocklist from configured sources."""
+        from services.adblock_service import download_and_merge_blocklists
+        try:
+            content, count, failed = download_and_merge_blocklists()
+            if content:
+                self.router.adblock.upload_blocklist(content)
+                log.info(f"Adblock: re-downloaded blocklist ({count} domains)")
+            if failed:
+                log.warning(f"Adblock: some sources failed: {failed}")
+        except Exception as e:
+            log.warning(f"Adblock: blocklist re-download failed: {e}")
 
     # ── Device operations (delegate to DeviceService) ───────────────────────
 

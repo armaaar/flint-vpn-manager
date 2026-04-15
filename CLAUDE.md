@@ -51,9 +51,10 @@ cd frontend && npx playwright test --ui                 # E2E with interactive U
 
 ## Source-of-Truth Rules
 
-**Every piece of state lives at exactly one source.** Read [docs/source-of-truth.md](docs/source-of-truth.md) for full details.
+**Every piece of state lives at exactly one source. The router is always the source of truth.** Read [docs/source-of-truth.md](docs/source-of-truth.md) for full details.
 
 - **Router-canonical**: tunnel health, kill switch, profile name, device→VPN assignments (kernel WG + OpenVPN), device info — always read live, never cached locally
+- **Router backup is source of truth for profile_store.json**: On every unlock, the app pulls `profile_store.bak.json` from the router and overwrites local. No timestamp comparison. New router (no backup) = clean slate (empty store). Swapping back to old router restores its backup.
 - **Proton-canonical**: server name/country/city/load/score — refreshed every ~15min (loads) / ~3h (full list)
 - **Local+Router** (`profile_store.json` + ipset): proton-wg device assignments — persisted locally in `device_assignments` for recovery after ipset flush, and applied to router ipsets. Local store is source of truth; router ipsets are derived.
 - **Local-only** (`profile_store.json`): color, icon, server_scope, options, wg_key, cert_expiry, non-VPN assignments

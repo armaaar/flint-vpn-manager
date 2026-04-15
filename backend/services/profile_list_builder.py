@@ -191,18 +191,28 @@ def build_profile_list(router, proton, healer, store_data=None):
 
     # proton-wg profiles (wireguard-tcp / wireguard-tls): managed outside
     # vpn-client, so they don't appear in router route_policy rules.
-    # Handle them separately from the ghost detection.
+    # Only treat as "matched" (non-ghost) if the tunnel .conf exists on
+    # the router — otherwise let it fall through to ghost detection.
+    try:
+        pwg_confs = router.proton_wg.list_tunnel_confs()
+    except Exception:
+        pwg_confs = set()
+
     for key, local in local_vpn_by_key.items():
         ri = local.get("router_info", {})
         proto = ri.get("vpn_protocol", "")
         if not proto.startswith("wireguard-"):
             continue  # Not a proton-wg profile
-        matched_local_keys.add(key)  # Don't treat as ghost
+
+        iface = ri.get("tunnel_name", "")
+        if not iface or iface not in pwg_confs:
+            continue  # .conf missing on router — will be flagged as ghost
+
+        matched_local_keys.add(key)
 
         p = dict(local)
-        iface = ri.get("tunnel_name", "")
         try:
-            p["health"] = router.proton_wg.get_proton_wg_health(iface) if iface else HEALTH_RED
+            p["health"] = router.proton_wg.get_proton_wg_health(iface)
         except Exception:
             p["health"] = HEALTH_RED
         p["kill_switch"] = True  # Always on for proton-wg (blackhole route)

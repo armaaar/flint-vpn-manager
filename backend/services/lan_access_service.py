@@ -328,14 +328,92 @@ class LanAccessService:
     # ── Boot Recovery ─────────────────────────────────────────────────
 
     def reapply_all(self) -> None:
-        """Re-apply exceptions and mDNS reflection to router. Called on unlock."""
+        """Re-apply exceptions and mDNS reflection to router. Called on unlock.
+
+        Prunes stale exceptions whose IPs no longer belong to any current
+        network subnet (e.g. after a router replacement) and stale forwarding
+        rules whose zone names no longer exist.
+        """
         config = sm.get_config()
-        exceptions = config.get("lan_access", {}).get("exceptions", [])
+        la = config.get("lan_access", {})
+        exceptions = la.get("exceptions", [])
+        rules = la.get("rules", [])
+
+        # Prune stale exceptions / rules if there are any
+        if exceptions or rules:
+            try:
+                networks = self.router.lan_access.get_networks()
+            except Exception:
+                networks = []
+            changed = self._prune_stale_lan_config(la, networks)
+            if changed:
+                sm.update_config(lan_access=la)
+            exceptions = la.get("exceptions", [])
+
         if exceptions:
             self._apply_exceptions(exceptions)
             log.info(f"LAN access: reapplied {len(exceptions)} exception(s)")
 
         self._sync_mdns()
+
+    @staticmethod
+    def _prune_stale_lan_config(la: dict, networks: list[dict]) -> bool:
+        """Remove exceptions with IPs outside current subnets and rules
+        referencing zones that don't exist.  Mutates *la* in-place.
+        Returns True if anything was removed.
+        """
+        changed = False
+
+        # Collect current subnets
+        subnets = []
+        current_zones = set()
+        for net in networks:
+            current_zones.add(net.get("zone", ""))
+            subnet_str = net.get("subnet", "")
+            if subnet_str:
+                try:
+                    subnets.append(ipaddress.IPv4Network(subnet_str, strict=False))
+                except ValueError:
+                    pass
+
+        # Prune exceptions whose IPs don't belong to any current subnet
+        if subnets:
+            original = la.get("exceptions", [])
+            valid = []
+            for exc in original:
+                from_ip = exc.get("from_ip", "")
+                to_ip = exc.get("to_ip", "")
+                try:
+                    from_ok = any(ipaddress.IPv4Address(from_ip) in s for s in subnets)
+                    to_ok = any(ipaddress.IPv4Address(to_ip) in s for s in subnets)
+                except ValueError:
+                    from_ok = to_ok = False
+                if from_ok and to_ok:
+                    valid.append(exc)
+                else:
+                    log.info(f"LAN access: pruned stale exception {exc.get('id', '?')} "
+                             f"({from_ip} -> {to_ip})")
+                    changed = True
+            if changed:
+                la["exceptions"] = valid
+
+        # Prune forwarding rules referencing zones that don't exist
+        if current_zones:
+            original_rules = la.get("rules", [])
+            valid_rules = []
+            for rule in original_rules:
+                src_zone = rule.get("src", "")
+                dest_zone = rule.get("dest", "")
+                if src_zone in current_zones and dest_zone in current_zones:
+                    valid_rules.append(rule)
+                else:
+                    log.info(f"LAN access: pruned stale rule {src_zone} -> {dest_zone}")
+                    changed = True
+            if changed or len(valid_rules) != len(original_rules):
+                la["rules"] = valid_rules
+                changed = True
+
+        return changed
 
     # ── Internal ──────────────────────────────────────────────────────
 

@@ -104,4 +104,17 @@ Every 10 seconds pushes: `tunnel_health`, `kill_switch`, `profile_names`, `serve
 Reads live `build_profile_list`, calls `find_better_server` for connected profiles. Also refreshes server scores (~15min loads, ~3h full list).
 
 ### Backup / restore
-Router stores backup at `/etc/fvpn/profile_store.bak.json`. Auto-restores on unlock if backup is newer. `python cli.py reset-local-state` wipes both.
+The router backup at `/etc/fvpn/profile_store.bak.json` is the **source of truth** for the profile store. On every unlock, `check_and_auto_restore()` overwrites the local `profile_store.json` from the router backup — no timestamp comparison, no fingerprint gating. Rules:
+
+- **Backup exists + valid JSON** → always restore (router wins)
+- **No backup on router** → reset local store to empty (new router = clean slate)
+- **Backup unparseable** → leave local alone (transient error)
+- **SSH read failure** → leave local alone
+
+During normal operation, every `ps.save()` pushes the updated store back to the router via a registered callback. This ensures the router backup stays current.
+
+**Router replacement**: Swapping to a new router (no backup) gives a clean slate — zero profiles, zero device assignments. Swapping back to the old router restores its backup seamlessly.
+
+**Ghost profiles**: Only appear mid-session when a router rule is deleted while the app is running (never on startup). Ghosts show `_ghost: true`, `health: red`, with UI guidance to change server (recreate tunnel) or delete.
+
+`python cli.py reset-local-state` wipes both local and router copies.

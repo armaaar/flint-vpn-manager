@@ -33,6 +33,28 @@ class RouterProtonWG:
         self._alloc_tunnel_id = alloc_tunnel_id
         self._ssh = ssh  # raw exec for wg, pidof, kill, cat, ip link show, etc.; write_file for configs
 
+    def list_tunnel_confs(self) -> set[str]:
+        """Return the set of proton-wg interface names that have a .conf on the router.
+
+        A missing .conf means the tunnel was never provisioned (or the router
+        was replaced).  Used by profile_list_builder to decide ghost status.
+        Single SSH call.
+        """
+        raw = self._ssh.exec(
+            f"ls {PROTON_WG_DIR}/*.conf 2>/dev/null || true"
+        ).strip()
+        if not raw:
+            return set()
+        # "/etc/fvpn/protonwg/protonwg0.conf" -> "protonwg0"
+        result = set()
+        for line in raw.splitlines():
+            line = line.strip()
+            if line:
+                fname = line.rsplit("/", 1)[-1]
+                if fname.endswith(".conf"):
+                    result.add(fname[:-5])
+        return result
+
     def _next_proton_wg_slot(self) -> tuple[str, str, int]:
         """Find the next available proton-wg slot (4 max)."""
         existing_ifaces = self._ssh.exec(

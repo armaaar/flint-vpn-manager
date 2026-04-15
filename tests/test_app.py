@@ -12,6 +12,7 @@ import persistence.profile_store as ps
 import persistence.secrets_manager as sm
 from services.vpn_service import (
     check_and_auto_restore, ROUTER_BACKUP_PATH,
+    backup_local_state_to_router,
 )
 
 
@@ -1165,17 +1166,22 @@ class TestBackupAndRestore:
 
     def test_backup_callback_pushes_to_router_after_save(self, unlocked_client):
         c, app_mod = unlocked_client
-        # Configure mocks: router fingerprint is a string (not MagicMock) so
-        # the backup wrapper can JSON-serialize it.
-        app_mod._reg.router.get_router_fingerprint.return_value = "aa:bb:cc:11:22:33"
-        app_mod._reg.router.write_file.reset_mock()
+        router = app_mod._reg.router
+        # Configure mocks so backup_local_state_to_router can serialize
+        router.get_router_fingerprint.return_value = "aa:bb:cc:11:22:33"
+        router.exec.return_value = ""
+        router.write_file.reset_mock()
+        # Register the save callback (normally done by /api/unlock)
+        ps.register_save_callback(
+            lambda path: backup_local_state_to_router(router, path)
+        )
         # Backup wrapper writes via router.write_file
         ps.save({**ps._EMPTY_STORE, "profiles": [
             {"id": "p1", "type": "no_vpn", "name": "Test",
              "color": "#000", "icon": "🔒", "is_guest": False},
         ]})
         # write_file should have been called with the backup path
-        write_calls = app_mod._reg.router.write_file.call_args_list
+        write_calls = router.write_file.call_args_list
         assert any(
             call.args[0] == ROUTER_BACKUP_PATH for call in write_calls
         )
@@ -1185,7 +1191,6 @@ class TestBackupAndRestore:
             if call.args[0] == ROUTER_BACKUP_PATH
         )
         wrapped = json.loads(last_call.args[1])
-        assert wrapped["_meta"]["version"] == 1
         assert "saved_at" in wrapped["_meta"]
         assert wrapped["data"]["profiles"][0]["id"] == "p1"
 
@@ -1230,32 +1235,32 @@ class TestBackupAndRestore:
         loaded = ps.load()
         assert any(p["id"] == "restored-id" for p in loaded["profiles"])
 
-    def test_auto_restore_skipped_on_fingerprint_mismatch(self, unlocked_client):
+    def test_auto_restore_always_restores_regardless_of_fingerprint(self, unlocked_client):
+        """Router always wins — fingerprint is logged for debugging only."""
         c, app_mod = unlocked_client
         if ps.STORE_FILE.exists():
             ps.STORE_FILE.unlink()
         from datetime import datetime, timezone
         backup = {
             "_meta": {
-                "version": 1,
                 "saved_at": datetime.now(timezone.utc).isoformat(),
                 "router_fingerprint": "aa:bb:cc:11:22:33",
             },
-            "data": {"profiles": [{"id": "wrong-router", "type": "no_vpn",
+            "data": {"profiles": [{"id": "restored-anyway", "type": "no_vpn",
                                    "name": "X", "color": "#000", "icon": "🔒",
                                    "is_guest": False}],
                      "device_assignments": {}, "device_lan_overrides": {}},
         }
         app_mod._reg.router.read_file.return_value = json.dumps(backup)
-        # Different fingerprint
         app_mod._reg.router.get_router_fingerprint.return_value = "ff:ee:dd:cc:bb:aa"
 
         check_and_auto_restore(app_mod._reg.router)
 
-        # Local store should still be missing (no restore)
-        assert not ps.STORE_FILE.exists()
+        loaded = ps.load()
+        assert any(p["id"] == "restored-anyway" for p in loaded["profiles"])
 
-    def test_auto_restore_self_heal_when_local_newer(self, unlocked_client):
+    def test_auto_restore_router_wins_over_local(self, unlocked_client):
+        """Router backup always overwrites local, even if local is newer."""
         c, app_mod = unlocked_client
         # Local store with current mtime
         ps.save({
@@ -1264,42 +1269,43 @@ class TestBackupAndRestore:
                           "name": "X", "color": "#000", "icon": "🔒",
                           "is_guest": False}],
         })
-        # Backup timestamp from 1 hour ago (older than local)
+        # Backup is "older" but should still win (router is source of truth)
         from datetime import datetime, timezone, timedelta
         backup = {
             "_meta": {
-                "version": 1,
                 "saved_at": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
                 "router_fingerprint": "aa:bb:cc:11:22:33",
             },
-            "data": {"profiles": [{"id": "old-backup", "type": "no_vpn",
-                                   "name": "Old", "color": "#000", "icon": "🔒",
+            "data": {"profiles": [{"id": "router-backup", "type": "no_vpn",
+                                   "name": "Router", "color": "#000", "icon": "🔒",
                                    "is_guest": False}],
                      "device_assignments": {}, "device_lan_overrides": {}},
         }
         app_mod._reg.router.read_file.return_value = json.dumps(backup)
         app_mod._reg.router.get_router_fingerprint.return_value = "aa:bb:cc:11:22:33"
-        app_mod._reg.router.write_file.reset_mock()
 
         check_and_auto_restore(app_mod._reg.router)
 
-        # Local should still be the local-newer version
+        # Router backup should have overwritten local
         loaded = ps.load()
-        assert any(p["id"] == "local-newer" for p in loaded["profiles"])
-        # Self-heal should have called write_file with backup path
-        write_calls = app_mod._reg.router.write_file.call_args_list
-        assert any(
-            call.args[0] == ROUTER_BACKUP_PATH for call in write_calls
-        )
+        assert any(p["id"] == "router-backup" for p in loaded["profiles"])
+        assert not any(p["id"] == "local-newer" for p in loaded["profiles"])
 
-    def test_auto_restore_no_op_when_no_backup(self, unlocked_client):
+    def test_auto_restore_resets_to_empty_when_no_backup(self, unlocked_client):
+        """New router (no backup) → reset to empty store (clean slate)."""
         c, app_mod = unlocked_client
-        if ps.STORE_FILE.exists():
-            ps.STORE_FILE.unlink()
-        app_mod._reg.router.read_file.return_value = None
-        # Should not raise, should not restore
+        # Pre-populate local store to verify it gets wiped
+        ps.save({**ps._EMPTY_STORE, "profiles": [
+            {"id": "old-profile", "type": "no_vpn", "name": "Old",
+             "color": "#000", "icon": "🔒", "is_guest": False},
+        ]})
+        app_mod._reg.router.read_file.return_value = ""
+
         check_and_auto_restore(app_mod._reg.router)
-        assert not ps.STORE_FILE.exists()
+
+        loaded = ps.load()
+        assert loaded["profiles"] == []
+        assert loaded["device_assignments"] == {}
 
 
 class TestProtonWgConnectDisconnect:
