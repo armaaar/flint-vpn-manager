@@ -66,22 +66,29 @@ def build_ip_to_network_map(router, leases=None) -> dict:
                 subnets.append((ipaddress.IPv4Network(subnet_str, strict=False), label, zone_id))
             except ValueError:
                 pass
+    def _map_ip(ip_str, result):
+        try:
+            ip = ipaddress.IPv4Address(ip_str)
+            for net, label, zone_id in subnets:
+                if ip in net:
+                    result[ip_str] = {"label": label, "zone": zone_id}
+                    break
+        except ValueError:
+            pass
+
     result = {}
     try:
         if leases is None:
             leases = router.devices.get_dhcp_leases()
         for lease in leases:
             ip_str = lease.get("ip", "")
-            if not ip_str:
-                continue
-            try:
-                ip = ipaddress.IPv4Address(ip_str)
-                for net, label, zone_id in subnets:
-                    if ip in net:
-                        result[ip_str] = {"label": label, "zone": zone_id}
-                        break
-            except ValueError:
-                continue
+            if ip_str:
+                _map_ip(ip_str, result)
+        # Also map IPs from ARP table (devices with static IPs / expired leases)
+        for entry in router.devices.get_arp_entries():
+            ip_str = entry.get("ip", "")
+            if ip_str and ip_str not in result:
+                _map_ip(ip_str, result)
     except Exception:
         pass
     return result

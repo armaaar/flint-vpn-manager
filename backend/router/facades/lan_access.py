@@ -487,6 +487,12 @@ class RouterLanAccess:
                 "name": f"Allow-DNS-{zn}", "src": zn,
                 "proto": "tcpudp", "dest_port": "53", "target": "ACCEPT",
             }),
+            # mDNS allow (for avahi cross-network discovery reflection)
+            (f"firewall.{zn}_mdns", {
+                "_type": "rule",
+                "name": f"Allow-mDNS-{zn}", "src": zn,
+                "proto": "udp", "dest_port": "5353", "target": "ACCEPT",
+            }),
             # WAN forwarding
             (f"firewall.{zn}_wan", {
                 "_type": "forwarding",

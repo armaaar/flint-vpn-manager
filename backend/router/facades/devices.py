@@ -83,6 +83,41 @@ class RouterDevices:
             pass
         return result
 
+    def get_arp_entries(self) -> list[dict]:
+        """Parse the IPv4 ARP/neighbor table.
+
+        Returns list of dicts with: mac, ip, dev, reachable.
+        Only includes entries on LAN-side bridges (br-*).
+        """
+        raw = self._iproute.neigh_show()
+        entries = []
+        for line in raw.strip().splitlines():
+            parts = line.split()
+            if "lladdr" not in parts or "dev" not in parts or len(parts) < 6:
+                continue
+            try:
+                dev = parts[parts.index("dev") + 1]
+            except (ValueError, IndexError):
+                continue
+            if not dev.startswith("br-"):
+                continue
+            ip = parts[0]
+            # Skip IPv6 addresses
+            if ":" in ip and ip.count(":") > 1:
+                continue
+            try:
+                mac = parts[parts.index("lladdr") + 1].lower()
+                state = parts[parts.index("lladdr") + 2] if parts.index("lladdr") + 2 < len(parts) else ""
+            except (ValueError, IndexError):
+                continue
+            entries.append({
+                "mac": mac,
+                "ip": ip,
+                "dev": dev,
+                "reachable": state in ("REACHABLE", "STALE", "DELAY", "PROBE"),
+            })
+        return entries
+
     def get_client_details(self) -> dict:
         """Get rich client data from GL.iNet's client tracking.
 
@@ -150,6 +185,10 @@ class RouterDevices:
                         continue
                     if mac not in result:
                         result[mac] = {}
+                    ip = parts[0]
+                    # Store IP from ARP for devices without a DHCP lease
+                    if ip and ":" not in ip and not result[mac].get("ip"):
+                        result[mac]["ip"] = ip
                     if state in ("REACHABLE", "STALE", "DELAY", "PROBE"):
                         result[mac]["online"] = True
                     if "iface" not in result[mac] and dev != "br-lan":

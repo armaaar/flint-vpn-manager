@@ -101,6 +101,8 @@ Controls cross-network communication on the router. Operates at the network/zone
 
 Networks are discovered from UCI `wireless`/`network`/`firewall` config. Each network maps to a fw3 zone (e.g. `lan`, `guest`) with its own bridge interface, subnet, and zero or more SSIDs (2.4G / 5G). Device counts are derived from DHCP leases matched against each subnet. The LAN Access page shows all non-WAN zones as collapsible cards.
 
+Devices per network are discovered from DHCP leases supplemented with ARP table entries (`ip neigh`), so devices with static IPs or expired leases still appear in the device list.
+
 ### Device isolation (AP isolation)
 
 Per-SSID toggle (`wireless.*.isolate`). When enabled, WiFi clients on the same SSID cannot see each other at L2 -- all traffic must go through the router. Applied to all SSIDs in a zone simultaneously. Toggling triggers `wifi reload` (clients may briefly reconnect).
@@ -119,6 +121,17 @@ When cross-network traffic is blocked at the zone level, individual devices can 
 - **Direction**: outbound only, inbound only, or both
 
 Exceptions are persisted in `config.json` under `lan_access.exceptions` and written to a firewall include script (`/etc/fvpn/lan_access_rules.sh`) so they survive router reboots. On unlock, `LanAccessService.reapply_all()` re-applies all saved exceptions to iptables.
+
+### mDNS reflection (cross-network device discovery)
+
+Devices on separate networks (e.g. a printer on ArmI, a phone on ArmM) can discover each other via mDNS (Bonjour/AirPrint) through the avahi reflector. Managed automatically — no user toggle needed.
+
+On app unlock and after network create/delete, `LanAccessService._sync_mdns()` ensures:
+1. **Avahi reflector** is enabled (`enable-reflector=yes` in `/etc/avahi/avahi-daemon.conf`)
+2. **`allow-interfaces`** is set to all active bridge interfaces (e.g. `br-lan,br-guest,br-fvpn_iot`). Without this restriction, avahi sees duplicate packets on both WiFi interfaces and their parent bridges, breaking reflection.
+3. **Firewall rules** allow mDNS (UDP 5353) INPUT for zones with `input=REJECT` (e.g. `guest`, `fvpn_*`). The `lan` zone already has `input=ACCEPT`.
+
+New networks created via the app include the mDNS firewall rule in the UCI batch. Discovery only enables finding the device — actual traffic still requires a forwarding rule or device exception.
 
 ### LAN Access page
 

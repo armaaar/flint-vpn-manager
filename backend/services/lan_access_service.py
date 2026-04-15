@@ -51,7 +51,11 @@ class LanAccessService:
         }
 
     def get_network_devices(self, zone_id: str) -> list:
-        """Get devices in a specific network by matching IPs to subnets."""
+        """Get devices in a specific network by matching IPs to subnets.
+
+        Combines DHCP leases with ARP table entries so that devices with
+        static IPs (no DHCP lease) still appear.
+        """
         networks = self.router.lan_access.get_networks()
         target = next((n for n in networks if n["id"] == zone_id), None)
         if not target or not target.get("subnet"):
@@ -65,6 +69,7 @@ class LanAccessService:
         leases = self.router.devices.get_dhcp_leases()
         details = self.router.devices.get_client_details()
 
+        seen_macs = set()
         devices = []
         for lease in leases:
             try:
@@ -74,6 +79,7 @@ class LanAccessService:
                 continue
 
             mac = lease["mac"].lower()
+            seen_macs.add(mac)
             client = details.get(mac, {})
             devices.append({
                 "mac": mac,
@@ -83,6 +89,30 @@ class LanAccessService:
                 "online": client.get("online", False),
                 "iface": client.get("iface", ""),
             })
+
+        # Supplement with ARP entries for devices without DHCP leases
+        # (e.g. static-IP printers, IoT devices)
+        arp_entries = self.router.devices.get_arp_entries()
+        for entry in arp_entries:
+            mac = entry["mac"].lower()
+            if mac in seen_macs:
+                continue
+            try:
+                if ipaddress.IPv4Address(entry["ip"]) not in subnet:
+                    continue
+            except ValueError:
+                continue
+            seen_macs.add(mac)
+            client = details.get(mac, {})
+            devices.append({
+                "mac": mac,
+                "ip": entry["ip"],
+                "hostname": "",
+                "display_name": client.get("alias") or client.get("name") or mac,
+                "online": entry.get("reachable", False),
+                "iface": client.get("iface", ""),
+            })
+
         return devices
 
     # ── Access Rules ──────────────────────────────────────────────────
@@ -135,6 +165,7 @@ class LanAccessService:
             n += 1
         subnet_ip = self._pick_subnet()
         self.router.lan_access.create_network(zone_id, name, password, subnet_ip, isolation)
+        self._sync_mdns()
         log.info(f"Created network '{name}' (zone=fvpn_{zone_id}, subnet={subnet_ip}/24)")
         return {"success": True, "zone_id": f"fvpn_{zone_id}"}
 
@@ -179,6 +210,7 @@ class LanAccessService:
         la["exceptions"] = [e for e in la.get("exceptions", [])
                             if zone_id not in e.get("label", "")]
         sm.update_config(lan_access=la)
+        self._sync_mdns()
         log.info(f"Deleted network '{zone_id}'")
         return {"success": True}
 
@@ -296,12 +328,14 @@ class LanAccessService:
     # ── Boot Recovery ─────────────────────────────────────────────────
 
     def reapply_all(self) -> None:
-        """Re-apply exceptions from config.json to router. Called on unlock."""
+        """Re-apply exceptions and mDNS reflection to router. Called on unlock."""
         config = sm.get_config()
         exceptions = config.get("lan_access", {}).get("exceptions", [])
         if exceptions:
             self._apply_exceptions(exceptions)
             log.info(f"LAN access: reapplied {len(exceptions)} exception(s)")
+
+        self._sync_mdns()
 
     # ── Internal ──────────────────────────────────────────────────────
 
@@ -311,3 +345,12 @@ class LanAccessService:
             self.router.lan_access.apply_device_exceptions(exceptions)
         except Exception as e:
             log.warning(f"Failed to apply LAN access exceptions: {e}")
+
+    def _sync_mdns(self) -> None:
+        """Ensure mDNS reflection is configured for all current networks."""
+        try:
+            networks = self.router.lan_access.get_networks()
+            self.router.firewall.setup_mdns_for_networks(networks)
+            log.info("mDNS reflection: synced")
+        except Exception as e:
+            log.warning(f"mDNS reflection sync failed: {e}")

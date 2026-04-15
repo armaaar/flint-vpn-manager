@@ -156,26 +156,98 @@ class RouterFirewall:
 
     # ── mDNS Reflection ──────────────────────────────────────────────────
 
-    def setup_mdns_reflection(self, interface_name: str):
-        """Enable mDNS/avahi reflection between a WG tunnel and LAN.
+    _AVAHI_CONF = "/etc/avahi/avahi-daemon.conf"
 
-        Needed for Chromecast/AirPlay discovery across tunnel boundaries.
+    def _has_avahi(self) -> bool:
+        """Check if avahi-daemon is installed on the router."""
+        return bool(self._ssh.exec(
+            "which avahi-daemon 2>/dev/null || echo ''"
+        ).strip())
+
+    def setup_mdns_for_networks(self, networks: list[dict]) -> None:
+        """Ensure mDNS reflection is fully configured for all networks.
+
+        Called on app unlock and after network create/delete.  Idempotent.
+
+        1. Enables the avahi reflector
+        2. Sets allow-interfaces to all active bridge interfaces
+        3. Adds UDP 5353 INPUT firewall rules for zones with input=REJECT
+        4. Reloads firewall + restarts avahi
         """
-        avahi_check = self._ssh.exec("which avahi-daemon 2>/dev/null || echo ''")
-        if not avahi_check:
+        if not self._has_avahi():
             return
 
-        l3_dev = self._ssh.exec(
-            f"ifstatus {interface_name} 2>/dev/null | "
-            "jsonfilter -e '@.l3_device' 2>/dev/null || echo ''"
-        ).strip()
+        bridges = [n["bridge"] for n in networks if n.get("bridge")]
+        self._ensure_avahi_reflector(bridges)
+        needs_reload = self._ensure_mdns_firewall_rules(networks)
+        if needs_reload:
+            self._service_ctl.reload("firewall")
 
-        if not l3_dev:
-            return
+    def _ensure_avahi_reflector(self, bridges: list[str]) -> None:
+        """Enable the avahi reflector and restrict to bridge interfaces.
 
-        avahi_conf = "/etc/avahi/avahi-daemon.conf"
+        Without allow-interfaces, avahi listens on both WiFi interfaces
+        (ra0, rax0) AND their parent bridges (br-lan), seeing duplicate
+        packets that break the reflector.
+        """
+        conf = self._AVAHI_CONF
+        ifaces = ",".join(bridges)
+
+        # Enable reflector (idempotent sed)
         self._ssh.exec(
-            f"grep -q 'enable-reflector=yes' {avahi_conf} 2>/dev/null || "
-            f"sed -i 's/enable-reflector=no/enable-reflector=yes/' {avahi_conf} 2>/dev/null"
+            f"sed -i 's/enable-reflector=no/enable-reflector=yes/' {conf} 2>/dev/null"
+        )
+        # Set allow-interfaces: remove old line (if any), insert after [server]
+        self._ssh.exec(
+            f"sed -i '/^allow-interfaces=/d' {conf} 2>/dev/null; "
+            f"sed -i '/^\\[server\\]/a allow-interfaces={ifaces}' {conf} 2>/dev/null"
         )
         self._service_ctl.restart("avahi-daemon", background=True)
+
+    def _ensure_mdns_firewall_rules(self, networks: list[dict]) -> bool:
+        """Add Allow-mDNS firewall rules for zones that reject INPUT.
+
+        Zones with input=ACCEPT (e.g. lan) already allow mDNS.
+        Returns True if any rules were created (caller should reload).
+        """
+        raw = self._ssh.exec("uci show firewall 2>/dev/null || echo ''")
+        from router.tools.uci import Uci
+        firewall = Uci.parse_show(raw, "firewall")
+
+        # Find zones that reject input
+        reject_zones = set()
+        for section, fields in firewall.items():
+            if fields.get("_type") != "zone":
+                continue
+            zname = fields.get("name", "")
+            if fields.get("input", "").upper() in ("REJECT", "DROP"):
+                reject_zones.add(zname)
+
+        # Find existing mDNS rules
+        existing_mdns = set()
+        for section, fields in firewall.items():
+            if fields.get("_type") != "rule":
+                continue
+            if fields.get("dest_port") == "5353" and fields.get("proto") == "udp":
+                existing_mdns.add(fields.get("src", ""))
+
+        created = False
+        for n in networks:
+            zone = n.get("zone", n.get("id", ""))
+            if zone not in reject_zones:
+                continue
+            if zone in existing_mdns:
+                continue
+            # Determine section name: fvpn_ zones use {zone}_mdns, others use {zone}_mdns
+            section_name = f"{zone}_mdns"
+            self._uci.set_type(f"firewall.{section_name}", "rule")
+            self._uci.set(f"firewall.{section_name}.name", f"Allow-mDNS-{zone}")
+            self._uci.set(f"firewall.{section_name}.src", zone)
+            self._uci.set(f"firewall.{section_name}.proto", "udp")
+            self._uci.set(f"firewall.{section_name}.dest_port", "5353")
+            self._uci.set(f"firewall.{section_name}.target", "ACCEPT")
+            created = True
+
+        if created:
+            self._uci.commit("firewall")
+        return created
