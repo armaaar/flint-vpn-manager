@@ -79,7 +79,7 @@ BYPASS_PRIORITY = 100
 BYPASS_CHAIN = "FVPN_BYPASS"
 BYPASS_IPSET_PREFIX = "fvpn_byp_"
 BYPASS_SCRIPT_PATH = "/etc/fvpn/vpn_bypass.sh"
-BYPASS_DNSMASQ_CONF = "/etc/dnsmasq.d/fvpn_bypass.conf"
+BYPASS_DNSMASQ_CONF = "/tmp/dnsmasq.d/fvpn_bypass.conf"
 
 # Riot Games AS6507 + AS62830 — all announced IPv4 prefixes (2026-04)
 _RIOT_CIDRS = [

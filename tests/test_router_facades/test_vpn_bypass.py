@@ -112,6 +112,28 @@ class TestApplyAll:
         # Block 1: port match (no ipset)
         assert "-p tcp -m multiport --dports 80" in cmd
 
+    def test_mixed_block_cidr_domain_port_all_anded(self, bypass, ssh):
+        """A block with CIDR + domain + port should AND all conditions."""
+        exc = _make_exception(rule_blocks=[
+            {"rules": [
+                {"type": "cidr", "value": "10.0.0.0/8"},
+                {"type": "domain", "value": "example.com"},
+                {"type": "port", "value": "443", "protocol": "tcp"},
+            ]},
+        ])
+        bypass.apply_all([exc], {})
+        cmd = _all_exec_calls(ssh)
+        # Ipset should be created (for CIDR + domain)
+        assert "ipset create fvpn_byp_test1234_b0 hash:net -exist" in cmd
+        assert "ipset add fvpn_byp_test1234_b0 10.0.0.0/8 -exist" in cmd
+        # Single iptables rule with both ipset AND port match
+        for line in cmd.split(";"):
+            if "fvpn_byp_test1234_b0 dst" in line and "multiport" in line:
+                assert "-p tcp -m multiport --dports 443" in line
+                break
+        else:
+            pytest.fail("Mixed block did not produce a single AND rule")
+
     def test_device_scope_adds_mac_match(self, bypass, ssh):
         exc = _make_exception(
             scope="device",
@@ -188,6 +210,18 @@ class TestDnsmasqConfig:
         assert len(write_calls) == 1
         conf = write_calls[0][0][1]
         assert "ipset=/riotgames.com/pvp.net/fvpn_byp_test1234_b0" in conf
+
+    def test_domain_only_block_creates_ipset(self, bypass, ssh):
+        """Domain-only blocks must pre-create the ipset for dnsmasq to populate."""
+        exc = _make_exception(rule_blocks=[
+            {"rules": [{"type": "domain", "value": "example.com"}]},
+        ])
+        bypass.apply_all([exc], {})
+        cmd = _all_exec_calls(ssh)
+        # Ipset must be created even though there are no CIDRs
+        assert "ipset create fvpn_byp_test1234_b0 hash:net -exist" in cmd
+        # And the iptables rule should reference it
+        assert "-m set --match-set fvpn_byp_test1234_b0 dst" in cmd
 
     def test_domains_in_different_blocks_get_different_ipsets(self, bypass, ssh):
         exc = _make_exception(rule_blocks=[

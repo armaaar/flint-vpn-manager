@@ -153,6 +153,9 @@ class RouterVpnBypass:
         cmds: list[str] = []
 
         # 1. Create and populate per-block ipsets
+        #    Ipsets must be pre-created for BOTH cidr and domain blocks:
+        #    - CIDRs are added statically here
+        #    - Domains are populated by dnsmasq at DNS resolution time
         for exc in enabled:
             for bi, block in enumerate(exc.get("rule_blocks", [])):
                 cidrs = [
@@ -160,7 +163,10 @@ class RouterVpnBypass:
                     if r.get("type") == "cidr"
                     and _SAFE_CIDR_RE.match(r.get("value", ""))
                 ]
-                if cidrs:
+                has_domains = any(
+                    r.get("type") == "domain" for r in block.get("rules", [])
+                )
+                if cidrs or has_domains:
                     ipset_name = self._block_ipset_name(exc["id"], bi)
                     cmds.append(f"ipset create {ipset_name} hash:net -exist")
                     cmds.append(f"ipset flush {ipset_name}")
