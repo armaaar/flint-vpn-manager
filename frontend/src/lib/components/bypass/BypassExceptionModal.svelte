@@ -54,6 +54,19 @@
   }
 
   $: vpnProfiles = profiles.filter(p => p.type === 'vpn');
+
+  const CIDR_RE = /^[0-9a-fA-F.:]+(\/(3[0-2]|[12]?\d))?$/;
+  const DOMAIN_RE = /^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*$/;
+  const PORT_RE = /^[0-9]+(:[0-9]+)?(,[0-9]+(:[0-9]+)?)*$/;
+
+  function isValidRule(rule: BypassRule): boolean {
+    const v = rule.value.trim();
+    if (!v) return true; // empty is handled by save filter
+    if (rule.type === 'cidr') return CIDR_RE.test(v);
+    if (rule.type === 'domain') return DOMAIN_RE.test(v);
+    if (rule.type === 'port') return PORT_RE.test(v);
+    return false;
+  }
 </script>
 
 <!-- svelte-ignore a11y-click-events-have-key-events -->
@@ -131,16 +144,20 @@
 
         <div class="form-group">
           <label>Rules</label>
+          <p class="rules-hint">Domain rules match all subdomains (e.g. "riotgames.com" also matches "auth.riotgames.com")</p>
           <div class="rules-editor">
             {#each rules as rule, i}
-              <div class="rule-edit-row">
+              {@const invalid = rule.value.trim() && !isValidRule(rule)}
+              <div class="rule-edit-row" class:rule-invalid={invalid}>
                 <select bind:value={rule.type} class="rule-type-sel">
                   <option value="cidr">IP / CIDR</option>
                   <option value="domain">Domain</option>
                   <option value="port">Port</option>
                 </select>
                 <input type="text" bind:value={rule.value} class="rule-value-input"
-                  placeholder={rule.type === 'cidr' ? '10.0.0.0/8' : rule.type === 'domain' ? 'example.com' : '5000:5500'} />
+                  class:input-error={invalid}
+                  placeholder={rule.type === 'cidr' ? '10.0.0.0/8' : rule.type === 'domain' ? 'example.com' : '5000:5500'}
+                  title={rule.type === 'domain' ? 'Matches domain and all subdomains' : rule.type === 'cidr' ? 'IP address or CIDR range' : 'Port or port range (e.g. 5000:5500)'} />
                 {#if rule.type === 'port'}
                   <select bind:value={rule.protocol} class="rule-proto-sel">
                     <option value="tcp">TCP</option>
@@ -175,7 +192,7 @@
   }
   .modal {
     background: var(--bg2); border: 1px solid var(--border); border-radius: 12px;
-    width: 560px; max-width: 95vw; max-height: 85vh; overflow-y: auto;
+    width: 680px; max-width: 95vw; max-height: 85vh; overflow-y: auto;
     box-shadow: 0 10px 40px rgba(0,0,0,0.4);
   }
   .modal-header {
@@ -215,11 +232,15 @@
   .radio-label input[type="radio"] { accent-color: var(--accent); }
 
   .rules-editor { display: flex; flex-direction: column; gap: 8px; }
-  .rule-edit-row { display: flex; gap: 6px; align-items: center; }
-  .rule-type-sel { width: 110px; padding: 6px 8px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; color: var(--fg); font-size: 0.88rem; }
-  .rule-value-input { flex: 1; padding: 6px 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; color: var(--fg); font-family: var(--font-mono); font-size: 0.88rem; }
+  .rule-edit-row { display: grid; grid-template-columns: 110px 1fr auto auto; gap: 6px; align-items: center; }
+  .rule-type-sel { padding: 6px 8px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; color: var(--fg); font-size: 0.88rem; }
+  .rule-value-input { width: 100%; padding: 6px 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; color: var(--fg); font-family: var(--font-mono); font-size: 0.88rem; box-sizing: border-box; }
   .rule-proto-sel { width: 70px; padding: 6px 8px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; color: var(--fg); font-size: 0.88rem; }
   .rule-value-input:focus, .rule-type-sel:focus, .rule-proto-sel:focus { outline: none; border-color: var(--accent); }
+
+  .rules-hint { color: var(--fg3); font-size: 0.8rem; margin-bottom: 8px; margin-top: 0; }
+  .input-error { border-color: var(--red) !important; }
+  .rule-invalid { opacity: 0.9; }
 
   .btn-add-rule {
     background: none; border: 1px dashed var(--border); border-radius: 6px;
