@@ -542,6 +542,8 @@ class TestProtonAPIIntegration:
         api = ProtonAPI()
         if not api.is_logged_in:
             pytest.skip("No active ProtonVPN session found")
+        if api.server_list is None:
+            pytest.skip("Server list not available (cache may be corrupted)")
         return api
 
     def test_is_logged_in(self, live_api):

@@ -306,8 +306,10 @@ class TestCreateProfile:
                 vpn_protocol=PROTO_WIREGUARD, server_id="server-1",
             )
 
-    def test_create_vpn_no_server_id(self, service):
+    @patch("vpn.protocol_limits.ps.get_profiles")
+    def test_create_vpn_no_server_id(self, mock_get_profiles, service):
         """VPN profile without server_id -> ValueError."""
+        mock_get_profiles.return_value = []
         with pytest.raises(ValueError, match="server_id required"):
             service.create_profile(
                 name="NoServer", profile_type=PROFILE_TYPE_VPN,
