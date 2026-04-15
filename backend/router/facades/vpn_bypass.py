@@ -104,9 +104,12 @@ class RouterVpnBypass:
 
         # Write dnsmasq config for domain rules.
         # ipset= directives require a full dnsmasq restart (HUP is not enough).
+        # Run in background to avoid blocking unlock (~12-15s on Flint 2).
         has_domains = self._write_dnsmasq_config(enabled)
         if has_domains:
-            self._ssh.exec("/etc/init.d/dnsmasq restart 2>/dev/null; true")
+            self._ssh.exec(
+                "/etc/init.d/dnsmasq restart >/dev/null 2>&1 &"
+            )
 
     def cleanup(self) -> None:
         """Remove all bypass artifacts from the router."""
@@ -121,7 +124,7 @@ class RouterVpnBypass:
         self._iproute.route_flush_table(BYPASS_TABLE)
 
         self._ssh.exec(f"rm -f {BYPASS_DNSMASQ_CONF}")
-        self._ssh.exec("/etc/init.d/dnsmasq restart 2>/dev/null; true")
+        self._ssh.exec("/etc/init.d/dnsmasq restart >/dev/null 2>&1 &")
 
         self._ssh.exec(f"rm -f {BYPASS_SCRIPT_PATH}")
         self._uci.delete(f"firewall.fvpn_vpn_bypass")
