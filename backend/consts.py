@@ -134,6 +134,12 @@ VPN_BYPASS_PRESETS: dict[str, dict] = {
                     {"type": "domain", "value": "rdatasrv.net"},
                 ],
             },
+            {
+                "label": "Chat + voice ports (Cloudflare-proxied)",
+                "rules": [
+                    {"type": "port", "value": "5222:5223", "protocol": "tcp"},
+                ],
+            },
         ],
     },
     "valorant": {
