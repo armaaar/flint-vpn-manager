@@ -614,8 +614,8 @@
   .lan-page { max-width: 800px; margin: 0 auto; padding: 20px; }
   .page-header { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; }
   .page-header h2 { margin: 0; font-size: 1.3rem; }
-  .btn-back { background: none; border: none; color: var(--accent); cursor: pointer; font-size: .9rem; padding: 4px 8px; }
-  .btn-back:hover { text-decoration: underline; }
+  .btn-back { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 1rem; padding: 4px 8px; border-radius: 6px; }
+  .btn-back:hover { background: var(--accent-bg); }
   .loading { text-align: center; padding: 40px; color: var(--fg3); }
 
   .network-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 12px; overflow: hidden; }

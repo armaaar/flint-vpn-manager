@@ -58,8 +58,8 @@
   .settings-page { max-width: 800px; margin: 0 auto; padding: 20px; }
   .settings-header { display: flex; align-items: center; gap: 16px; margin-bottom: 24px; }
   .settings-header h2 { margin: 0; font-size: 1.3rem; color: var(--fg); }
-  .back-btn { background: none; border: 1px solid var(--border); color: var(--fg2); padding: 6px 14px; border-radius: var(--radius-sm); cursor: pointer; font-size: .85rem; transition: var(--transition); }
-  .back-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .back-btn { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 1rem; padding: 4px 8px; border-radius: 6px; }
+  .back-btn:hover { background: var(--accent-bg); }
 
   .tab-bar { display: flex; gap: 2px; border-bottom: 2px solid var(--border); margin-bottom: 24px; flex-wrap: wrap; }
   .tab { background: none; border: none; border-bottom: 2px solid transparent; margin-bottom: -2px; padding: 10px 16px; color: var(--fg3); font-size: .85rem; font-weight: 500; cursor: pointer; transition: var(--transition); white-space: nowrap; display: flex; align-items: center; gap: 6px; }

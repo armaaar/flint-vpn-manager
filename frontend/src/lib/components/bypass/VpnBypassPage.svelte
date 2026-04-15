@@ -15,6 +15,7 @@
   let deletingId: string | null = null;
   let installingDnsmasq = false;
   let expandedId: string | null = null;
+  let expandedPresetId: string | null = null;
 
   onMount(loadData);
 
@@ -92,7 +93,8 @@
 
   function scopeLabel(exc: BypassException): string {
     if (exc.scope === 'global') return 'Global';
-    const targets = exc.scope_target || [];
+    const raw = exc.scope_target;
+    const targets = Array.isArray(raw) ? raw : (raw ? [raw] : []);
     if (exc.scope === 'group') {
       const names = targets.map(t => $profiles.find(p => p.id === t)?.name || '?').join(', ');
       return targets.length > 1 ? `Groups: ${names}` : `Group: ${names}`;
@@ -210,14 +212,38 @@
     <div class="section-header" style="margin-top: 32px;">
       <h3>Presets</h3>
     </div>
-    <div class="preset-grid">
+    <div class="preset-list">
       {#each Object.entries(overview.presets) as [id, preset]}
-        <div class="preset-card">
-          <div class="preset-name">{preset.name}</div>
-          <div class="preset-meta">{(preset.rule_blocks || []).reduce((n, b) => n + (b.rules?.length || 0), 0)} rules in {(preset.rule_blocks || []).length} blocks {preset.builtin ? '' : '(custom)'}</div>
+        <div class="preset-card" class:preset-expanded={expandedPresetId === id}>
+          <div class="preset-header" on:click={() => expandedPresetId = expandedPresetId === id ? null : id}>
+            <div>
+              <div class="preset-name">{preset.name}</div>
+              <div class="preset-meta">{(preset.rule_blocks || []).reduce((n, b) => n + (b.rules?.length || 0), 0)} rules in {(preset.rule_blocks || []).length} blocks {preset.builtin ? '' : '(custom)'}</div>
+            </div>
+            <span class="expand-icon">{expandedPresetId === id ? '▾' : '▸'}</span>
+          </div>
+          {#if expandedPresetId === id}
+            <div class="preset-details">
+              {#each (preset.rule_blocks || []) as block, bi}
+                {#if bi > 0}<div class="block-divider"><span>OR</span></div>{/if}
+                <div class="rule-block">
+                  {#if block.label}<div class="block-label">{block.label}</div>{/if}
+                  {#each block.rules as rule}
+                    <div class="rule-row">
+                      <span class="rule-type">{rule.type.toUpperCase()}</span>
+                      <span class="rule-value">{rule.value}</span>
+                      {#if rule.protocol}
+                        <span class="rule-proto">{rule.protocol}</span>
+                      {/if}
+                    </div>
+                  {/each}
+                </div>
+              {/each}
+            </div>
+          {/if}
           {#if !preset.builtin}
             <button class="btn-icon btn-danger btn-xs" title="Delete preset"
-              on:click={async () => { await api.deleteCustomPreset(id); showToast('Preset deleted'); await loadData(); }}>✕</button>
+              on:click|stopPropagation={async () => { await api.deleteCustomPreset(id); showToast('Preset deleted'); await loadData(); }}>✕</button>
           {/if}
         </div>
       {/each}
@@ -237,7 +263,7 @@
 {/if}
 
 <style>
-  .bypass-page { padding: 24px 32px; max-width: 900px; }
+  .bypass-page { padding: 24px 32px; max-width: 900px; margin: 0 auto; }
   .page-header { display: flex; align-items: center; gap: 16px; margin-bottom: 8px; }
   .page-header h2 { font-size: 1.5rem; font-weight: 600; color: var(--fg); margin: 0; }
   .page-desc { color: var(--fg2); margin-bottom: 24px; font-size: 0.95rem; }
@@ -319,13 +345,15 @@
   .block-divider { text-align: center; padding: 4px 0; }
   .block-divider span { color: var(--amber); font-size: 0.75rem; font-weight: 700; background: var(--surface); padding: 2px 10px; border-radius: 4px; }
 
-  /* Presets grid */
-  .preset-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+  /* Presets */
+  .preset-list { display: flex; flex-direction: column; gap: 8px; }
   .preset-card {
     background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
-    padding: 12px 16px; display: flex; flex-direction: column; gap: 4px; position: relative;
+    padding: 12px 16px; position: relative;
   }
+  .preset-header { display: flex; justify-content: space-between; align-items: center; cursor: pointer; }
   .preset-name { font-weight: 600; color: var(--fg); font-size: 0.95rem; }
   .preset-meta { color: var(--fg3); font-size: 0.8rem; }
+  .preset-details { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
   .preset-card .btn-xs { position: absolute; top: 8px; right: 8px; font-size: 0.75rem; padding: 2px 4px; }
 </style>

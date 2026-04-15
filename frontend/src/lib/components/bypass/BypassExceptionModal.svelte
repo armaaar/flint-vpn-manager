@@ -13,7 +13,7 @@
   let step = exception ? 2 : 1;
   let name = exception?.name || '';
   let scope: string = exception?.scope || 'global';
-  let scopeTargets: string[] = exception?.scope_target || [];
+  let scopeTargets: string[] = Array.isArray(exception?.scope_target) ? exception.scope_target : (exception?.scope_target ? [exception.scope_target] : []);
   let ruleBlocks: BypassRuleBlock[] = exception?.rule_blocks
     ? exception.rule_blocks.map(b => ({ label: b.label || '', rules: b.rules.map(r => ({...r})) }))
     : [];

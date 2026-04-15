@@ -226,7 +226,7 @@
       <span class="opt-summary">
         {#if profile.kill_switch}<span class="opt-pill ks-on" title="Kill switch enabled">🛡 KS</span>{/if}
         {#if (profile.options?.netshield ?? 0) > 0}
-          <span class="opt-pill ns-on" class:ns-active={connState === 'connected'}
+          <span class="opt-pill ns-on"
                 title="NetShield {netshieldLabel}{connState === 'connected' ? ' — Active' : ''}">
             ⛨ NS{profile.options.netshield}
           </span>
@@ -379,7 +379,6 @@
   }
   .opt-pill.ks-on { background: rgba(46,204,113,.18); color: #2ecc71; }
   .opt-pill.ns-on { background: var(--accent-bg); color: var(--accent); }
-  .opt-pill.ns-active { background: rgba(46,204,113,.2); color: #2ecc71; font-weight: 600; }
   .opt-pill.sp-on { background: rgba(243,156,18,.18); color: #f39c12; }
   .opt-pill.ab-on { background: rgba(231,76,60,.18); color: #e74c3c; }
   .adblock-indicator { padding: 4px 12px 0; }
