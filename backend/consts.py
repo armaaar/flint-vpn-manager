@@ -81,26 +81,46 @@ BYPASS_IPSET_PREFIX = "fvpn_byp_"
 BYPASS_SCRIPT_PATH = "/etc/fvpn/vpn_bypass.sh"
 BYPASS_DNSMASQ_CONF = "/etc/dnsmasq.d/fvpn_bypass.conf"
 
+# Riot Games AS6507 + AS62830 — all announced IPv4 prefixes (2026-04)
+_RIOT_CIDRS = [
+    # NA
+    {"type": "cidr", "value": "104.160.128.0/19"},
+    {"type": "cidr", "value": "162.249.72.0/21"},
+    {"type": "cidr", "value": "192.64.168.0/21"},
+    {"type": "cidr", "value": "192.207.0.0/24"},
+    {"type": "cidr", "value": "192.91.144.0/24"},   # AS62830
+    # EU
+    {"type": "cidr", "value": "185.40.64.0/22"},
+    {"type": "cidr", "value": "151.106.246.0/24"},
+    {"type": "cidr", "value": "151.106.247.0/24"},
+    {"type": "cidr", "value": "151.106.248.0/24"},
+    {"type": "cidr", "value": "151.106.249.0/24"},
+    {"type": "cidr", "value": "151.106.250.0/23"},
+    {"type": "cidr", "value": "151.106.252.0/24"},
+    {"type": "cidr", "value": "151.106.253.0/24"},
+    {"type": "cidr", "value": "151.106.254.0/24"},
+    # LATAM
+    {"type": "cidr", "value": "45.7.36.0/22"},
+    {"type": "cidr", "value": "138.0.12.0/23"},
+    {"type": "cidr", "value": "138.0.14.0/24"},
+    {"type": "cidr", "value": "138.0.15.0/24"},
+    # APAC
+    {"type": "cidr", "value": "43.229.64.0/22"},
+    {"type": "cidr", "value": "45.250.208.0/22"},
+    {"type": "cidr", "value": "103.219.128.0/22"},
+    {"type": "cidr", "value": "103.240.224.0/22"},
+]
+
 VPN_BYPASS_PRESETS: dict[str, dict] = {
     "lol": {
         "name": "League of Legends",
         "rule_blocks": [
             {
-                "label": "Riot IP ranges",
-                "rules": [
-                    {"type": "cidr", "value": "104.160.128.0/17"},
-                    {"type": "cidr", "value": "162.249.72.0/21"},
-                    {"type": "cidr", "value": "185.40.64.0/22"},
-                    {"type": "cidr", "value": "192.64.168.0/21"},
-                    {"type": "cidr", "value": "43.229.64.0/22"},
-                    {"type": "cidr", "value": "45.7.36.0/22"},
-                    {"type": "cidr", "value": "45.250.208.0/22"},
-                    {"type": "cidr", "value": "103.219.128.0/22"},
-                    {"type": "cidr", "value": "103.240.224.0/22"},
-                ],
+                "label": "Riot IP ranges (AS6507 + AS62830)",
+                "rules": list(_RIOT_CIDRS),
             },
             {
-                "label": "Riot domains",
+                "label": "Riot + LoL domains",
                 "rules": [
                     {"type": "domain", "value": "riotgames.com"},
                     {"type": "domain", "value": "pvp.net"},
@@ -110,6 +130,8 @@ VPN_BYPASS_PRESETS: dict[str, dict] = {
                     {"type": "domain", "value": "vivox.com"},
                     {"type": "domain", "value": "lolstatic.com"},
                     {"type": "domain", "value": "rgpub.io"},
+                    {"type": "domain", "value": "lolesports.com"},
+                    {"type": "domain", "value": "rdatasrv.net"},
                 ],
             },
         ],
@@ -118,23 +140,20 @@ VPN_BYPASS_PRESETS: dict[str, dict] = {
         "name": "Valorant",
         "rule_blocks": [
             {
-                "label": "Riot IP ranges",
-                "rules": [
-                    {"type": "cidr", "value": "104.160.128.0/17"},
-                    {"type": "cidr", "value": "162.249.72.0/21"},
-                    {"type": "cidr", "value": "185.40.64.0/22"},
-                    {"type": "cidr", "value": "192.64.168.0/21"},
-                ],
+                "label": "Riot IP ranges (AS6507 + AS62830)",
+                "rules": list(_RIOT_CIDRS),
             },
             {
                 "label": "Riot + Valorant domains",
                 "rules": [
                     {"type": "domain", "value": "riotgames.com"},
+                    {"type": "domain", "value": "pvp.net"},
                     {"type": "domain", "value": "playvalorant.com"},
                     {"type": "domain", "value": "riotcdn.net"},
-                    {"type": "domain", "value": "pvp.net"},
+                    {"type": "domain", "value": "riotcdn.com"},
                     {"type": "domain", "value": "vivox.com"},
                     {"type": "domain", "value": "rgpub.io"},
+                    {"type": "domain", "value": "rdatasrv.net"},
                 ],
             },
         ],
