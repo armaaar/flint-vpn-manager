@@ -158,7 +158,8 @@
                 <label class="target-check">
                   <input type="checkbox" checked={scopeTargets.includes(p.id)}
                     on:change={() => toggleTarget(p.id)} />
-                  {p.icon} {p.name}
+                  <span class="target-icon">{p.icon}</span>
+                  <span class="target-name">{p.name}</span>
                 </label>
               {/each}
               {#if vpnProfiles.length === 0}
@@ -176,7 +177,8 @@
                 <label class="target-check">
                   <input type="checkbox" checked={scopeTargets.includes(d.mac)}
                     on:change={() => toggleTarget(d.mac)} />
-                  {d.display_name} <span class="target-mac">{d.mac}</span>
+                  <span class="target-name">{d.display_name}</span>
+                  <span class="target-mac">{d.mac}</span>
                 </label>
               {/each}
               {#if devices.length === 0}
@@ -287,16 +289,33 @@
   }
   .form-group input:focus, .form-group select:focus { outline: none; border-color: var(--accent); }
 
-  .scope-radios { display: flex; gap: 16px; flex-wrap: wrap; }
-  .radio-label { display: flex; align-items: center; gap: 6px; color: var(--fg); font-size: 0.9rem; cursor: pointer; }
-  .radio-label input[type="radio"] { accent-color: var(--accent); }
+  .scope-radios { display: flex; gap: 6px; }
+  .radio-label {
+    display: flex; align-items: center; justify-content: center; color: var(--fg); font-size: 0.88rem;
+    cursor: pointer; padding: 10px 18px; border-radius: 8px; text-align: center;
+    background: var(--surface); border: 1px solid var(--border); transition: border-color 0.15s, background 0.15s;
+    flex: 1;
+  }
+  .radio-label:hover { border-color: var(--accent); }
+  .radio-label:has(input:checked) { border-color: var(--accent); background: var(--accent-bg); color: var(--accent); font-weight: 600; }
+  .radio-label input[type="radio"] { display: none; }
 
-  .target-list { display: flex; flex-direction: column; gap: 4px; max-height: 180px; overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 8px; }
-  .target-check { display: flex; align-items: center; gap: 8px; color: var(--fg); font-size: 0.9rem; cursor: pointer; padding: 4px 6px; border-radius: 4px; }
+  .target-list {
+    max-height: 200px; overflow-y: auto; background: var(--surface);
+    border: 1px solid var(--border); border-radius: 8px; padding: 6px;
+  }
+  .target-check {
+    display: grid; grid-template-columns: 20px auto 1fr; gap: 8px; align-items: center;
+    color: var(--fg); font-size: 0.9rem; cursor: pointer;
+    padding: 7px 10px; border-radius: 6px; border: 1px solid transparent; margin-bottom: 2px;
+  }
   .target-check:hover { background: var(--bg3); }
-  .target-check input[type="checkbox"] { accent-color: var(--accent); }
-  .target-mac { color: var(--fg3); font-family: var(--font-mono); font-size: 0.8rem; }
-  .no-targets { color: var(--fg3); font-size: 0.85rem; padding: 8px; }
+  .target-check:has(input:checked) { background: var(--accent-bg); border-color: var(--accent); }
+  .target-check input[type="checkbox"] { accent-color: var(--accent); width: 16px; height: 16px; margin: 0; }
+  .target-icon { font-size: 1rem; line-height: 1; }
+  .target-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .target-mac { color: var(--fg3); font-family: var(--font-mono); font-size: 0.78rem; grid-column: 3; text-align: right; }
+  .no-targets { color: var(--fg3); font-size: 0.85rem; padding: 12px; text-align: center; }
 
   .rules-hint { color: var(--fg3); font-size: 0.8rem; margin-bottom: 12px; margin-top: 0; }
 
