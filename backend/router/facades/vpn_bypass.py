@@ -102,10 +102,11 @@ class RouterVpnBypass:
             "fvpn_vpn_bypass", BYPASS_SCRIPT_PATH,
         )
 
-        # Write dnsmasq config for domain rules
+        # Write dnsmasq config for domain rules.
+        # ipset= directives require a full dnsmasq restart (HUP is not enough).
         has_domains = self._write_dnsmasq_config(enabled)
         if has_domains:
-            self._ssh.exec("killall -HUP dnsmasq 2>/dev/null; true")
+            self._ssh.exec("/etc/init.d/dnsmasq restart 2>/dev/null; true")
 
     def cleanup(self) -> None:
         """Remove all bypass artifacts from the router."""
@@ -120,7 +121,7 @@ class RouterVpnBypass:
         self._iproute.route_flush_table(BYPASS_TABLE)
 
         self._ssh.exec(f"rm -f {BYPASS_DNSMASQ_CONF}")
-        self._ssh.exec("killall -HUP dnsmasq 2>/dev/null; true")
+        self._ssh.exec("/etc/init.d/dnsmasq restart 2>/dev/null; true")
 
         self._ssh.exec(f"rm -f {BYPASS_SCRIPT_PATH}")
         self._uci.delete(f"firewall.fvpn_vpn_bypass")
@@ -336,7 +337,7 @@ class RouterVpnBypass:
                 lines.append(f"ipset=/{domain_path}/{ipset_name}")
 
         if has_domains:
-            self._ssh.exec("mkdir -p /etc/dnsmasq.d")
+            self._ssh.exec("mkdir -p /tmp/dnsmasq.d")
             self._ssh.write_file(BYPASS_DNSMASQ_CONF, "\n".join(lines) + "\n")
         else:
             self._ssh.exec(f"rm -f {BYPASS_DNSMASQ_CONF}")

@@ -241,7 +241,7 @@ class TestDnsmasqConfig:
         ])
         bypass.apply_all([exc], {})
         exec_calls = " ".join(c[0][0] for c in ssh.exec.call_args_list)
-        assert "rm -f /etc/dnsmasq.d/fvpn_bypass.conf" in exec_calls
+        assert "rm -f /tmp/dnsmasq.d/fvpn_bypass.conf" in exec_calls
 
 
 class TestCleanup:
