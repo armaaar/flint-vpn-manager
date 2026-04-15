@@ -9,16 +9,19 @@
   import ServerPicker from '../lib/components/server/ServerPicker.svelte';
   import SettingsPage from '../lib/components/settings/SettingsPage.svelte';
   import LanAccessPage from '../lib/components/lan/LanAccessPage.svelte';
+  import VpnBypassPage from '../lib/components/bypass/VpnBypassPage.svelte';
   import LogsModal from '../lib/components/modals/LogsModal.svelte';
 
   let refreshing = false;
   let initialLoading = true;
+  /** @type {Array<{id: string, scope: string, scope_target: string|null, enabled: boolean}>} */
+  let bypassExceptions = [];
   let location = null;
   let locationLoading = false;
   let selectedDevice = null;
   let showCreate = false;
   let editProfile = null;
-  let dashboardView = 'dashboard'; // 'dashboard' | 'settings' | 'networks'
+  let dashboardView = 'dashboard'; // 'dashboard' | 'settings' | 'networks' | 'bypass'
   let settingsTab = '';  // passed to SettingsPage from hash
   let showLogs = false;
   let showServerPicker = false;
@@ -42,6 +45,9 @@
     } else if (hash === 'networks') {
       dashboardView = 'networks';
       settingsTab = '';
+    } else if (hash === 'bypass') {
+      dashboardView = 'bypass';
+      settingsTab = '';
     } else {
       dashboardView = 'dashboard';
       settingsTab = '';
@@ -53,6 +59,8 @@
       window.location.hash = tab ? `settings/${tab}` : 'settings';
     } else if (view === 'networks') {
       window.location.hash = 'networks';
+    } else if (view === 'bypass') {
+      window.location.hash = 'bypass';
     } else {
       window.location.hash = '';
     }
@@ -90,6 +98,20 @@
 
   async function reload() {
     await reloadData();
+    loadBypassExceptions();
+  }
+
+  async function loadBypassExceptions() {
+    try {
+      const data = await api.getBypassOverview();
+      bypassExceptions = data.exceptions || [];
+    } catch {
+      bypassExceptions = [];
+    }
+  }
+
+  function bypassCountForProfile(profileId) {
+    return bypassExceptions.filter(e => e.enabled && e.scope === 'group' && e.scope_target === profileId).length;
   }
 
   function handleGroupDndConsider(e) {
@@ -201,6 +223,7 @@
     <div class="sidebar-nav">
       <a href="#" class:active={dashboardView === 'dashboard'} on:click|preventDefault={() => navigateTo('dashboard')}><span class="nav-icon">☰</span> Dashboard</a>
       <a href="#networks" class:active={dashboardView === 'networks'} on:click|preventDefault={() => navigateTo('networks')}><span class="nav-icon">🔗</span> Networks</a>
+      <a href="#bypass" class:active={dashboardView === 'bypass'} on:click|preventDefault={() => navigateTo('bypass')}><span class="nav-icon">⚡</span> VPN Bypass</a>
       <a href="#settings" class:active={dashboardView === 'settings'} on:click|preventDefault={() => navigateTo('settings')}><span class="nav-icon">⚙</span> Settings</a>
       <a href="#" on:click|preventDefault={() => showLogs = true}><span class="nav-icon">📋</span> Logs</a>
     </div>
@@ -237,6 +260,8 @@
       <SettingsPage initialTab={settingsTab} on:back={() => navigateTo('dashboard')} on:tabchange={(e) => navigateTo('settings', e.detail)} />
     {:else if dashboardView === 'networks'}
       <LanAccessPage on:back={() => navigateTo('dashboard')} />
+    {:else if dashboardView === 'bypass'}
+      <VpnBypassPage on:back={() => navigateTo('dashboard')} />
     {:else}
     <div class="content-header">
       <h2>Dashboard</h2>
@@ -262,6 +287,7 @@
            on:finalize={handleGroupDndFinalize}>
         {#each groupItems as profile (profile.id)}
           <GroupCard {profile}
+            bypassCount={bypassCountForProfile(profile.id)}
             on:edit={(e) => editProfile = e.detail}
             on:pickserver={openServerPicker}
             on:deviceselect={(e) => selectedDevice = e.detail}

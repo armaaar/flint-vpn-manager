@@ -79,6 +79,7 @@ Notes:
 - **`cert_expiry`**: auto-refreshed daily by `auto_optimizer.check_and_refresh_certs()` if within 30 days of expiry
 - **NoVPN/NoInternet group identity**: multiple no-internet groups can coexist with identical router-side rules; only local store can distinguish them
 - **Non-VPN device assignments**: router has no concept of these
+- **VPN bypass exceptions** (`config.json` → `vpn_bypass`): exception rules, scopes, custom presets. Router-side artifacts (iptables chain, ipsets, routing table, dnsmasq config, firewall include) are derived from this local config and rebuilt on every change and unlock.
 
 ## Sync Mechanisms
 

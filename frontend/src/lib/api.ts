@@ -2,7 +2,7 @@
 
 import type {
   Profile, Device, ServerInfo, AppSettings, AdblockSettings,
-  LanNetwork, LanException, AccessRule,
+  LanNetwork, LanException, AccessRule, BypassOverview, BypassException,
 } from './types';
 
 const BASE = '';
@@ -92,6 +92,17 @@ export const api = {
   getExceptions: () => request<{ exceptions: LanException[] }>('/api/lan-access/exceptions'),
   addException: (data: Record<string, unknown>) => request<LanException>('/api/lan-access/exceptions', { method: 'POST', body: data }),
   removeException: (id: string) => request(`/api/lan-access/exceptions/${id}`, { method: 'DELETE' }),
+
+  // VPN Bypass
+  getBypassOverview: () => request<BypassOverview>('/api/vpn-bypass'),
+  addBypassException: (data: Record<string, unknown>) => request<{ success: boolean; exception: BypassException }>('/api/vpn-bypass/exceptions', { method: 'POST', body: data }),
+  updateBypassException: (id: string, data: Record<string, unknown>) => request<{ success: boolean; exception: BypassException }>(`/api/vpn-bypass/exceptions/${id}`, { method: 'PUT', body: data }),
+  deleteBypassException: (id: string) => request(`/api/vpn-bypass/exceptions/${id}`, { method: 'DELETE' }),
+  toggleBypassException: (id: string, enabled: boolean) => request(`/api/vpn-bypass/exceptions/${id}/toggle`, { method: 'PUT', body: { enabled } }),
+  saveCustomPreset: (data: Record<string, unknown>) => request('/api/vpn-bypass/presets', { method: 'POST', body: data }),
+  updateCustomPreset: (id: string, data: Record<string, unknown>) => request(`/api/vpn-bypass/presets/${id}`, { method: 'PUT', body: data }),
+  deleteCustomPreset: (id: string) => request(`/api/vpn-bypass/presets/${id}`, { method: 'DELETE' }),
+  installDnsmasqFull: () => request('/api/vpn-bypass/dnsmasq-install', { method: 'POST' }),
 
   // Refresh
   refresh: () => request('/api/refresh', { method: 'POST' }),

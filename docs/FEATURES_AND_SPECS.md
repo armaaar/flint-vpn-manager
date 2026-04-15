@@ -87,6 +87,39 @@ The frontend never persists transient state. Loading spinners come from `health:
 
 ---
 
+## VPN Bypass Exceptions
+
+Route specific traffic directly via WAN, bypassing VPN tunnels. Useful for apps that break over VPN (e.g., League of Legends, Valorant) without removing the entire device from VPN.
+
+### Three Rule Types
+- **IP/CIDR** — static IP ranges (e.g., Riot Games AS6507 prefixes). Stored in `hash:net` ipsets on the router.
+- **Domain** — DNS-resolved via dnsmasq-full `ipset=` option. Resolved IPs automatically populate the bypass ipset. Requires `dnsmasq-full` on the router (installable via the UI).
+- **Port** — destination port + protocol matching via iptables `-m multiport --dports`.
+
+### Three Scope Levels
+- **Global** — bypass for all devices, no source match
+- **Per-group** — bypass only for devices in a specific VPN group (matched via MAC ipset)
+- **Per-device** — bypass for a single device (matched via `-m mac --mac-source`)
+
+Multiple exceptions can be stacked on the same scope target (e.g., LoL preset + Valorant preset + custom rules on one device).
+
+### Presets
+Built-in presets (League of Legends, Valorant) bundle IP ranges, domains, and ports for common apps. Users can also create custom presets. Rules are copied from presets into exceptions (not referenced), so editing a preset doesn't affect existing exceptions.
+
+### Routing Mechanism
+Pre-marks matching packets with fwmark `0x8000/0xf000` in a `FVPN_BYPASS` mangle chain that evaluates before tunnel chains in `ROUTE_POLICY`. Tunnel chains see the non-zero mark and skip. Bypass traffic routes via dedicated routing table 1008 with the WAN gateway. Kill switch is unaffected (blackhole routes live in per-tunnel tables, not table 1008).
+
+### Persistence
+- Exception config stored in `config.json` under `vpn_bypass` (local-only)
+- Router-side: firewall include script `/etc/fvpn/vpn_bypass.sh` (survives firewall reload and reboot)
+- dnsmasq config at `/etc/dnsmasq.d/fvpn_bypass.conf` for domain rules
+- Reapplied on every app unlock
+
+### UI
+Dedicated `#bypass` page accessible from the sidebar. Exception list with collapsible rule details, scope badges, enable/disable toggles. Preset picker for quick setup. GroupCard shows a bypass pill badge when per-group exceptions are active.
+
+---
+
 ## Alternative Routing
 
 Global toggle in Settings. When enabled (default), Proton API calls automatically fall back to DNS-over-HTTPS routing through third-party infrastructure (Google/Quad9 DNS) when Proton's servers are directly unreachable. Useful in censored networks. Handled by the `proton-vpn-api-core` library's `AlternativeRoutingTransport`. Applied at unlock time and updated at runtime when the setting changes.

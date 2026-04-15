@@ -19,7 +19,8 @@ backend/
 │   ├── lan_access.py               # /api/lan-access/* — network CRUD, rules, exceptions
 │   ├── settings.py                 # /api/settings/*, server prefs, adblock, credentials
 │   ├── stream.py                   # /api/stream — SSE live updates (10s tick)
-│   └── logs.py                     # /api/logs — log file listing, reading, clearing
+│   ├── logs.py                     # /api/logs — log file listing, reading, clearing
+│   └── vpn_bypass.py              # /api/vpn-bypass — bypass exception CRUD, presets
 │
 ├── router/                         # Everything that talks to the router via SSH
 │   ├── api.py                      # SSH transport + lazy facade/tool hub (~270 lines)
@@ -44,7 +45,8 @@ backend/
 │       ├── openvpn.py              # OpenVPN client CRUD
 │       ├── proton_wg.py            # Userspace WG TCP/TLS full lifecycle
 │       ├── adblock.py              # DNS blocking via addn-hosts injection into per-tunnel dnsmasq
-│       └── lan_access.py           # Network CRUD, zone forwarding, device exceptions
+│       ├── lan_access.py           # Network CRUD, zone forwarding, device exceptions
+│       └── vpn_bypass.py           # VPN bypass exceptions (iptables, ipset, dnsmasq, routing table)
 │
 ├── services/                       # Business logic orchestrators (no SSH, no Flask)
 │   ├── vpn_service.py              # Top-level facade: composes ProfileService + DeviceService + sync
@@ -53,7 +55,8 @@ backend/
 │   ├── backup_service.py           # Profile store backup/restore to router
 │   ├── adblock_service.py          # Blocklist download and merge
 │   ├── device_service.py           # Device discovery, assignment, labeling, caching
-│   └── lan_access_service.py       # LAN network management + config.json persistence
+│   ├── lan_access_service.py       # LAN network management + config.json persistence
+│   └── vpn_bypass_service.py       # VPN bypass exception CRUD + router application
 │
 ├── proton_vpn/                     # ProtonVPN API integration
 │   ├── api.py                      # Login, server list, WG/OVPN config generation
@@ -87,6 +90,7 @@ backend/
         ├── settings.py              # get, update, location, vpn-status
         ├── adblock.py               # get, update, force-update, search
         ├── lan_access.py            # networks, rules, isolation, IPv6, exceptions
+        ├── vpn_bypass.py            # list, add, toggle, remove bypass exceptions
         └── logs.py                  # list, read, clear
 ```
 

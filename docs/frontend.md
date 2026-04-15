@@ -60,6 +60,10 @@ src/
 │       │   ├── LanAccessPage.svelte     # Network cards, WiFi settings, access rules, exceptions
 │       │   └── ExceptionModal.svelte    # LAN access exception editor
 │       │
+│       ├── bypass/
+│       │   ├── VpnBypassPage.svelte     # VPN bypass exceptions: list, presets, dnsmasq status
+│       │   └── BypassExceptionModal.svelte # Create/edit bypass exception (preset picker, scope, rules)
+│       │
 │       └── modals/
 │           ├── DeviceModal.svelte       # Device detail: label, type, group assignment
 │           └── LogsModal.svelte         # Log viewer with tabs (app.log, error.log, access.log)

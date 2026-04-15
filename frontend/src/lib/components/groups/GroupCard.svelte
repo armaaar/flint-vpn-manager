@@ -11,6 +11,7 @@
   import { createEventDispatcher } from 'svelte';
 
   export let profile;
+  export let bypassCount = 0;
   const dispatch = createEventDispatcher();
 
   const MAC_RE = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i;
@@ -231,6 +232,7 @@
           </span>
         {/if}
         {#if profile.adblock}<span class="opt-pill ab-on" title="DNS Ad Blocker">🚫 Ads</span>{/if}
+        {#if bypassCount > 0}<span class="opt-pill bp-on" title="{bypassCount} bypass rule{bypassCount > 1 ? 's' : ''}">⚡ {bypassCount}</span>{/if}
         {#if profile.options?.smart_protocol}<span class="opt-pill sp-on" title="Smart Protocol">⚡ SP</span>{/if}
         {#if profile.server_scope?.features?.tor}<span class="opt-pill tor-on" title="Tor routing">🧅</span>{/if}
       </span>
@@ -382,6 +384,7 @@
   .opt-pill.ab-on { background: rgba(231,76,60,.18); color: #e74c3c; }
   .adblock-indicator { padding: 4px 12px 0; }
   .opt-pill.tor-on { background: rgba(155,89,182,.18); color: #9b59b6; }
+  .opt-pill.bp-on { background: rgba(194,239,78,.18); color: #c2ef4e; }
   .caret { color: var(--fg3); font-size: .7rem; }
   .vpn-options {
     padding: 8px 16px 12px; background: var(--bg2); border-bottom: 1px solid var(--border);

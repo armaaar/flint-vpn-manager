@@ -25,4 +25,13 @@ PUT  /api/lan-access/isolation/:zone   → toggle WiFi AP isolation for a networ
 PUT  /api/lan-access/ipv6/:zone       → toggle IPv6 for a network
 GET/POST /api/lan-access/exceptions    → list / add device exceptions
 DELETE /api/lan-access/exceptions/:id  → remove a device exception
+GET  /api/vpn-bypass                   → list exceptions + presets + dnsmasq status
+POST /api/vpn-bypass/exceptions        → create bypass exception (from preset or custom rules)
+PUT  /api/vpn-bypass/exceptions/:id    → update bypass exception
+DELETE /api/vpn-bypass/exceptions/:id  → delete bypass exception
+PUT  /api/vpn-bypass/exceptions/:id/toggle → enable/disable bypass exception
+POST /api/vpn-bypass/presets           → save custom preset
+PUT  /api/vpn-bypass/presets/:id       → update custom preset
+DELETE /api/vpn-bypass/presets/:id     → delete custom preset
+POST /api/vpn-bypass/dnsmasq-install   → install dnsmasq-full on router
 ```

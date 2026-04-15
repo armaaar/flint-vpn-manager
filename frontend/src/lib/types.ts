@@ -199,6 +199,37 @@ export interface LanException {
 }
 
 
+// ── VPN Bypass Types ──────────────────────────────────────────────────────
+
+export interface BypassRule {
+  type: 'cidr' | 'domain' | 'port';
+  value: string;
+  protocol?: string;   // 'tcp' | 'udp' (port rules only)
+}
+
+export interface BypassException {
+  id: string;
+  name: string;
+  preset_id: string | null;
+  enabled: boolean;
+  scope: 'global' | 'group' | 'device';
+  scope_target: string | null;
+  rules: BypassRule[];
+}
+
+export interface BypassPreset {
+  id: string;
+  name: string;
+  builtin: boolean;
+  rules: BypassRule[];
+}
+
+export interface BypassOverview {
+  exceptions: BypassException[];
+  presets: Record<string, BypassPreset>;
+  dnsmasq_full_installed: boolean;
+}
+
 // ── Toast ──────────────────────────────────────────────────────────────────
 
 export interface ToastMessage {
