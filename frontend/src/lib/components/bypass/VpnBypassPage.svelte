@@ -5,6 +5,7 @@
   import BypassExceptionModal from './BypassExceptionModal.svelte';
   import type { BypassOverview, BypassException, BypassPreset, Device } from '../../types';
   import DeviceListItem from '../devices/DeviceListItem.svelte';
+  import DeviceModal from '../modals/DeviceModal.svelte';
 
   const dispatch = createEventDispatcher();
 
@@ -17,6 +18,8 @@
   let installingDnsmasq = false;
   let expandedId: string | null = null;
   let expandedPresetId: string | null = null;
+  let selectedDeviceMac: string | null = null;
+  $: selectedDevice = selectedDeviceMac ? $devices.find(d => d.mac === selectedDeviceMac) || null : null;
 
   onMount(loadData);
 
@@ -219,7 +222,7 @@
                       <span class="scope-detail-label">Devices:</span>
                       <div class="scope-device-list">
                         {#each devs as d}
-                          <DeviceListItem device={d} interactive={false} />
+                          <DeviceListItem device={d} showArrow on:click={() => selectedDeviceMac = d.mac} />
                         {/each}
                       </div>
                     </div>
@@ -299,6 +302,10 @@
     on:save={handleSave}
     on:close={() => showModal = false}
   />
+{/if}
+
+{#if selectedDevice}
+  <DeviceModal device={selectedDevice} on:close={() => selectedDeviceMac = null} on:reload={loadData} />
 {/if}
 
 <style>

@@ -192,7 +192,7 @@
             <input type="text" class="target-search" bind:value={targetSearch} placeholder="Search by name or MAC..." />
             <div class="target-list device-target-list">
               {#each filteredDevices as d}
-                <DeviceListItem device={d} selected={scopeTargets.includes(d.mac)}
+                <DeviceListItem device={d} showCheckbox selected={scopeTargets.includes(d.mac)}
                   on:click={() => toggleTarget(d.mac)} />
               {/each}
               {#if filteredDevices.length === 0}

@@ -3,9 +3,40 @@
   import { profiles, showToast } from '../../stores/app';
   import { timeAgo, formatBytes, formatSpeed } from '../../utils/format';
   import { isOnline, isRandomMac, DEVICE_TYPES, deviceTypeLabel } from '../../utils/device';
-  import { createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, onMount } from 'svelte';
   export let device = null;
   const dispatch = createEventDispatcher();
+
+  let bypassExceptions = [];
+  let bypassLoaded = false;
+
+  $: if (device) loadBypass();
+
+  async function loadBypass() {
+    try {
+      const data = await api.getBypassOverview();
+      bypassExceptions = data.exceptions || [];
+      bypassLoaded = true;
+    } catch { bypassExceptions = []; bypassLoaded = true; }
+  }
+
+  // Exceptions directly targeting this device's MAC
+  $: directExceptions = device ? bypassExceptions.filter(e => {
+    const targets = Array.isArray(e.scope_target) ? e.scope_target : (e.scope_target ? [e.scope_target] : []);
+    return targets.includes(device.mac);
+  }) : [];
+
+  // Exceptions targeting the device's group (inherited)
+  $: inheritedExceptions = device ? bypassExceptions.filter(e => {
+    if (e.scope === 'global') return false; // global shown separately
+    const targets = Array.isArray(e.scope_target) ? e.scope_target : (e.scope_target ? [e.scope_target] : []);
+    return device.profile_id && targets.includes(device.profile_id) && !targets.includes(device.mac);
+  }) : [];
+
+  // Global exceptions
+  $: globalExceptions = bypassExceptions.filter(e => e.scope === 'global' && e.enabled);
+
+  $: deviceGroup = device ? $profiles.find(p => p.id === device.profile_id) : null;
 
   let label = '';
   let deviceClass = '';
@@ -128,7 +159,37 @@
           {/each}
           <option value="">Unassigned</option>
         </select>
+        {#if deviceGroup}
+          <span class="hint">Currently in {deviceGroup.icon} {deviceGroup.name}</span>
+        {/if}
       </div>
+
+      <!-- VPN Bypass Exceptions -->
+      {#if bypassLoaded && (directExceptions.length > 0 || inheritedExceptions.length > 0 || globalExceptions.length > 0)}
+        <div class="bypass-section">
+          <label>VPN Bypass Exceptions</label>
+          {#each directExceptions as exc}
+            <div class="bypass-item" class:disabled={!exc.enabled}>
+              <span class="bypass-name">{exc.name}</span>
+              <span class="bypass-badge bypass-direct">Direct</span>
+              {#if !exc.enabled}<span class="bypass-badge bypass-off">Disabled</span>{/if}
+            </div>
+          {/each}
+          {#each inheritedExceptions as exc}
+            <div class="bypass-item" class:disabled={!exc.enabled}>
+              <span class="bypass-name">{exc.name}</span>
+              <span class="bypass-badge bypass-inherited">via {deviceGroup ? deviceGroup.name : 'Group'}</span>
+              {#if !exc.enabled}<span class="bypass-badge bypass-off">Disabled</span>{/if}
+            </div>
+          {/each}
+          {#each globalExceptions as exc}
+            <div class="bypass-item">
+              <span class="bypass-name">{exc.name}</span>
+              <span class="bypass-badge bypass-global">Global</span>
+            </div>
+          {/each}
+        </div>
+      {/if}
 
     </div>
     <div class="modal-footer">
@@ -151,4 +212,15 @@
   .status-online { color: var(--green); font-weight: 500; }
   .warning-text { color: var(--amber); }
 
+  /* Bypass exceptions section */
+  .bypass-section { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+  .bypass-section label { display: block; font-weight: 500; color: var(--fg2); margin-bottom: 8px; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.2px; }
+  .bypass-item { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 6px; margin-bottom: 4px; background: var(--surface); }
+  .bypass-item.disabled { opacity: 0.5; }
+  .bypass-name { font-size: 0.88rem; font-weight: 500; color: var(--fg); flex: 1; }
+  .bypass-badge { font-size: 0.7rem; font-weight: 600; padding: 2px 8px; border-radius: 10px; text-transform: uppercase; letter-spacing: 0.2px; }
+  .bypass-direct { background: var(--amber-bg); color: var(--amber); }
+  .bypass-inherited { background: var(--green-bg); color: var(--green); }
+  .bypass-global { background: var(--accent-bg); color: var(--accent); }
+  .bypass-off { background: var(--red-bg); color: var(--red); }
 </style>

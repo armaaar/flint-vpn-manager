@@ -6,6 +6,7 @@
   export let showIp = false;
   export let showMac = true;
   export let showArrow = false;
+  export let showCheckbox = false;
   export let selected = false;
   export let interactive = true;
 </script>
@@ -14,6 +15,7 @@
 <!-- svelte-ignore a11y-no-static-element-interactions -->
 {#if interactive}
   <button class="dli" class:selected on:click>
+    {#if showCheckbox}<input type="checkbox" checked={selected} class="dli-checkbox" tabindex="-1" />{/if}
     <span class="dli-icon">{deviceIcon(device)}</span>
     <span class="dli-dot" class:online={isOnline(device)}></span>
     <span class="dli-name">{device.display_name}</span>
@@ -36,12 +38,13 @@
     display: flex; align-items: center; gap: 8px; padding: 6px 10px;
     background: none; border: 1px solid transparent; border-radius: 6px;
     font-size: 0.88rem; width: 100%; text-align: left; color: var(--fg);
-    cursor: pointer; font-family: inherit;
+    font-family: inherit;
   }
   button.dli { cursor: pointer; }
   div.dli { cursor: default; }
   .dli:hover { background: var(--bg3); }
   .dli.selected { background: var(--accent-bg); border-color: var(--accent); }
+  .dli-checkbox { accent-color: var(--accent); width: 16px; height: 16px; margin: 0; flex-shrink: 0; pointer-events: none; }
   .dli-icon { flex-shrink: 0; font-size: 0.95rem; line-height: 1; }
   .dli-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg3); flex-shrink: 0; }
   .dli-dot.online { background: var(--green); }
