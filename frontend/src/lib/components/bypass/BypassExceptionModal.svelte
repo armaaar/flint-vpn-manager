@@ -114,7 +114,7 @@
   }
 
   $: hasValidRules = ruleBlocks.some(b => b.rules.some(r => r.value.trim()));
-  $: scopeValid = scope === 'global' || scopeTargets.length > 0;
+  $: scopeValid = scope === 'global' || (scope === 'custom' && scopeTargets.length > 0);
 
   function toggleTarget(value: string) {
     if (scopeTargets.includes(value)) {
@@ -164,20 +164,14 @@
               <input type="radio" bind:group={scope} value="global" /> Global (all devices)
             </label>
             <label class="radio-label">
-              <input type="radio" bind:group={scope} value="group" /> Per Group
-            </label>
-            <label class="radio-label">
-              <input type="radio" bind:group={scope} value="device" /> Per Device
+              <input type="radio" bind:group={scope} value="custom" /> Selected groups / devices
             </label>
           </div>
         </div>
 
-        {#if scope === 'group'}
+        {#if scope === 'custom'}
           <div class="form-group">
             <label>VPN Groups</label>
-            {#if vpnProfiles.length > 5}
-              <input type="text" class="target-search" bind:value={targetSearch} placeholder="Search groups..." />
-            {/if}
             <div class="target-list">
               {#each filteredGroups as p}
                 <label class="target-check">
@@ -188,13 +182,11 @@
                 </label>
               {/each}
               {#if filteredGroups.length === 0}
-                <span class="no-targets">{targetSearch ? 'No matching groups' : 'No VPN groups available'}</span>
+                <span class="no-targets">No VPN groups available</span>
               {/if}
             </div>
           </div>
-        {/if}
 
-        {#if scope === 'device'}
           <div class="form-group">
             <label>Devices</label>
             <input type="text" class="target-search" bind:value={targetSearch} placeholder="Search by name or MAC..." />

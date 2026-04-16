@@ -111,7 +111,7 @@
   }
 
   function bypassCountForProfile(profileId) {
-    return bypassExceptions.filter(e => e.enabled && e.scope === 'group' && (Array.isArray(e.scope_target) ? e.scope_target.includes(profileId) : e.scope_target === profileId)).length;
+    return bypassExceptions.filter(e => e.enabled && e.scope !== 'global' && (Array.isArray(e.scope_target) ? e.scope_target.includes(profileId) : e.scope_target === profileId)).length;
   }
 
   function handleGroupDndConsider(e) {

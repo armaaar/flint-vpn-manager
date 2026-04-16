@@ -203,7 +203,7 @@ class VpnBypassService:
 
         changed = False
         for exc in exceptions:
-            if exc.get("scope") != "group":
+            if exc.get("scope") == "global":
                 continue
             target = exc.get("scope_target")
             targets = target if isinstance(target, list) else [target]
@@ -298,13 +298,12 @@ class VpnBypassService:
         target = exc.get("scope_target")
         if scope == "global":
             exc["scope_target"] = None
-        elif scope in ("group", "device"):
+        elif scope in ("group", "device", "custom"):
             # Normalise single string to list
             if isinstance(target, str):
                 target = [target]
                 exc["scope_target"] = target
             if not target or not any(t for t in target):
-                label = "profile_id(s)" if scope == "group" else "MAC address(es)"
-                raise ValueError(f"scope_target ({label}) required for {scope} scope")
+                raise ValueError("scope_target (group IDs and/or MAC addresses) required")
         else:
             raise ValueError(f"Invalid scope: {scope}")

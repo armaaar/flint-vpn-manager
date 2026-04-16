@@ -96,12 +96,11 @@ Route specific traffic directly via WAN, bypassing VPN tunnels. Useful for apps 
 - **Domain** — DNS-resolved via dnsmasq-full `ipset=` option. Resolved IPs automatically populate the bypass ipset. Requires `dnsmasq-full` on the router (installable via the UI).
 - **Port** — destination port + protocol matching via iptables `-m multiport --dports`.
 
-### Three Scope Levels
+### Scope
 - **Global** — bypass for all devices, no source match
-- **Per-group** — bypass only for devices in a specific VPN group (matched via MAC ipset)
-- **Per-device** — bypass for a single device (matched via `-m mac --mac-source`)
+- **Custom** — bypass for selected VPN groups and/or individual devices. Groups are matched via MAC ipset, devices via `-m mac --mac-source`. A single exception can target a mix of groups and devices.
 
-Multiple exceptions can be stacked on the same scope target (e.g., LoL preset + Valorant preset + custom rules on one device).
+Multiple exceptions can be stacked on the same targets (e.g., LoL preset + Valorant preset + custom rules on one device).
 
 ### Presets
 Built-in presets (League of Legends, Valorant) bundle IP ranges, domains, and ports for common apps. Users can also create custom presets. Rules are copied from presets into exceptions (not referenced), so editing a preset doesn't affect existing exceptions.

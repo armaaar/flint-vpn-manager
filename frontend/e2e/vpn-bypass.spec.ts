@@ -56,8 +56,7 @@ test.describe('VPN Bypass Page', () => {
 
     // Scope radios should be visible
     await expect(page.locator('text=Global (all devices)')).toBeVisible();
-    await expect(page.locator('text=Per Group')).toBeVisible();
-    await expect(page.locator('text=Per Device')).toBeVisible();
+    await expect(page.locator('text=Selected groups / devices')).toBeVisible();
 
     // Rules should be populated (check that rule rows exist with domain values)
     await expect(page.locator('.rule-edit-row').first()).toBeVisible();
@@ -194,27 +193,17 @@ test.describe('VPN Bypass Page', () => {
     await expect(page.locator('.exc-name:has-text("My Custom Rule")')).toBeVisible({ timeout: 5_000 });
   });
 
-  test('per-device scope shows device dropdown', async ({ page }) => {
+  test('custom scope shows both groups and devices', async ({ page }) => {
     await page.locator('button:has-text("Add Exception")').click();
     await page.locator('button:has-text("Custom")').click();
 
-    // Select Per Device scope
-    await page.locator('text=Per Device').click();
-    // Device dropdown should appear
-    await expect(page.locator('select#scope-device')).toBeVisible();
-    // Should have at least the placeholder option
-    const options = page.locator('select#scope-device option');
-    expect(await options.count()).toBeGreaterThanOrEqual(1);
-  });
-
-  test('per-group scope shows group dropdown', async ({ page }) => {
-    await page.locator('button:has-text("Add Exception")').click();
-    await page.locator('button:has-text("Custom")').click();
-
-    // Select Per Group scope
-    await page.locator('text=Per Group').click();
-    // Group dropdown should appear
-    await expect(page.locator('select#scope-group')).toBeVisible();
+    // Select custom scope
+    await page.locator('text=Selected groups / devices').click();
+    // Both groups and devices lists should appear
+    await expect(page.locator('label:has-text("VPN Groups")')).toBeVisible();
+    await expect(page.locator('label:has-text("Devices")')).toBeVisible();
+    // Device rows should be visible
+    await expect(page.locator('.device-row').first()).toBeVisible();
   });
 
   test('multiple exceptions can coexist', async ({ page }) => {

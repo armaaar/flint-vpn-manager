@@ -97,7 +97,7 @@ class TestAddException:
             with pytest.raises(ValueError, match="scope_target.*required"):
                 svc.add_exception({
                     "name": "Bad",
-                    "scope": "group",
+                    "scope": "custom",
                     "rule_blocks": _simple_blocks(),
                 })
 
@@ -201,7 +201,7 @@ class TestOnGroupDeleted:
                 vpn_bypass={
                     "exceptions": [
                         {"id": "byp_1", "name": "Group rule", "enabled": True,
-                         "scope": "group", "scope_target": ["prof_123"],
+                         "scope": "custom", "scope_target": ["prof_123"],
                          "rule_blocks": _simple_blocks()},
                         {"id": "byp_2", "name": "Global rule", "enabled": True,
                          "scope": "global", "scope_target": None,

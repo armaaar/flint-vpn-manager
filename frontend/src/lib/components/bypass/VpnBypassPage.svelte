@@ -91,38 +91,38 @@
     installingDnsmasq = false;
   }
 
+  const MAC_RE = /^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/;
+
   function scopeLabel(exc: BypassException): string {
     if (exc.scope === 'global') return 'Global';
     const raw = exc.scope_target;
     const targets = Array.isArray(raw) ? raw : (raw ? [raw] : []);
-    const count = targets.length;
-    if (exc.scope === 'group') return count === 1 ? '1 Group' : `${count} Groups`;
-    if (exc.scope === 'device') return count === 1 ? '1 Device' : `${count} Devices`;
-    return exc.scope;
+    const groups = targets.filter(t => !MAC_RE.test(t));
+    const devs = targets.filter(t => MAC_RE.test(t));
+    const parts: string[] = [];
+    if (groups.length) parts.push(`${groups.length} group${groups.length > 1 ? 's' : ''}`);
+    if (devs.length) parts.push(`${devs.length} device${devs.length > 1 ? 's' : ''}`);
+    return parts.join(', ') || 'Custom';
   }
 
-  function scopeDetails(exc: BypassException): string[] {
+  function scopeDetails(exc: BypassException): { groups: string[]; devices: string[] } {
     const raw = exc.scope_target;
     const targets = Array.isArray(raw) ? raw : (raw ? [raw] : []);
-    if (exc.scope === 'group') {
-      return targets.map(t => {
+    return {
+      groups: targets.filter(t => !MAC_RE.test(t)).map(t => {
         const p = $profiles.find(p => p.id === t);
         return p ? `${p.icon} ${p.name}` : '(deleted)';
-      });
-    }
-    if (exc.scope === 'device') {
-      return targets.map(t => {
+      }),
+      devices: targets.filter(t => MAC_RE.test(t)).map(t => {
         const d = $devices.find(d => d.mac === t);
         return d ? `${d.display_name} (${t})` : t;
-      });
-    }
-    return [];
+      }),
+    };
   }
 
   function scopeBadgeClass(scope: string): string {
     if (scope === 'global') return 'badge-global';
-    if (scope === 'group') return 'badge-group';
-    return 'badge-device';
+    return 'badge-custom';
   }
 
   function rulesSummary(exc: BypassException): string {
@@ -200,12 +200,23 @@
             {#if expandedId === exc.id}
               <div class="exc-details">
                 {#if exc.scope !== 'global'}
-                  <div class="scope-detail-list">
-                    <span class="scope-detail-label">{exc.scope === 'group' ? 'Groups' : 'Devices'}:</span>
-                    {#each scopeDetails(exc) as item}
-                      <span class="scope-detail-item">{item}</span>
-                    {/each}
-                  </div>
+                  {@const details = scopeDetails(exc)}
+                  {#if details.groups.length > 0}
+                    <div class="scope-detail-list">
+                      <span class="scope-detail-label">Groups:</span>
+                      {#each details.groups as item}
+                        <span class="scope-detail-item">{item}</span>
+                      {/each}
+                    </div>
+                  {/if}
+                  {#if details.devices.length > 0}
+                    <div class="scope-detail-list">
+                      <span class="scope-detail-label">Devices:</span>
+                      {#each details.devices as item}
+                        <span class="scope-detail-item">{item}</span>
+                      {/each}
+                    </div>
+                  {/if}
                 {/if}
                 {#each (exc.rule_blocks || []) as block, bi}
                   {#if bi > 0}<div class="block-divider"><span>OR</span></div>{/if}
@@ -330,8 +341,7 @@
     text-transform: uppercase; letter-spacing: 0.2px;
   }
   .badge-global { background: var(--accent-bg); color: var(--accent); }
-  .badge-group { background: var(--green-bg); color: var(--green); }
-  .badge-device { background: var(--amber-bg); color: var(--amber); }
+  .badge-custom { background: var(--amber-bg); color: var(--amber); }
   .preset-tag { font-size: 0.7rem; color: var(--fg3); background: var(--bg3); padding: 1px 6px; border-radius: 4px; }
 
   .exc-actions { display: flex; align-items: center; gap: 8px; }

@@ -27,6 +27,7 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
         name: str,
         scope: str = "global",
         scope_target: str = "",
+        scope_targets: str = "",
         preset_id: str = "",
         rules: str = "",
     ) -> str:
@@ -37,10 +38,11 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
 
         Args:
             name: Display name for this exception (e.g. "League of Legends")
-            scope: "global" (all devices), "group" (one VPN group), or
-                   "device" (one device)
-            scope_target: Required for group (profile_id) or device (MAC address)
-                         scopes. Empty for global.
+            scope: "global" (all devices) or "custom" (selected groups/devices)
+            scope_target: Single target — profile_id or MAC address. Use
+                         scope_targets for multiple.
+            scope_targets: JSON array of target IDs (profile_ids and/or MAC
+                          addresses). Use for multiple groups/devices.
             preset_id: ID of a built-in or custom preset to use as template.
                       If provided, rules from the preset are copied.
             rules: JSON array of rule objects, each with:
@@ -50,8 +52,10 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
                    Example: '[{"type":"cidr","value":"10.0.0.0/8"}]'
         """
         body: dict = {"name": name, "scope": scope}
-        if scope_target:
-            body["scope_target"] = scope_target
+        if scope_targets:
+            body["scope_target"] = json.loads(scope_targets)
+        elif scope_target:
+            body["scope_target"] = [scope_target]
         if preset_id:
             body["preset_id"] = preset_id
         if rules:

@@ -289,8 +289,8 @@ class RouterVpnBypass:
         """Build iptables source match fragments for a scope.
 
         Returns a list of match fragments — one per target.  For global
-        scope returns ``[""]``.  For multi-target group/device scopes,
-        returns one fragment per target so each gets its own iptables rule.
+        scope returns ``[""]``.  Targets can be mixed — MAC addresses
+        (devices) and profile IDs (groups) are auto-detected.
         """
         if scope == "global":
             return [""]
@@ -303,13 +303,12 @@ class RouterVpnBypass:
 
         result: list[str] = []
         for target in targets:
-            if scope == "group":
-                ipset_name = group_ipset_map.get(target)
-                if ipset_name:
-                    result.append(f"-m set --match-set {ipset_name} src")
-            elif scope == "device":
-                if _SAFE_MAC_RE.match(target):
-                    result.append(f"-m mac --mac-source {target}")
+            if _SAFE_MAC_RE.match(target):
+                # Device MAC
+                result.append(f"-m mac --mac-source {target}")
+            elif target in group_ipset_map:
+                # Group profile ID
+                result.append(f"-m set --match-set {group_ipset_map[target]} src")
         return result
 
     # ── Internal: persistence ──────────────────────────────────────────
