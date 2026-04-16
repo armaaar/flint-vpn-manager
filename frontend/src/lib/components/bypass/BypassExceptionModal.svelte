@@ -78,6 +78,22 @@
 
   $: vpnProfiles = profiles.filter(p => p.type === 'vpn');
 
+  let targetSearch = '';
+  // Groups: keep dashboard order (already sorted by display_order), then filter
+  $: filteredGroups = vpnProfiles.filter(p =>
+    !targetSearch || p.name.toLowerCase().includes(targetSearch.toLowerCase())
+  );
+  // Devices: sort alphabetically by display_name, then filter
+  $: filteredDevices = [...devices]
+    .sort((a, b) => a.display_name.localeCompare(b.display_name))
+    .filter(d =>
+      !targetSearch ||
+      d.display_name.toLowerCase().includes(targetSearch.toLowerCase()) ||
+      d.mac.toLowerCase().includes(targetSearch.toLowerCase())
+    );
+  // Reset search when scope changes
+  $: if (scope) targetSearch = '';
+
   const CIDR_RE = /^[0-9a-fA-F.:]+(\/(3[0-2]|[12]?\d))?$/;
   const DOMAIN_RE = /^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*$/;
   const PORT_RE = /^[0-9]+(:[0-9]+)?(,[0-9]+(:[0-9]+)?)*$/;
@@ -153,8 +169,11 @@
         {#if scope === 'group'}
           <div class="form-group">
             <label>VPN Groups</label>
+            {#if vpnProfiles.length > 5}
+              <input type="text" class="target-search" bind:value={targetSearch} placeholder="Search groups..." />
+            {/if}
             <div class="target-list">
-              {#each vpnProfiles as p}
+              {#each filteredGroups as p}
                 <label class="target-check">
                   <input type="checkbox" checked={scopeTargets.includes(p.id)}
                     on:change={() => toggleTarget(p.id)} />
@@ -162,8 +181,8 @@
                   <span class="target-name">{p.name}</span>
                 </label>
               {/each}
-              {#if vpnProfiles.length === 0}
-                <span class="no-targets">No VPN groups available</span>
+              {#if filteredGroups.length === 0}
+                <span class="no-targets">{targetSearch ? 'No matching groups' : 'No VPN groups available'}</span>
               {/if}
             </div>
           </div>
@@ -172,8 +191,9 @@
         {#if scope === 'device'}
           <div class="form-group">
             <label>Devices</label>
+            <input type="text" class="target-search" bind:value={targetSearch} placeholder="Search by name or MAC..." />
             <div class="target-list">
-              {#each devices as d}
+              {#each filteredDevices as d}
                 <label class="target-check">
                   <input type="checkbox" checked={scopeTargets.includes(d.mac)}
                     on:change={() => toggleTarget(d.mac)} />
@@ -181,8 +201,8 @@
                   <span class="target-mac">{d.mac}</span>
                 </label>
               {/each}
-              {#if devices.length === 0}
-                <span class="no-targets">No devices available</span>
+              {#if filteredDevices.length === 0}
+                <span class="no-targets">{targetSearch ? 'No matching devices' : 'No devices available'}</span>
               {/if}
             </div>
           </div>
@@ -315,6 +335,13 @@
   .target-icon { font-size: 1rem; line-height: 1; }
   .target-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .target-mac { color: var(--fg3); font-family: var(--font-mono); font-size: 0.78rem; grid-column: 3; text-align: right; }
+  .target-search {
+    width: 100%; padding: 7px 12px; margin-bottom: 6px; background: var(--surface);
+    border: 1px solid var(--border); border-radius: 6px; color: var(--fg);
+    font-size: 0.88rem; box-sizing: border-box;
+  }
+  .target-search:focus { outline: none; border-color: var(--accent); }
+  .target-search::placeholder { color: var(--fg3); }
   .no-targets { color: var(--fg3); font-size: 0.85rem; padding: 12px; text-align: center; }
 
   .rules-hint { color: var(--fg3); font-size: 0.8rem; margin-bottom: 12px; margin-top: 0; }
