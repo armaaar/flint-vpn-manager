@@ -5,6 +5,7 @@
   import { createEventDispatcher, onMount } from 'svelte';
   import ExceptionModal from './ExceptionModal.svelte';
   import DeviceModal from '../modals/DeviceModal.svelte';
+  import DeviceListItem from '../devices/DeviceListItem.svelte';
 
   const dispatch = createEventDispatcher();
 
@@ -510,13 +511,7 @@
                   <div class="device-group-label">{group}</div>
                   <div class="device-list">
                     {#each devs as device}
-                      <button class="device-row" on:click={() => selectDevice(device.mac)}>
-                        <span class="device-icon">{deviceIcon(device)}</span>
-                        <span class="device-dot" class:online={isOnline(device)}></span>
-                        <span class="device-name">{device.display_name}</span>
-                        <span class="device-meta">{device.ip} · {device.mac.toUpperCase()}</span>
-                        <span class="device-arrow">›</span>
-                      </button>
+                      <DeviceListItem {device} showIp showArrow on:click={() => selectDevice(device.mac)} />
                     {/each}
                   </div>
                 {/each}
@@ -681,14 +676,6 @@
   .collapsible-header:hover { color: var(--fg); }
   .collapse-chevron { font-size: .7rem; color: var(--fg3); margin-right: 4px; }
 
-  .device-row { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--bg); border: none; border-radius: var(--radius-xs); font-size: .82rem; width: 100%; text-align: left; color: var(--fg); cursor: pointer; font-family: inherit; }
-  .device-icon { flex-shrink: 0; font-size: .95rem; line-height: 1; }
-  .device-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg3); flex-shrink: 0; }
-  .device-dot.online { background: var(--green); }
-  .device-name { font-weight: 500; flex: 1; }
-  .device-meta { color: var(--fg3); font-size: .75rem; font-family: var(--font-mono); }
-  .device-row:hover { background: var(--bg3); }
-  .device-arrow { color: var(--fg3); font-size: 1.1rem; }
   .loading-sm, .empty-sm { font-size: .8rem; color: var(--fg3); padding: 8px; }
 
   .delete-section { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); }

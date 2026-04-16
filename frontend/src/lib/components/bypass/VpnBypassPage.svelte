@@ -3,8 +3,8 @@
   import { profiles, devices, showToast } from '../../stores/app';
   import { createEventDispatcher, onMount } from 'svelte';
   import BypassExceptionModal from './BypassExceptionModal.svelte';
-  import type { BypassOverview, BypassException, BypassPreset } from '../../types';
-  import { deviceIcon, isOnline } from '../../utils/device';
+  import type { BypassOverview, BypassException, BypassPreset, Device } from '../../types';
+  import DeviceListItem from '../devices/DeviceListItem.svelte';
 
   const dispatch = createEventDispatcher();
 
@@ -115,12 +115,12 @@
     });
   }
 
-  function scopeDetailDevices(exc: BypassException) {
+  function scopeDetailDevices(exc: BypassException): Device[] {
     const raw = exc.scope_target;
     const targets = Array.isArray(raw) ? raw : (raw ? [raw] : []);
     return targets.filter(t => MAC_RE.test(t)).map(t => {
       const d = $devices.find(d => d.mac === t);
-      return d || { mac: t, display_name: t, device_class: '', router_online: false };
+      return d || { mac: t, display_name: t, device_class: '', router_online: false, hostname: '', label: '', profile_id: null, ip: '', iface: '', network: '', network_zone: '', last_seen: null, signal_dbm: null, link_speed_mbps: null, rx_speed: 0, tx_speed: 0, total_rx: 0, total_tx: 0 } as Device;
     });
   }
 
@@ -219,12 +219,7 @@
                       <span class="scope-detail-label">Devices:</span>
                       <div class="scope-device-list">
                         {#each devs as d}
-                          <div class="scope-device-row">
-                            <span class="sdev-icon">{deviceIcon(d)}</span>
-                            <span class="sdev-dot" class:online={isOnline(d)}></span>
-                            <span class="sdev-name">{d.display_name}</span>
-                            <span class="sdev-mac">{d.mac}</span>
-                          </div>
+                          <DeviceListItem device={d} interactive={false} />
                         {/each}
                       </div>
                     </div>
@@ -389,13 +384,6 @@
   .scope-detail-list .scope-detail-label { display: inline; margin-bottom: 0; }
   .scope-detail-item { background: var(--accent-bg); color: var(--accent); font-size: 0.82rem; padding: 2px 10px; border-radius: 10px; }
   .scope-device-list { display: flex; flex-direction: column; gap: 2px; }
-  .scope-device-row { display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: 4px; font-size: 0.85rem; }
-  .scope-device-row:hover { background: var(--bg3); }
-  .sdev-icon { flex-shrink: 0; font-size: 0.9rem; }
-  .sdev-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg3); flex-shrink: 0; }
-  .sdev-dot.online { background: var(--green); }
-  .sdev-name { flex: 1; font-weight: 500; color: var(--fg); }
-  .sdev-mac { color: var(--fg3); font-family: var(--font-mono); font-size: 0.75rem; }
   .rule-block { padding: 4px 0; }
   .block-label { color: var(--fg2); font-size: 0.8rem; font-weight: 600; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.2px; }
   .block-divider { text-align: center; padding: 4px 0; }

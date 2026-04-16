@@ -1,7 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import type { BypassException, BypassPreset, BypassRule, BypassRuleBlock, Profile, Device } from '../../types';
-  import { deviceIcon, isOnline } from '../../utils/device';
+  import DeviceListItem from '../devices/DeviceListItem.svelte';
 
   export let exception: BypassException | null = null;
   export let presets: Record<string, BypassPreset> = {};
@@ -192,13 +192,8 @@
             <input type="text" class="target-search" bind:value={targetSearch} placeholder="Search by name or MAC..." />
             <div class="target-list device-target-list">
               {#each filteredDevices as d}
-                <button class="device-row" class:selected={scopeTargets.includes(d.mac)}
-                  on:click={() => toggleTarget(d.mac)}>
-                  <span class="dev-icon">{deviceIcon(d)}</span>
-                  <span class="dev-dot" class:online={isOnline(d)}></span>
-                  <span class="dev-name">{d.display_name}</span>
-                  <span class="dev-mac">{d.mac}</span>
-                </button>
+                <DeviceListItem device={d} selected={scopeTargets.includes(d.mac)}
+                  on:click={() => toggleTarget(d.mac)} />
               {/each}
               {#if filteredDevices.length === 0}
                 <span class="no-targets">{targetSearch ? 'No matching devices' : 'No devices available'}</span>
@@ -333,7 +328,6 @@
   .target-check input[type="checkbox"] { accent-color: var(--accent); width: 16px; height: 16px; margin: 0; }
   .target-icon { font-size: 1rem; line-height: 1; }
   .target-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .target-mac { color: var(--fg3); font-family: var(--font-mono); font-size: 0.78rem; grid-column: 3; text-align: right; }
   .target-search {
     width: 100%; padding: 7px 12px; margin-bottom: 6px; background: var(--surface);
     border: 1px solid var(--border); border-radius: 6px; color: var(--fg);
@@ -341,21 +335,7 @@
   }
   .target-search:focus { outline: none; border-color: var(--accent); }
   .target-search::placeholder { color: var(--fg3); }
-  /* Device rows (Networks-style) */
   .device-target-list { padding: 4px; }
-  .device-row {
-    display: flex; align-items: center; gap: 8px; padding: 7px 10px;
-    background: none; border: 1px solid transparent; border-radius: 6px;
-    font-size: 0.88rem; width: 100%; text-align: left; color: var(--fg);
-    cursor: pointer; font-family: inherit; margin-bottom: 2px;
-  }
-  .device-row:hover { background: var(--bg3); }
-  .device-row.selected { background: var(--accent-bg); border-color: var(--accent); }
-  .dev-icon { flex-shrink: 0; font-size: 0.95rem; line-height: 1; }
-  .dev-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg3); flex-shrink: 0; }
-  .dev-dot.online { background: var(--green); }
-  .dev-name { font-weight: 500; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .dev-mac { color: var(--fg3); font-family: var(--font-mono); font-size: 0.78rem; flex-shrink: 0; }
 
   .no-targets { color: var(--fg3); font-size: 0.85rem; padding: 12px; text-align: center; }
 
