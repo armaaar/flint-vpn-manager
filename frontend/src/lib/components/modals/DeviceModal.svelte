@@ -134,6 +134,35 @@
         {/if}
       </div>
 
+      <!-- VPN Bypass Exceptions (above form, Networks-style) -->
+      {#if bypassLoaded && (directExceptions.length > 0 || inheritedExceptions.length > 0 || globalExceptions.length > 0)}
+        <div class="bypass-section">
+          <h4 class="bypass-header">🔀 VPN Bypass ({directExceptions.length + inheritedExceptions.length + globalExceptions.length})</h4>
+          <div class="bypass-list">
+            {#each directExceptions as exc}
+              <div class="bypass-row" class:bypass-disabled={!exc.enabled}>
+                <span class="bypass-name">{exc.name}</span>
+                <span class="bypass-badge bypass-direct">Direct</span>
+                {#if !exc.enabled}<span class="bypass-badge bypass-off">Off</span>{/if}
+              </div>
+            {/each}
+            {#each inheritedExceptions as exc}
+              <div class="bypass-row" class:bypass-disabled={!exc.enabled}>
+                <span class="bypass-name">{exc.name}</span>
+                <span class="bypass-badge bypass-inherited">via {deviceGroup ? deviceGroup.name : 'Group'}</span>
+                {#if !exc.enabled}<span class="bypass-badge bypass-off">Off</span>{/if}
+              </div>
+            {/each}
+            {#each globalExceptions as exc}
+              <div class="bypass-row">
+                <span class="bypass-name">{exc.name}</span>
+                <span class="bypass-badge bypass-global">Global</span>
+              </div>
+            {/each}
+          </div>
+        </div>
+      {/if}
+
       <div class="form-group">
         <label for="dl">Custom Name</label>
         <input id="dl" bind:value={label} placeholder="e.g. Living Room TV, Dad's Phone">
@@ -164,32 +193,6 @@
         {/if}
       </div>
 
-      <!-- VPN Bypass Exceptions -->
-      {#if bypassLoaded && (directExceptions.length > 0 || inheritedExceptions.length > 0 || globalExceptions.length > 0)}
-        <div class="bypass-section">
-          <label>VPN Bypass Exceptions</label>
-          {#each directExceptions as exc}
-            <div class="bypass-item" class:disabled={!exc.enabled}>
-              <span class="bypass-name">{exc.name}</span>
-              <span class="bypass-badge bypass-direct">Direct</span>
-              {#if !exc.enabled}<span class="bypass-badge bypass-off">Disabled</span>{/if}
-            </div>
-          {/each}
-          {#each inheritedExceptions as exc}
-            <div class="bypass-item" class:disabled={!exc.enabled}>
-              <span class="bypass-name">{exc.name}</span>
-              <span class="bypass-badge bypass-inherited">via {deviceGroup ? deviceGroup.name : 'Group'}</span>
-              {#if !exc.enabled}<span class="bypass-badge bypass-off">Disabled</span>{/if}
-            </div>
-          {/each}
-          {#each globalExceptions as exc}
-            <div class="bypass-item">
-              <span class="bypass-name">{exc.name}</span>
-              <span class="bypass-badge bypass-global">Global</span>
-            </div>
-          {/each}
-        </div>
-      {/if}
 
     </div>
     <div class="modal-footer">
@@ -212,12 +215,13 @@
   .status-online { color: var(--green); font-weight: 500; }
   .warning-text { color: var(--amber); }
 
-  /* Bypass exceptions section */
-  .bypass-section { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
-  .bypass-section label { display: block; font-weight: 500; color: var(--fg2); margin-bottom: 8px; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.2px; }
-  .bypass-item { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 6px; margin-bottom: 4px; background: var(--surface); }
-  .bypass-item.disabled { opacity: 0.5; }
-  .bypass-name { font-size: 0.88rem; font-weight: 500; color: var(--fg); flex: 1; }
+  /* VPN Bypass section — matches Networks page exception style */
+  .bypass-section { margin-bottom: 18px; padding: 14px; background: var(--surface); border-radius: var(--radius-sm, 8px); }
+  .bypass-header { margin: 0 0 10px; font-size: .9rem; color: var(--fg2); font-weight: 500; }
+  .bypass-list { display: flex; flex-direction: column; gap: 6px; }
+  .bypass-row { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; font-size: .85rem; }
+  .bypass-row.bypass-disabled { opacity: 0.5; }
+  .bypass-name { flex: 1; font-weight: 500; }
   .bypass-badge { font-size: 0.7rem; font-weight: 600; padding: 2px 8px; border-radius: 10px; text-transform: uppercase; letter-spacing: 0.2px; }
   .bypass-direct { background: var(--amber-bg); color: var(--amber); }
   .bypass-inherited { background: var(--green-bg); color: var(--green); }
