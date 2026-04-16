@@ -1,6 +1,7 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import type { BypassException, BypassPreset, BypassRule, BypassRuleBlock, Profile, Device } from '../../types';
+  import { deviceIcon, isOnline } from '../../utils/device';
 
   export let exception: BypassException | null = null;
   export let presets: Record<string, BypassPreset> = {};
@@ -91,8 +92,13 @@
       d.display_name.toLowerCase().includes(targetSearch.toLowerCase()) ||
       d.mac.toLowerCase().includes(targetSearch.toLowerCase())
     );
-  // Reset search when scope changes
-  $: if (scope) targetSearch = '';
+  // Reset search and clear targets when scope changes
+  let prevScope = scope;
+  $: if (scope !== prevScope) {
+    targetSearch = '';
+    scopeTargets = [];
+    prevScope = scope;
+  }
 
   const CIDR_RE = /^[0-9a-fA-F.:]+(\/(3[0-2]|[12]?\d))?$/;
   const DOMAIN_RE = /^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*$/;
@@ -192,14 +198,15 @@
           <div class="form-group">
             <label>Devices</label>
             <input type="text" class="target-search" bind:value={targetSearch} placeholder="Search by name or MAC..." />
-            <div class="target-list">
+            <div class="target-list device-target-list">
               {#each filteredDevices as d}
-                <label class="target-check">
-                  <input type="checkbox" checked={scopeTargets.includes(d.mac)}
-                    on:change={() => toggleTarget(d.mac)} />
-                  <span class="target-name">{d.display_name}</span>
-                  <span class="target-mac">{d.mac}</span>
-                </label>
+                <button class="device-row" class:selected={scopeTargets.includes(d.mac)}
+                  on:click={() => toggleTarget(d.mac)}>
+                  <span class="dev-icon">{deviceIcon(d)}</span>
+                  <span class="dev-dot" class:online={isOnline(d)}></span>
+                  <span class="dev-name">{d.display_name}</span>
+                  <span class="dev-mac">{d.mac}</span>
+                </button>
               {/each}
               {#if filteredDevices.length === 0}
                 <span class="no-targets">{targetSearch ? 'No matching devices' : 'No devices available'}</span>
@@ -342,6 +349,22 @@
   }
   .target-search:focus { outline: none; border-color: var(--accent); }
   .target-search::placeholder { color: var(--fg3); }
+  /* Device rows (Networks-style) */
+  .device-target-list { padding: 4px; }
+  .device-row {
+    display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+    background: none; border: 1px solid transparent; border-radius: 6px;
+    font-size: 0.88rem; width: 100%; text-align: left; color: var(--fg);
+    cursor: pointer; font-family: inherit; margin-bottom: 2px;
+  }
+  .device-row:hover { background: var(--bg3); }
+  .device-row.selected { background: var(--accent-bg); border-color: var(--accent); }
+  .dev-icon { flex-shrink: 0; font-size: 0.95rem; line-height: 1; }
+  .dev-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg3); flex-shrink: 0; }
+  .dev-dot.online { background: var(--green); }
+  .dev-name { font-weight: 500; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dev-mac { color: var(--fg3); font-family: var(--font-mono); font-size: 0.78rem; flex-shrink: 0; }
+
   .no-targets { color: var(--fg3); font-size: 0.85rem; padding: 12px; text-align: center; }
 
   .rules-hint { color: var(--fg3); font-size: 0.8rem; margin-bottom: 12px; margin-top: 0; }
