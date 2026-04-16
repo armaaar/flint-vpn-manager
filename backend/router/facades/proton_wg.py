@@ -345,8 +345,10 @@ class RouterProtonWG:
         self._uci.delete(f"firewall.fvpn_zone_{iface}")
         self._uci.delete(f"firewall.fvpn_fwd_{iface}")
         self._uci.commit("firewall")
-        self._service_ctl.reload("firewall")
+        # Rebuild mangle script BEFORE firewall reload so the reload
+        # picks up the corrected script (without the stopped tunnel).
         self._rebuild_proton_wg_mangle_rules()
+        self._service_ctl.reload("firewall")
 
         # 6. Clean up log
         self._ssh.exec(f"rm -f /tmp/{iface}.log")
@@ -484,6 +486,7 @@ class RouterProtonWG:
             return
 
         tunnels = []
+        inactive = []
         for env_path in envs.splitlines():
             env_path = env_path.strip()
             if not env_path:
@@ -500,7 +503,35 @@ class RouterProtonWG:
             ipset_name = vals.get("FVPN_IPSET", "")
             if not (iface and tid and mark and ipset_name):
                 continue
+            # Only rebuild rules for tunnels whose interface is actually UP
+            # (disconnected tunnels keep their .env but have no interface).
+            # Without this check, DNS REDIRECT rules point at a dead dnsmasq.
+            link = self._ssh.exec(
+                f"ip link show {iface} 2>/dev/null | head -1"
+            ).strip()
+            if not link or "UP" not in link:
+                inactive.append((iface, mark, ipset_name, tid))
+                continue
             tunnels.append((iface, mark, ipset_name, tid))
+
+        # Clean up stale mangle chains and DNS rules from inactive tunnels
+        for iface, mark, ipset_name, tid in inactive:
+            chain = f"TUNNEL{tid}_ROUTE_POLICY"
+            self._iptables.delete_chain("mangle", "ROUTE_POLICY", chain)
+            port = self._dns_port(mark)
+            zone = self._ct_zone(mark)
+            self._ssh.exec(
+                f"iptables -t raw -D pre_dns_deal_conn_zone "
+                f"-p udp ! -i lo -m mark --mark {mark}/0xf000 "
+                f"-m addrtype --dst-type LOCAL -j CT --zone {zone} 2>/dev/null; "
+                f"iptables -t raw -D out_dns_deal_conn_zone "
+                f"-p udp ! -o lo -m udp --sport {port} "
+                f"-j CT --zone {zone} 2>/dev/null; "
+                f"iptables -t nat -D policy_redirect "
+                f"-p udp -m mark --mark {mark}/0xf000 "
+                f"-m addrtype --dst-type LOCAL "
+                f"--dport 53 -j REDIRECT --to-ports {port} 2>/dev/null; true"
+            )
 
         cmds = []
         for iface, mark, ipset_name, tid in tunnels:
