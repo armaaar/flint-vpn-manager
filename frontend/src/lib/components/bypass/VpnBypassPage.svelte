@@ -4,6 +4,7 @@
   import { createEventDispatcher, onMount } from 'svelte';
   import BypassExceptionModal from './BypassExceptionModal.svelte';
   import type { BypassOverview, BypassException, BypassPreset } from '../../types';
+  import { deviceIcon, isOnline } from '../../utils/device';
 
   const dispatch = createEventDispatcher();
 
@@ -105,19 +106,22 @@
     return parts.join(', ') || 'Custom';
   }
 
-  function scopeDetails(exc: BypassException): { groups: string[]; devices: string[] } {
+  function scopeDetailGroups(exc: BypassException): string[] {
     const raw = exc.scope_target;
     const targets = Array.isArray(raw) ? raw : (raw ? [raw] : []);
-    return {
-      groups: targets.filter(t => !MAC_RE.test(t)).map(t => {
-        const p = $profiles.find(p => p.id === t);
-        return p ? `${p.icon} ${p.name}` : '(deleted)';
-      }),
-      devices: targets.filter(t => MAC_RE.test(t)).map(t => {
-        const d = $devices.find(d => d.mac === t);
-        return d ? `${d.display_name} (${t})` : t;
-      }),
-    };
+    return targets.filter(t => !MAC_RE.test(t)).map(t => {
+      const p = $profiles.find(p => p.id === t);
+      return p ? `${p.icon} ${p.name}` : '(deleted)';
+    });
+  }
+
+  function scopeDetailDevices(exc: BypassException) {
+    const raw = exc.scope_target;
+    const targets = Array.isArray(raw) ? raw : (raw ? [raw] : []);
+    return targets.filter(t => MAC_RE.test(t)).map(t => {
+      const d = $devices.find(d => d.mac === t);
+      return d || { mac: t, display_name: t, device_class: '', router_online: false };
+    });
   }
 
   function scopeBadgeClass(scope: string): string {
@@ -200,21 +204,29 @@
             {#if expandedId === exc.id}
               <div class="exc-details">
                 {#if exc.scope !== 'global'}
-                  {@const details = scopeDetails(exc)}
-                  {#if details.groups.length > 0}
+                  {@const groups = scopeDetailGroups(exc)}
+                  {@const devs = scopeDetailDevices(exc)}
+                  {#if groups.length > 0}
                     <div class="scope-detail-list">
                       <span class="scope-detail-label">Groups:</span>
-                      {#each details.groups as item}
+                      {#each groups as item}
                         <span class="scope-detail-item">{item}</span>
                       {/each}
                     </div>
                   {/if}
-                  {#if details.devices.length > 0}
-                    <div class="scope-detail-list">
+                  {#if devs.length > 0}
+                    <div class="scope-detail-section">
                       <span class="scope-detail-label">Devices:</span>
-                      {#each details.devices as item}
-                        <span class="scope-detail-item">{item}</span>
-                      {/each}
+                      <div class="scope-device-list">
+                        {#each devs as d}
+                          <div class="scope-device-row">
+                            <span class="sdev-icon">{deviceIcon(d)}</span>
+                            <span class="sdev-dot" class:online={isOnline(d)}></span>
+                            <span class="sdev-name">{d.display_name}</span>
+                            <span class="sdev-mac">{d.mac}</span>
+                          </div>
+                        {/each}
+                      </div>
                     </div>
                   {/if}
                 {/if}
@@ -372,8 +384,18 @@
   .rule-value { color: var(--fg); }
   .rule-proto { color: var(--fg3); font-size: 0.8rem; }
   .scope-detail-list { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
-  .scope-detail-label { color: var(--fg2); font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.2px; }
+  .scope-detail-section { margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+  .scope-detail-label { color: var(--fg2); font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.2px; margin-bottom: 4px; display: block; }
+  .scope-detail-list .scope-detail-label { display: inline; margin-bottom: 0; }
   .scope-detail-item { background: var(--accent-bg); color: var(--accent); font-size: 0.82rem; padding: 2px 10px; border-radius: 10px; }
+  .scope-device-list { display: flex; flex-direction: column; gap: 2px; }
+  .scope-device-row { display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: 4px; font-size: 0.85rem; }
+  .scope-device-row:hover { background: var(--bg3); }
+  .sdev-icon { flex-shrink: 0; font-size: 0.9rem; }
+  .sdev-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--fg3); flex-shrink: 0; }
+  .sdev-dot.online { background: var(--green); }
+  .sdev-name { flex: 1; font-weight: 500; color: var(--fg); }
+  .sdev-mac { color: var(--fg3); font-family: var(--font-mono); font-size: 0.75rem; }
   .rule-block { padding: 4px 0; }
   .block-label { color: var(--fg2); font-size: 0.8rem; font-weight: 600; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.2px; }
   .block-divider { text-align: center; padding: 4px 0; }
