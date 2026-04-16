@@ -95,15 +95,28 @@
     if (exc.scope === 'global') return 'Global';
     const raw = exc.scope_target;
     const targets = Array.isArray(raw) ? raw : (raw ? [raw] : []);
+    const count = targets.length;
+    if (exc.scope === 'group') return count === 1 ? '1 Group' : `${count} Groups`;
+    if (exc.scope === 'device') return count === 1 ? '1 Device' : `${count} Devices`;
+    return exc.scope;
+  }
+
+  function scopeDetails(exc: BypassException): string[] {
+    const raw = exc.scope_target;
+    const targets = Array.isArray(raw) ? raw : (raw ? [raw] : []);
     if (exc.scope === 'group') {
-      const names = targets.map(t => $profiles.find(p => p.id === t)?.name || '?').join(', ');
-      return targets.length > 1 ? `Groups: ${names}` : `Group: ${names}`;
+      return targets.map(t => {
+        const p = $profiles.find(p => p.id === t);
+        return p ? `${p.icon} ${p.name}` : '(deleted)';
+      });
     }
     if (exc.scope === 'device') {
-      const names = targets.map(t => $devices.find(d => d.mac === t)?.display_name || t).join(', ');
-      return targets.length > 1 ? `Devices: ${names}` : `Device: ${names}`;
+      return targets.map(t => {
+        const d = $devices.find(d => d.mac === t);
+        return d ? `${d.display_name} (${t})` : t;
+      });
     }
-    return exc.scope;
+    return [];
   }
 
   function scopeBadgeClass(scope: string): string {
@@ -186,6 +199,14 @@
 
             {#if expandedId === exc.id}
               <div class="exc-details">
+                {#if exc.scope !== 'global'}
+                  <div class="scope-detail-list">
+                    <span class="scope-detail-label">{exc.scope === 'group' ? 'Groups' : 'Devices'}:</span>
+                    {#each scopeDetails(exc) as item}
+                      <span class="scope-detail-item">{item}</span>
+                    {/each}
+                  </div>
+                {/if}
                 {#each (exc.rule_blocks || []) as block, bi}
                   {#if bi > 0}<div class="block-divider"><span>OR</span></div>{/if}
                   <div class="rule-block">
@@ -340,6 +361,9 @@
   .rule-type { font-weight: 700; color: var(--accent); min-width: 60px; font-size: 0.75rem; text-transform: uppercase; }
   .rule-value { color: var(--fg); }
   .rule-proto { color: var(--fg3); font-size: 0.8rem; }
+  .scope-detail-list { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+  .scope-detail-label { color: var(--fg2); font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.2px; }
+  .scope-detail-item { background: var(--accent-bg); color: var(--accent); font-size: 0.82rem; padding: 2px 10px; border-radius: 10px; }
   .rule-block { padding: 4px 0; }
   .block-label { color: var(--fg2); font-size: 0.8rem; font-weight: 600; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.2px; }
   .block-divider { text-align: center; padding: 4px 0; }
