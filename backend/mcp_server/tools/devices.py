@@ -64,6 +64,30 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
         return json.dumps(result, indent=2)
 
     @mcp.tool()
+    def flint_reserve_device_ip(mac: str, ip: str) -> str:
+        """Reserve a static IP for a device via DHCP static lease.
+
+        The device will always receive this IP when it connects to the network.
+        The IP must be a valid IPv4 address within one of the router's LAN subnets.
+
+        Args:
+            mac: Device MAC address (e.g. "AA:BB:CC:DD:EE:FF").
+            ip: IPv4 address to reserve (e.g. "192.168.8.100").
+        """
+        result = api.put(f"/api/devices/{mac}/reserved-ip", json={"ip": ip})
+        return json.dumps(result, indent=2)
+
+    @mcp.tool()
+    def flint_release_device_ip(mac: str) -> str:
+        """Release a previously reserved static IP for a device.
+
+        Args:
+            mac: Device MAC address (e.g. "AA:BB:CC:DD:EE:FF").
+        """
+        result = api.delete(f"/api/devices/{mac}/reserved-ip")
+        return json.dumps(result, indent=2)
+
+    @mcp.tool()
     def flint_refresh() -> str:
         """Trigger an immediate device discovery poll and server score refresh.
 

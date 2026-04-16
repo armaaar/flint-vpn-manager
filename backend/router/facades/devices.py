@@ -330,9 +330,43 @@ class RouterDevices:
 
     # ── Static DHCP Leases ───────────────────────────────────────────────
 
+    def get_static_leases(self) -> list[dict]:
+        """Return all DHCP static leases from UCI config.
+
+        Returns list of dicts with: mac, ip, hostname.
+        """
+        sections = self._uci.show("dhcp")
+        leases = []
+        for name, fields in sections.items():
+            if fields.get("_type") != "host":
+                continue
+            mac = fields.get("mac", "").lower()
+            if not mac:
+                continue
+            leases.append({
+                "mac": mac,
+                "ip": fields.get("ip", ""),
+                "hostname": fields.get("name", ""),
+            })
+        return leases
+
+    def _remove_all_leases_for_mac(self, mac: str):
+        """Remove any existing static lease sections for a MAC (fvpn_ or router)."""
+        mac_lower = mac.lower()
+        sections = self._uci.show("dhcp")
+        for name, fields in sections.items():
+            if fields.get("_type") != "host":
+                continue
+            if fields.get("mac", "").lower() == mac_lower:
+                self._uci.delete(f"dhcp.{name}")
+
     def set_static_lease(self, mac: str, ip: str, hostname: str = ""):
-        """Create a static DHCP lease so the device always gets the same IP."""
+        """Create a static DHCP lease so the device always gets the same IP.
+
+        Removes any existing lease for this MAC first (including router-managed).
+        """
         mac = mac.lower()
+        self._remove_all_leases_for_mac(mac)
         lease_id = f"fvpn_{mac.replace(':', '')}"
 
         self._uci.set_type(f"dhcp.{lease_id}", "host")
@@ -344,8 +378,7 @@ class RouterDevices:
         self._service_ctl.reload("dnsmasq", background=True)
 
     def remove_static_lease(self, mac: str):
-        """Remove a static DHCP lease."""
-        lease_id = f"fvpn_{mac.replace(':', '')}"
-        self._uci.delete(f"dhcp.{lease_id}")
+        """Remove all static DHCP leases for a MAC (fvpn_ and router-managed)."""
+        self._remove_all_leases_for_mac(mac)
         self._uci.commit("dhcp")
         self._service_ctl.reload("dnsmasq", background=True)

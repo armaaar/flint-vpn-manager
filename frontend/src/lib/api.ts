@@ -50,6 +50,8 @@ export const api = {
   getDevices: () => request<Device[]>('/api/devices'),
   assignDevice: (mac: string, profileId: string | null) => request(`/api/devices/${encodeURIComponent(mac)}/profile`, { method: 'PUT', body: { profile_id: profileId } }),
   setDeviceLabel: (mac: string, label: string, deviceClass: string) => request(`/api/devices/${encodeURIComponent(mac)}/label`, { method: 'PUT', body: { label, device_class: deviceClass } }),
+  reserveDeviceIp: (mac: string, ip: string) => request(`/api/devices/${encodeURIComponent(mac)}/reserved-ip`, { method: 'PUT', body: { ip } }),
+  releaseDeviceIp: (mac: string) => request(`/api/devices/${encodeURIComponent(mac)}/reserved-ip`, { method: 'DELETE' }),
 
   // Settings
   getSettings: () => request<AppSettings>('/api/settings'),

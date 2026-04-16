@@ -5,6 +5,7 @@ lifecycle. Handles device discovery, assignment (VPN/non-VPN/proton-wg),
 labeling, and TTL-based caching.
 """
 
+import ipaddress
 import logging
 import time
 import threading
@@ -143,6 +144,11 @@ class DeviceService:
             client_details = router.devices.get_client_details()
         except Exception:
             client_details = {}
+        try:
+            static_leases = router.devices.get_static_leases()
+        except Exception:
+            static_leases = []
+        lease_by_mac = {lease["mac"]: lease for lease in static_leases}
 
         store_data = ps.load()
         assignment_map = self.resolve_assignments(store_data)
@@ -208,6 +214,8 @@ class DeviceService:
             net_info = network_map.get(d.get("ip", ""), {})
             d["network"] = net_info.get("label", "")
             d["network_zone"] = net_info.get("zone", "")
+            lease_info = lease_by_mac.get(mac, {})
+            d["reserved_ip"] = lease_info.get("ip") or None
             out.append(d)
         return out
 
@@ -346,4 +354,24 @@ class DeviceService:
         self._router.uci.commit("gl-client")
 
         # Invalidate cache so next device query picks up the change
+        self.invalidate_cache()
+
+    def reserve_device_ip(self, mac: str, ip: str):
+        """Reserve an IP address for a device via DHCP static lease.
+
+        Removes any existing lease (fvpn_ or router-managed) for this MAC first.
+        """
+        mac = ps.validate_mac(mac)
+        try:
+            ipaddress.IPv4Address(ip)
+        except ValueError:
+            raise ValueError(f"Invalid IPv4 address: {ip}")
+
+        self._router.devices.set_static_lease(mac, ip)
+        self.invalidate_cache()
+
+    def release_device_ip(self, mac: str):
+        """Remove a static DHCP lease for a device."""
+        mac = ps.validate_mac(mac)
+        self._router.devices.remove_static_lease(mac)
         self.invalidate_cache()

@@ -147,16 +147,46 @@ class TestRemoveDeviceFromAllVpn:
 
 
 class TestStaticLeases:
+    def test_get_static_leases(self, devices, uci):
+        uci.show.return_value = {
+            "fvpn_aabbccddeeff": {"_type": "host", "mac": "AA:BB:CC:DD:EE:FF", "ip": "192.168.8.10", "name": "myphone"},
+            "@dnsmasq[0]": {"_type": "dnsmasq", "domainneeded": "1"},
+            "router_lease1": {"_type": "host", "mac": "11:22:33:44:55:66", "ip": "192.168.8.20", "name": "printer"},
+        }
+        leases = devices.get_static_leases()
+        assert len(leases) == 2
+        macs = {l["mac"] for l in leases}
+        assert "aa:bb:cc:dd:ee:ff" in macs
+        assert "11:22:33:44:55:66" in macs
+
+    def test_get_static_leases_skips_no_mac(self, devices, uci):
+        uci.show.return_value = {
+            "broken": {"_type": "host", "ip": "192.168.8.10"},
+        }
+        assert devices.get_static_leases() == []
+
     def test_set_static_lease(self, devices, uci, service_ctl):
+        uci.show.return_value = {}
         devices.set_static_lease("aa:bb:cc:dd:ee:ff", "192.168.8.10", "myphone")
         uci.set_type.assert_called_once()
         assert uci.set.call_count >= 2
         uci.commit.assert_called_once_with("dhcp")
         service_ctl.reload.assert_called_once_with("dnsmasq", background=True)
 
+    def test_set_static_lease_removes_existing_router_lease(self, devices, uci, service_ctl):
+        uci.show.return_value = {
+            "router_lease1": {"_type": "host", "mac": "aa:bb:cc:dd:ee:ff", "ip": "192.168.8.5"},
+        }
+        devices.set_static_lease("aa:bb:cc:dd:ee:ff", "192.168.8.10")
+        # Should delete the old router lease before creating fvpn_ one
+        uci.delete.assert_any_call("dhcp.router_lease1")
+
     def test_remove_static_lease(self, devices, uci, service_ctl):
+        uci.show.return_value = {
+            "fvpn_aabbccddeeff": {"_type": "host", "mac": "aa:bb:cc:dd:ee:ff", "ip": "192.168.8.10"},
+        }
         devices.remove_static_lease("aa:bb:cc:dd:ee:ff")
-        uci.delete.assert_called_once()
+        uci.delete.assert_any_call("dhcp.fvpn_aabbccddeeff")
         uci.commit.assert_called_once_with("dhcp")
 
 

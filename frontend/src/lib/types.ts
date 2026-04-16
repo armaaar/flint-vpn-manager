@@ -108,6 +108,7 @@ export interface Device {
   total_rx: number;
   total_tx: number;
   ipv6_addresses?: string[];
+  reserved_ip?: string | null;
   // DnD requires an id field
   id?: string;
 }

@@ -6,6 +6,7 @@ GET/POST/PUT/DELETE /api/profiles[/:id] → CRUD, reorder
 PUT  /api/profiles/:id/server|protocol|type|guest → server switch, protocol change, type change, guest
 POST /api/profiles/:id/connect|disconnect → tunnel up/down (connect accepts {smart_protocol?: true})
 GET/PUT /api/devices[/:mac/profile|label] → device list, assign, label
+PUT/DELETE /api/devices/:mac/reserved-ip → reserve or release a static IP
 POST /api/refresh                       → trigger device poll + score refresh
 POST /api/probe-latency                 → {server_ids:[]} → {latencies:{id:ms}}
 GET  /api/stream                        → SSE (10s): health, kill_switch, names, server_info, smart_protocol, devices

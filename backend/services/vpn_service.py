@@ -293,6 +293,12 @@ class VPNService:
     def set_device_label(self, mac, label, device_class=""):
         self._devices.set_device_label(mac, label, device_class)
 
+    def reserve_device_ip(self, mac, ip):
+        self._devices.reserve_device_ip(mac, ip)
+
+    def release_device_ip(self, mac):
+        self._devices.release_device_ip(mac)
+
     # ── proton-wg ipset reconciliation ──────────────────────────────────────
 
     def _reconcile_proton_wg_ipset_members(self):

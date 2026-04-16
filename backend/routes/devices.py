@@ -1,4 +1,4 @@
-"""Devices blueprint — Device listing, labeling, and assignment."""
+"""Devices blueprint — Device listing, labeling, assignment, and IP reservation."""
 
 from flask import Blueprint, request, jsonify
 
@@ -57,3 +57,38 @@ def api_assign_device(mac):
         return jsonify({"error": "Profile not found"}), 404
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
+
+
+@devices_bp.route("/api/devices/<mac>/reserved-ip", methods=["PUT"])
+@require_unlocked
+def api_reserve_device_ip(mac):
+    """Reserve an IP address for a device (DHCP static lease).
+
+    Body: {ip: "192.168.8.100"}
+    """
+    data = request.json or {}
+    ip = data.get("ip", "").strip()
+    if not ip:
+        return jsonify({"error": "IP address is required"}), 400
+    try:
+        get_service().reserve_device_ip(mac, ip)
+        return jsonify({"success": True, "mac": mac, "ip": ip})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log.error(f"Failed to reserve IP for {mac}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@devices_bp.route("/api/devices/<mac>/reserved-ip", methods=["DELETE"])
+@require_unlocked
+def api_release_device_ip(mac):
+    """Release a reserved IP for a device."""
+    try:
+        get_service().release_device_ip(mac)
+        return jsonify({"success": True, "mac": mac})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log.error(f"Failed to release IP for {mac}: {e}")
+        return jsonify({"error": str(e)}), 500

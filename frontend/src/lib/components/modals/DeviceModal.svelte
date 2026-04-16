@@ -41,6 +41,8 @@
   let label = '';
   let deviceClass = '';
   let targetProfileId = '';
+  let reserveIp = false;
+  let originalReserveIp = false;
   let boundMac = '';
 
   $: if (device && device.mac !== boundMac) {
@@ -48,6 +50,8 @@
     label = device.label || '';
     deviceClass = device.device_class || '';
     targetProfileId = device.profile_id || '';
+    reserveIp = !!device.reserved_ip;
+    originalReserveIp = !!device.reserved_ip;
   } else if (!device) {
     boundMac = '';
   }
@@ -72,6 +76,20 @@
         if (res.error) { showToast(res.error, true); saving = false; return; }
       }
 
+      if (reserveIp !== originalReserveIp) {
+        try {
+          if (reserveIp) {
+            await api.reserveDeviceIp(mac, device.ip);
+          } else {
+            await api.releaseDeviceIp(mac);
+          }
+        } catch (err) {
+          showToast(err.message || 'Failed to update IP reservation', true);
+          saving = false;
+          return;
+        }
+      }
+
       dispatch('close');
       dispatch('reload');
     } finally {
@@ -94,7 +112,11 @@
       <!-- Info grid -->
       <div class="info-grid">
         <span class="info-label">MAC Address</span><span>{device.mac.toUpperCase()}</span>
-        <span class="info-label">IP Address</span><span>{device.ip || 'Unknown'}</span>
+        <span class="info-label">IP Address</span>
+        <span>
+          {device.ip || 'Unknown'}
+          {#if device.reserved_ip}<span class="badge-reserved">Reserved</span>{/if}
+        </span>
         {#if device.ipv6_addresses && device.ipv6_addresses.length}
           <span class="info-label">IPv6</span>
           <span class="ipv6-addrs">{device.ipv6_addresses.join(', ')}</span>
@@ -193,6 +215,15 @@
         {/if}
       </div>
 
+      {#if device.ip}
+      <div class="option-item">
+        <input type="checkbox" id="rip" bind:checked={reserveIp} />
+        <label for="rip">
+          Reserve IP ({device.ip})
+          <span class="opt-hint">— always assign this IP via DHCP</span>
+        </label>
+      </div>
+      {/if}
 
     </div>
     <div class="modal-footer">
@@ -214,6 +245,11 @@
   .info-label { color: var(--fg3); }
   .status-online { color: var(--green); font-weight: 500; }
   .warning-text { color: var(--amber); }
+  .badge-reserved { font-size: 0.7rem; font-weight: 600; padding: 2px 8px; border-radius: 10px; text-transform: uppercase; letter-spacing: 0.2px; background: var(--green-bg); color: var(--green); margin-left: 6px; }
+  .option-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: var(--radius-xs); }
+  .option-item input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer; }
+  .option-item label { font-size: .85rem; cursor: pointer; }
+  .opt-hint { color: var(--fg3); font-weight: 400; font-size: .78rem; }
 
   /* VPN Bypass section — matches Networks page exception style */
   .bypass-section { margin-bottom: 18px; padding: 14px; background: var(--surface); border-radius: var(--radius-sm, 8px); }

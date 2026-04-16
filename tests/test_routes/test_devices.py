@@ -71,3 +71,46 @@ class TestAssignDevice:
                 "profile_id": None,
             })
         assert resp.status_code == 200
+
+
+class TestReserveDeviceIp:
+    def test_reserves_ip(self, client, mock_registry):
+        resp = client.put("/api/devices/aa:bb:cc:dd:ee:ff/reserved-ip", json={
+            "ip": "192.168.8.100",
+        })
+        assert resp.status_code == 200
+        assert resp.json["success"] is True
+        mock_registry.get_service.return_value.reserve_device_ip.assert_called_once_with(
+            "aa:bb:cc:dd:ee:ff", "192.168.8.100"
+        )
+
+    def test_missing_ip(self, client, mock_registry):
+        resp = client.put("/api/devices/aa:bb:cc:dd:ee:ff/reserved-ip", json={})
+        assert resp.status_code == 400
+        assert "required" in resp.json["error"].lower()
+
+    def test_validation_error(self, client, mock_registry):
+        mock_registry.get_service.return_value.reserve_device_ip.side_effect = (
+            ValueError("IP not in subnet")
+        )
+        resp = client.put("/api/devices/aa:bb:cc:dd:ee:ff/reserved-ip", json={
+            "ip": "10.0.0.1",
+        })
+        assert resp.status_code == 400
+
+
+class TestReleaseDeviceIp:
+    def test_releases_ip(self, client, mock_registry):
+        resp = client.delete("/api/devices/aa:bb:cc:dd:ee:ff/reserved-ip")
+        assert resp.status_code == 200
+        assert resp.json["success"] is True
+        mock_registry.get_service.return_value.release_device_ip.assert_called_once_with(
+            "aa:bb:cc:dd:ee:ff"
+        )
+
+    def test_validation_error(self, client, mock_registry):
+        mock_registry.get_service.return_value.release_device_ip.side_effect = (
+            ValueError("Invalid MAC")
+        )
+        resp = client.delete("/api/devices/invalid-mac/reserved-ip")
+        assert resp.status_code == 400

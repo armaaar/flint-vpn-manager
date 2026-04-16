@@ -42,6 +42,7 @@ def default_device(mac: str, profile_id=None) -> dict:
         "device_class": "", "profile_id": profile_id, "router_online": False,
         "iface": "", "rx_speed": 0, "tx_speed": 0, "total_rx": 0,
         "total_tx": 0, "signal_dbm": None, "link_speed_mbps": None,
+        "reserved_ip": None,
     }
 
 
