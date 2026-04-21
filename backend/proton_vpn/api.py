@@ -8,7 +8,7 @@ and WireGuard/OpenVPN config generation. All methods are synchronous
 WireGuard configs use **persistent-mode certificates** (365-day validity,
 no local agent required). Each VPN profile gets its own Ed25519 key pair,
 registered with Proton as a named "device". The router is fully standalone
-after config upload — no Surface Go dependency for ongoing VPN operation.
+after config upload — no host dependency for ongoing VPN operation.
 
 Usage:
     api = ProtonAPI()

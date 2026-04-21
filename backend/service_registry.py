@@ -5,6 +5,7 @@ _service, _session_unlocked) with a single object. Tests can patch
 fields on the registry object instead of patching module-level globals.
 """
 
+import os
 from typing import Optional
 
 from proton_vpn.api import ProtonAPI
@@ -12,7 +13,13 @@ from router.api import RouterAPI
 from services.vpn_service import VPNService
 
 
-SSH_KEY_PATH = "/home/armaaar/.ssh/id_ed25519"
+DEFAULT_SSH_KEY_PATH = "~/.ssh/id_ed25519"
+
+
+def _resolve_ssh_key_path(config: dict) -> str:
+    """SSH key path resolution: env var → config.json → default."""
+    path = os.environ.get("FLINT_SSH_KEY") or config.get("ssh_key_path") or DEFAULT_SSH_KEY_PATH
+    return os.path.expanduser(path)
 
 
 class ServiceRegistry:
@@ -39,7 +46,7 @@ class ServiceRegistry:
             config = sm.get_config()
             self.router = RouterAPI(
                 host=config.get("router_ip", "192.168.8.1"),
-                key_filename=SSH_KEY_PATH,
+                key_filename=_resolve_ssh_key_path(config),
             )
         return self.router
 

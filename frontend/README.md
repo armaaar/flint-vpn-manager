@@ -1,43 +1,45 @@
-# Svelte + Vite
+# FlintVPN Manager — Frontend
 
-This template should help get you started developing with Svelte in Vite.
+Svelte 5 + Vite SPA served by the Flask backend at `http://<host-ip>:5000`. Not a standalone app — it talks to the Python backend via the REST API documented in [`../docs/rest-api.md`](../docs/rest-api.md) and receives live updates over SSE.
 
-## Recommended IDE Setup
+See the top-level [README](../README.md) for the full project overview, installation, and disclaimer.
 
-[VS Code](https://code.visualstudio.com/) + [Svelte](https://marketplace.visualstudio.com/items?itemName=svelte.svelte-vscode).
+## Layout
 
-## Need an official Svelte framework?
-
-Check out [SvelteKit](https://github.com/sveltejs/kit#readme), which is also powered by Vite. Deploy anywhere with its serverless-first approach and adapt to various platforms, with out of the box support for TypeScript, SCSS, and Less, and easily-added support for mdsvex, GraphQL, PostCSS, Tailwind CSS, and more.
-
-## Technical considerations
-
-**Why use this over SvelteKit?**
-
-- It brings its own routing solution which might not be preferable for some users.
-- It is first and foremost a framework that just happens to use Vite under the hood, not a Vite app.
-
-This template contains as little as possible to get started with Vite + Svelte, while taking into account the developer experience with regards to HMR and intellisense. It demonstrates capabilities on par with the other `create-vite` templates and is a good starting point for beginners dipping their toes into a Vite + Svelte project.
-
-Should you later need the extended capabilities and extensibility provided by SvelteKit, the template has been structured similarly to SvelteKit so that it is easy to migrate.
-
-**Why include `.vscode/extensions.json`?**
-
-Other templates indirectly recommend extensions via the README, but this file allows VS Code to prompt the user to install the recommended extension upon opening the project.
-
-**Why enable `checkJs` in the JS template?**
-
-It is likely that most cases of changing variable types in runtime are likely to be accidental, rather than deliberate. This provides advanced typechecking out of the box. Should you like to take advantage of the dynamically-typed nature of JavaScript, it is trivial to change the configuration.
-
-**Why is HMR not preserving my local component state?**
-
-HMR state preservation comes with a number of gotchas! It has been disabled by default in both `svelte-hmr` and `@sveltejs/vite-plugin-svelte` due to its often surprising behavior. You can read the details [here](https://github.com/sveltejs/svelte-hmr/tree/master/packages/svelte-hmr#preservation-of-local-state).
-
-If you have state that's important to retain within a component, consider creating an external store which would not be replaced by HMR.
-
-```js
-// store.js
-// An extremely simple external store
-import { writable } from 'svelte/store'
-export default writable(0)
 ```
+src/
+  App.svelte                 Router + top-level layout
+  app.css                    Design tokens (consume via var(--token-name))
+  lib/
+    api.js                   fetch wrapper (throws on !res.ok)
+    stores/                  Svelte stores + SSE handler
+    device-utils.js, format.js, country.js, emojiData.js
+  components/                Dashboard, GroupCard, ServerPicker, DeviceModal, …
+  __tests__/                 Vitest unit tests
+e2e/                         Playwright E2E specs (require backend on :5000)
+```
+
+See [`../docs/frontend.md`](../docs/frontend.md) for the component-by-component breakdown and [`../docs/design-system.md`](../docs/design-system.md) for the Sentry-inspired design reference.
+
+## Development
+
+```bash
+# Hot-reload dev server (proxies API to :5000, requires backend running)
+npm run dev            # → http://localhost:5173
+
+# Production build — Flask serves the output from ../static/
+npm run build
+
+# Unit tests (vitest, excludes e2e)
+npm test
+
+# E2E tests (Playwright — needs backend running on :5000)
+npx playwright test
+npx playwright test --ui     # interactive
+```
+
+**Rebuild before browser-testing against the Flask server** — Flask serves static files from `../static/` directly. The `:5173` dev server is only for interactive development.
+
+## Design tokens
+
+Never hardcode colors, fonts, shadows, or radii in component `<style>` blocks. Use `var(--token-name)` from `src/app.css` `:root`. Buttons use uppercase text with `letter-spacing: 0.2px`. Full reference in [`../docs/design-tokens.md`](../docs/design-tokens.md).

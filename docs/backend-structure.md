@@ -189,7 +189,7 @@ Talks to ProtonVPN's API. No router dependency — these modules produce configs
 |--------|---------------|
 | `api.py` | Login (with 2FA), server list, WG/OVPN config generation, cert management, sessions, alternative routing. |
 | `server_optimizer.py` | Pure scoring functions: Proton score → blacklist filter → favourite boost → latency tiebreaker. |
-| `latency_probe.py` | TCP connect-time measurement **from the router** via SSH. Never locally (Surface Go is behind VPN). |
+| `latency_probe.py` | TCP connect-time measurement **from the router** via SSH. Never locally (host may be behind VPN). |
 
 ### `vpn/` — Protocol Logic
 

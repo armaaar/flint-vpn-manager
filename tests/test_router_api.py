@@ -4,6 +4,8 @@ Unit tests mock SSH commands.
 Integration tests (marked @pytest.mark.integration) use a live router.
 """
 
+import os
+
 import pytest
 from unittest.mock import MagicMock
 
@@ -37,15 +39,15 @@ def mock_router():
 class TestGetDhcpLeases:
     def test_parses_leases(self, mock_router):
         mock_router._exec_responses["cat /tmp/dhcp.leases"] = (
-            "1775453082 42:5a:e3:13:f6:37 192.168.8.163 * 01:42:5a:e3:13:f6:37\n"
-            "1775453152 a4:f9:33:1c:b6:78 192.168.8.228 Armaaar-PC 01:a4:f9:33:1c:b6:78"
+            "1775453082 aa:bb:cc:00:00:01 192.168.8.163 * 01:aa:bb:cc:00:00:01\n"
+            "1775453152 aa:bb:cc:11:22:33 192.168.8.228 test-host 01:aa:bb:cc:11:22:33"
         )
         leases = mock_router.devices.get_dhcp_leases()
         assert len(leases) == 2
-        assert leases[0]["mac"] == "42:5a:e3:13:f6:37"
+        assert leases[0]["mac"] == "aa:bb:cc:00:00:01"
         assert leases[0]["ip"] == "192.168.8.163"
         assert leases[0]["hostname"] == ""
-        assert leases[1]["hostname"] == "Armaaar-PC"
+        assert leases[1]["hostname"] == "test-host"
 
     def test_empty_leases(self, mock_router):
         mock_router._exec_responses["cat /tmp/dhcp.leases"] = ""
@@ -520,7 +522,8 @@ class TestIdRanges:
 class TestRouterAPIIntegration:
     @pytest.fixture
     def router(self):
-        r = RouterAPI("192.168.8.1", key_filename="/home/armaaar/.ssh/id_ed25519")
+        key_path = os.path.expanduser(os.environ.get("FLINT_SSH_KEY", "~/.ssh/id_ed25519"))
+        r = RouterAPI("192.168.8.1", key_filename=key_path)
         try:
             r.connect()
         except Exception:

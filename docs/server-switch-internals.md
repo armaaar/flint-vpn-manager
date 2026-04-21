@@ -22,4 +22,4 @@ When switching servers with an `existing_wg_key`, `generate_wireguard_config` mu
 
 ## Latency probing
 
-Latency probes ALWAYS run from the router via SSH, never locally. The Surface Go may be behind a VPN tunnel, which would give misleading results. The `probe_servers_local` fallback in `latency_probe.py` exists for unit testing only — never use it in production paths.
+Latency probes ALWAYS run from the router via SSH, never locally. The host machine may be behind a VPN tunnel, which would give misleading results. The `probe_servers_local` fallback in `latency_probe.py` exists for unit testing only — never use it in production paths.

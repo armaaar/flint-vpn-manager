@@ -1,7 +1,7 @@
 """Latency probe — measure TCP connect time to VPN server IPs.
 
 Probes run FROM THE ROUTER (via SSH) so the measured latency reflects
-the actual WAN path, not the Surface Go's potentially-VPN'd path.
+the actual WAN path, not the host's potentially-VPN'd path.
 Falls back to local probing if the router is unreachable.
 
 Used by:
@@ -118,7 +118,7 @@ def probe_servers_local(
 ) -> dict[str, Optional[float]]:
     """Probe TCP latency locally (fallback when router is unreachable).
 
-    Note: If the Surface Go is behind a VPN tunnel, these latencies
+    Note: If the host is behind a VPN tunnel, these latencies
     will reflect the tunneled path, not the direct ISP path.
 
     Args:

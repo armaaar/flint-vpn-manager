@@ -65,14 +65,14 @@ describe('isStale', () => {
 
 describe('isRandomMac', () => {
   it('detects randomized MACs (2nd char is 2, 6, a, or e)', () => {
-    expect(isRandomMac('42:5a:e3:13:f6:37')).toBe(true);  // '2'
+    expect(isRandomMac('42:00:00:00:00:01')).toBe(true);  // '2'
     expect(isRandomMac('d6:ab:cd:ef:12:34')).toBe(true);  // '6'
     expect(isRandomMac('fa:bb:cc:dd:ee:ff')).toBe(true);  // 'a'
     expect(isRandomMac('de:ad:be:ef:12:34')).toBe(true);  // 'e'
   });
 
   it('returns false for non-random MACs', () => {
-    expect(isRandomMac('a4:f9:33:1c:b6:78')).toBe(false); // '4'
+    expect(isRandomMac('a4:00:00:00:00:01')).toBe(false); // '4'
     expect(isRandomMac('00:11:22:33:44:55')).toBe(false);  // '0'
     expect(isRandomMac('d8:ab:cd:ef:12:34')).toBe(false);  // '8'
   });

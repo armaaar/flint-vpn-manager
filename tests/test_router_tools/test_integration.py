@@ -7,6 +7,8 @@ cases, and ipset/iptables version differences that mocks can't.
 Run with: pytest -m integration tests/test_router_tools/test_integration.py
 """
 
+import os
+
 import pytest
 
 from router.api import RouterAPI
@@ -15,7 +17,8 @@ from router.tools import Uci, Ipset, Iptables, Iproute, ServiceCtl
 
 @pytest.fixture
 def router():
-    r = RouterAPI("192.168.8.1", key_filename="/home/armaaar/.ssh/id_ed25519")
+    key_path = os.path.expanduser(os.environ.get("FLINT_SSH_KEY", "~/.ssh/id_ed25519"))
+    r = RouterAPI("192.168.8.1", key_filename=key_path)
     try:
         r.connect()
     except Exception:

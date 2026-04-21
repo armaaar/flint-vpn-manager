@@ -1,13 +1,13 @@
 # FlintVPN Manager — Project Overview
 
-A local web dashboard for managing ProtonVPN WireGuard and OpenVPN profiles on a GL.iNet Flint 2 (GL-MT6000) router. Runs on a Surface Go 2 (Ultramarine Linux), serves a Svelte frontend to any device on the LAN.
+A local web dashboard for managing ProtonVPN WireGuard and OpenVPN profiles on a GL.iNet Flint 2 (GL-MT6000) router. Runs on a small always-on Linux host on the LAN, serves a Svelte frontend to any device on the LAN.
 
 ## Features
 
 - **3 VPN protocols**: WireGuard UDP (fastest), WireGuard TCP/TLS (bypasses firewalls), OpenVPN UDP/TCP (most compatible)
 - **Up to 14 simultaneous tunnels**: 5 WG UDP + 4 WG TCP/TLS + 5 OpenVPN
 - **Per-device VPN routing**: assign any device to any VPN group via MAC-based ipset rules
-- **Persistent WireGuard certificates**: 365-day certs, router works standalone without the Surface Go
+- **Persistent WireGuard certificates**: 365-day certs, router works standalone without the host machine
 - **Auto-optimizer**: daily background task switches VPN groups to faster servers (by Proton score + latency tiebreaker)
 - **Server score refresh**: background thread keeps Proton server scores fresh (~15min loads, ~3h full list)
 - **Server blacklist & favourites**: exclude bad servers, prefer known-good ones — persisted in `config.json`
@@ -35,7 +35,7 @@ For detailed feature specs, see [FEATURES_AND_SPECS.md](FEATURES_AND_SPECS.md).
 ## Architecture
 
 ```
-Surface Go 2 (this machine)          GL.iNet Flint 2 Router
+Host machine (this repo)             GL.iNet Flint 2 Router
 ┌──────────────────────────┐         ┌─────────────────────────┐
 │  Flask (backend/ :5000)  │──SSH──▶│  OpenWrt + GL.iNet FW   │
 │  Svelte (static/)        │         │  WireGuard / OpenVPN    │

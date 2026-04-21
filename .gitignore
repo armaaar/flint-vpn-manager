@@ -56,6 +56,12 @@ Thumbs.db
 .playwright-mcp/
 /tmp/
 
+# Claude Code / agents (local installed copies, like node_modules)
+.claude/skills/
+.claude/settings.local.json
+.agents/
+.claude/plans/
+
 # Playwright E2E
 frontend/playwright-report/
 frontend/test-results/

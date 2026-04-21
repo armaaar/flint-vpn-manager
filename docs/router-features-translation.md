@@ -639,7 +639,7 @@ Writes to the endpoint: `uci set wireguard.peer_N.end_point='<ip>:<port>'` or th
 - **proton-wg**: rewrite `.conf` + `wg setconf` on live interface.
 
 ### Latency probe
-Runs **from the router only** (never from Surface Go — it's behind VPN). Uses `curl -w "%{time_connect}"` on port 443 against server entry IPs via SSH.
+Runs **from the router only** (never from the host — it may be behind VPN). Uses `curl -w "%{time_connect}"` on port 443 against server entry IPs via SSH.
 
 ---
 
@@ -1100,7 +1100,7 @@ The jump into `FVPN_BYPASS` must be before any `MARK` rules. Proton-wg TUNNEL ch
 - `/tmp/wireguard/<iface>_state` — ephemeral state hint written by vpn-client (`connecting`, etc.).
 - `/tmp/dhcp.leases` — current DHCP leases (`<expiry> <mac> <ip> <hostname> <client_id>`).
 
-### App-side (on Surface Go, at `/home/armaaar/flint-vpn-manager/backend/logs/`)
+### App-side (on the host machine, at `<repo>/backend/logs/`)
 - `app.log` — connect/disconnect, create/delete, assignments.
 - `error.log` — exceptions and stack traces.
 - `access.log` — HTTP API access.

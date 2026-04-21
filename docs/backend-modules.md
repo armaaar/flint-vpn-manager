@@ -96,7 +96,7 @@ Thin synchronous wrapper around `proton-vpn-api-core`. Login (with 2FA), server 
 Pure functions. Ranking: Proton `score` (lower = better) → blacklist filter → favourite boost (30% tolerance) → latency tiebreaker (15% similarity). Key functions: `resolve_scope_to_server()`, `find_better_server()`.
 
 ### `proton_vpn/latency_probe.py` — TCP latency measurement
-**Probes always run from the router via SSH** (never locally — Surface Go is behind VPN). Uses `curl -w "%{time_connect}"` because BusyBox `nc` lacks `-z`/`-w`.
+**Probes always run from the router via SSH** (never locally — host may be behind VPN). Uses `curl -w "%{time_connect}"` because BusyBox `nc` lacks `-z`/`-w`.
 
 ---
 
