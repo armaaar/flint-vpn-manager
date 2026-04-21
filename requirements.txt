@@ -3,7 +3,13 @@ paramiko>=3.4.0
 requests>=2.31.0
 cryptography>=42.0.0
 python-glinet>=0.2.0
-proton-vpn-api-core>=4.0.0
 mcp[cli]>=1.27.0
 httpx>=0.28.0
 pytest>=8.0.0
+
+# proton-vpn-api-core is NOT installed from PyPI — the PyPI package is a
+# 0.0.1 placeholder. The real v4.x library ships with the official
+# ProtonVPN Linux desktop app. Install that app on the host, then create
+# the venv with --system-site-packages so the system-wide Proton libs
+# are importable. See the README "Prerequisites" section. CI runners get
+# the module stubbed by tests/conftest.py.

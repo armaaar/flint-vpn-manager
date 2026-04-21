@@ -3,11 +3,65 @@
 import logging
 import os
 import shutil
+import sys
 import tempfile
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import patch
 
 import pytest
+
+
+def _install_proton_stubs() -> None:
+    """Stub out proton-vpn-api-core when the real package isn't installed.
+
+    The real v4.x library ships with the ProtonVPN Linux desktop app, not
+    PyPI. Local dev hosts have it via --system-site-packages; CI runners
+    don't. Unit tests mock ProtonAPI at a higher level, so empty stubs
+    are sufficient to let backend.proton_vpn.api import cleanly.
+    """
+    try:
+        import proton.vpn.core.api  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        return
+
+    modules = [
+        "proton",
+        "proton.session",
+        "proton.session.api",
+        "proton.vpn",
+        "proton.vpn.core",
+        "proton.vpn.core.api",
+        "proton.vpn.core.session_holder",
+        "proton.vpn.session",
+        "proton.vpn.session.dataclasses",
+        "proton.vpn.session.key_mgr",
+        "proton.vpn.session.servers",
+        "proton.vpn.session.servers.logicals",
+        "proton.vpn.session.servers.types",
+        "proton.vpn.connection",
+        "proton.vpn.connection.constants",
+    ]
+    for name in modules:
+        sys.modules.setdefault(name, ModuleType(name))
+
+    sys.modules["proton.session.api"].sync_wrapper = lambda f: f
+    sys.modules["proton.vpn.core.api"].ProtonVPNAPI = type("ProtonVPNAPI", (), {})
+    sys.modules["proton.vpn.core.session_holder"].ClientTypeMetadata = type(
+        "ClientTypeMetadata", (), {}
+    )
+    sys.modules["proton.vpn.session.dataclasses"].LoginResult = type("LoginResult", (), {})
+    sys.modules["proton.vpn.session.key_mgr"].KeyHandler = type("KeyHandler", (), {})
+    sys.modules["proton.vpn.session.servers.logicals"].ServerList = type("ServerList", (), {})
+    servers_types = sys.modules["proton.vpn.session.servers.types"]
+    for symbol in ("LogicalServer", "PhysicalServer", "ServerFeatureEnum", "TierEnum"):
+        setattr(servers_types, symbol, type(symbol, (), {}))
+    sys.modules["proton.vpn.connection.constants"].CA_CERT = ""
+
+
+_install_proton_stubs()
 
 
 def _strip_file_handlers(logger):
