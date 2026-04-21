@@ -4,9 +4,18 @@ Unit tests mock the underlying Proton library.
 Integration tests (marked @pytest.mark.integration) use a live ProtonVPN session.
 """
 
+import sys
 import time
 
 import pytest
+
+if getattr(sys.modules.get("proton"), "_flintvpn_stub", False):
+    pytest.skip(
+        "proton-vpn-api-core not installed — these tests need the real "
+        "library (ships with the ProtonVPN Linux desktop app).",
+        allow_module_level=True,
+    )
+
 from unittest.mock import MagicMock, patch, PropertyMock
 
 import proton_vpn.api as proton_api

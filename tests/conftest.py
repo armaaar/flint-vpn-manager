@@ -47,6 +47,9 @@ def _install_proton_stubs() -> None:
     for name in modules:
         sys.modules.setdefault(name, ModuleType(name))
 
+    # Sentinel so tests can detect "running under stubs, skip me"
+    sys.modules["proton"]._flintvpn_stub = True
+
     sys.modules["proton.session.api"].sync_wrapper = lambda f: f
     sys.modules["proton.vpn.core.api"].ProtonVPNAPI = type("ProtonVPNAPI", (), {})
     sys.modules["proton.vpn.core.session_holder"].ClientTypeMetadata = type(
@@ -56,8 +59,14 @@ def _install_proton_stubs() -> None:
     sys.modules["proton.vpn.session.key_mgr"].KeyHandler = type("KeyHandler", (), {})
     sys.modules["proton.vpn.session.servers.logicals"].ServerList = type("ServerList", (), {})
     servers_types = sys.modules["proton.vpn.session.servers.types"]
-    for symbol in ("LogicalServer", "PhysicalServer", "ServerFeatureEnum", "TierEnum"):
-        setattr(servers_types, symbol, type(symbol, (), {}))
+    servers_types.LogicalServer = type("LogicalServer", (), {})
+    servers_types.PhysicalServer = type("PhysicalServer", (), {})
+    servers_types.TierEnum = type("TierEnum", (), {})
+    servers_types.ServerFeatureEnum = type(
+        "ServerFeatureEnum",
+        (),
+        {name: object() for name in ("SECURE_CORE", "TOR", "P2P", "STREAMING", "IPV6")},
+    )
     sys.modules["proton.vpn.connection.constants"].CA_CERT = ""
 
 
