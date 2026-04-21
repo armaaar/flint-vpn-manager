@@ -59,8 +59,9 @@ Thumbs.db
 # Claude Code / agents (local installed copies, like node_modules)
 .claude/skills/
 .claude/settings.local.json
-.agents/
 .claude/plans/
+.claude/scheduled_tasks.lock
+.agents/
 
 # Playwright E2E
 frontend/playwright-report/
