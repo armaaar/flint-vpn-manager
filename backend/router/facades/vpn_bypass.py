@@ -317,7 +317,7 @@ class RouterVpnBypass:
         """Write the firewall include script for reboot persistence."""
         lines = [
             "#!/bin/sh",
-            "# FlintVPN bypass exceptions — auto-generated",
+            "# Flint VPN Manager bypass exceptions — auto-generated",
             "# Re-applied on every firewall reload",
             "",
         ]
@@ -332,7 +332,7 @@ class RouterVpnBypass:
 
         Each block with domain rules gets its own ipset→dnsmasq mapping.
         """
-        lines = ["# FlintVPN bypass — auto-generated dnsmasq ipset config"]
+        lines = ["# Flint VPN Manager bypass — auto-generated dnsmasq ipset config"]
         has_domains = False
 
         for exc in enabled:

@@ -12,7 +12,7 @@ labels: bug
 - **Host OS**: (e.g. Ubuntu 24.04)
 - **Python version**: (`python --version`)
 - **Node version**: (`node --version`)
-- **FlintVPN Manager commit**: (`git rev-parse HEAD`)
+- **Flint VPN Manager commit**: (`git rev-parse HEAD`)
 
 > If you're running on a different router, firmware, or VPN provider, please note that the project is not supported there. You're welcome to file an issue but it may be closed as out-of-scope.
 

@@ -16,7 +16,7 @@ These names make our configs visible in the GL.iNet router dashboard (http://192
 ## Router Limits
 
 - **5 WireGuard UDP tunnels** (`wgclient1`–`wgclient5`, marks `0x1000`–`0x5000`, vpn-client)
-- **4 WireGuard TCP/TLS tunnels** (`protonwg0`–`protonwg3`, marks `0x6000`/`0x7000`/`0x9000`/`0xf000`, FlintVPN)
+- **4 WireGuard TCP/TLS tunnels** (`protonwg0`–`protonwg3`, marks `0x6000`/`0x7000`/`0x9000`/`0xf000`, Flint VPN Manager)
 - **5 OpenVPN tunnels** (`ovpnclient1`–`ovpnclient5`, marks `0xa000`–`0xe000`, vpn-client)
 - **14 total simultaneous VPN tunnels** (limited by fwmark address space)
 - **150 DHCP devices** (pool `.100`–`.249`)
@@ -60,11 +60,11 @@ Uses `ipset`, never `rtp2.sh`. `router.set_device_vpn`, `remove_device_from_vpn`
 
 ## proton-wg (WireGuard TCP/TLS)
 
-WireGuard over TCP/TLS, managed entirely by FlintVPN (not vpn-client). Uses `proton-wg` — ProtonVPN's wireguard-go fork cross-compiled for ARM64.
+WireGuard over TCP/TLS, managed entirely by Flint VPN Manager (not vpn-client). Uses `proton-wg` — ProtonVPN's wireguard-go fork cross-compiled for ARM64.
 
 ```
 Kernel WG (UDP):    vpn-client → wgclient1-5 → fwmark 0x1000-0x5000
-proton-wg (TCP/TLS): FlintVPN → protonwg0-3  → fwmark 0x6000,0x7000,0x9000,0xf000
+proton-wg (TCP/TLS): Flint VPN Manager → protonwg0-3  → fwmark 0x6000,0x7000,0x9000,0xf000
 OpenVPN:            vpn-client → ovpnclient1-5 → fwmark 0xa000-0xe000
 ```
 
@@ -97,7 +97,7 @@ See [proton-wg-internals.md](proton-wg-internals.md) for process targeting, mang
 
 **Critical**: fw3 silently ignores zones with names longer than 11 characters. No error, no warning — just no firewall rules, no NAT, no internet for that zone.
 
-FlintVPN zone name format: `fvpn_` (5 chars) + `zone_id` → `zone_id` max 6 chars. `lan_access_service.py` truncates zone_id to 6 chars and handles collisions.
+Flint VPN Manager zone name format: `fvpn_` (5 chars) + `zone_id` → `zone_id` max 6 chars. `lan_access_service.py` truncates zone_id to 6 chars and handles collisions.
 
 ## VPN Routing Across Bridges
 

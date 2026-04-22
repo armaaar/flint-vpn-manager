@@ -43,7 +43,7 @@ class RouterTunnel:
         self._service_ctl.restart("vpn-client")
 
         # Rebuild IPv6 mangle rules after vpn-client restart.
-        # vpn-client only sets up IPv4 mangle/routing — FlintVPN manages IPv6.
+        # vpn-client only sets up IPv4 mangle/routing — Flint VPN Manager manages IPv6.
         if self._ipv6_mangle_rebuild:
             try:
                 self._ipv6_mangle_rebuild()

@@ -12,7 +12,7 @@ from mcp_server.api_client import FlintAPI
 def register(mcp: FastMCP, api: FlintAPI) -> None:
     @mcp.tool()
     def flint_get_status() -> str:
-        """Check whether the FlintVPN app needs first-time setup, is locked, or is unlocked.
+        """Check whether the Flint VPN Manager app needs first-time setup, is locked, or is unlocked.
 
         Returns JSON with:
         - status: "setup-needed" | "locked" | "unlocked"
@@ -26,7 +26,7 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
 
     @mcp.tool()
     def flint_unlock(master_password: str) -> str:
-        """Unlock the FlintVPN session with the master password.
+        """Unlock the Flint VPN Manager session with the master password.
 
         Required before any management operations. Decrypts stored credentials,
         connects to the router via SSH, and starts background threads.
@@ -39,7 +39,7 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
 
     @mcp.tool()
     def flint_lock() -> str:
-        """Lock the FlintVPN session.
+        """Lock the Flint VPN Manager session.
 
         Stops background threads (device tracker, auto-optimizer) and clears
         decrypted credentials from memory. The VPN tunnels keep running on the

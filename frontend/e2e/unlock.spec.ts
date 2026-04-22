@@ -25,7 +25,7 @@ test.describe('Unlock Screen', () => {
   });
 
   test.skip('shows unlock screen with correct elements', async ({ page }) => {
-    await expect(page.locator('h2')).toHaveText('FlintVPN Manager');
+    await expect(page.locator('h2')).toHaveText('Flint VPN Manager');
     await expect(page.locator('#u-pass')).toBeVisible();
     await expect(page.locator('button:has-text("Unlock")')).toBeVisible();
     await expect(page.locator('.subtitle')).toHaveText(
@@ -38,7 +38,7 @@ test.describe('Unlock Screen', () => {
     await page.locator('button:has-text("Unlock")').click();
 
     await expect(page.locator('.sidebar')).toBeVisible({ timeout: 15_000 });
-    await expect(page.locator('.sidebar-logo')).toContainText('FlintVPN');
+    await expect(page.locator('.sidebar-logo')).toContainText('Flint VPN');
   });
 
   test.skip('unlock via Enter key', async ({ page }) => {

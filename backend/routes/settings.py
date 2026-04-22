@@ -47,7 +47,7 @@ def api_update_settings():
             router = get_router()
             if data["global_ipv6_enabled"]:
                 router.firewall.ensure_ipv6_router_enabled()
-                # Enable IPv6 on all FlintVPN-managed networks
+                # Enable IPv6 on all Flint VPN Manager-managed networks
                 networks = router.lan_access.get_networks()
                 for net in networks:
                     if not net.get("ipv6_enabled"):

@@ -1,4 +1,4 @@
-# FlintVPN Manager — Features & Specs
+# Flint VPN Manager — Features & Specs
 
 User-facing feature reference. For architecture, see [project-overview.md](project-overview.md). For source-of-truth rules, see [source-of-truth.md](internals/source-of-truth.md).
 
@@ -251,7 +251,7 @@ GET    /                                → serve Svelte frontend
 | Resource | Limit | Source |
 |----------|-------|--------|
 | WireGuard UDP tunnels | 5 | GL.iNet vpn-client (`wgclient1`–`wgclient5`, marks `0x1000`–`0x5000`) |
-| WireGuard TCP/TLS tunnels | 4 | FlintVPN proton-wg (`protonwg0`–`protonwg3`, marks `0x6000`/`0x7000`/`0x9000`/`0xf000`) |
+| WireGuard TCP/TLS tunnels | 4 | Flint VPN Manager proton-wg (`protonwg0`–`protonwg3`, marks `0x6000`/`0x7000`/`0x9000`/`0xf000`) |
 | OpenVPN tunnels | 5 | GL.iNet vpn-client (`ovpnclient1`–`ovpnclient5`, marks `0xa000`–`0xe000`) |
 | Total simultaneous VPN tunnels | 14 | 5 + 4 + 5 (limited by fwmark address space) |
 | DHCP devices | 150 | pool `192.168.8.100`–`.249` |

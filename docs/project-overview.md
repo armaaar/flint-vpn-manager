@@ -1,4 +1,4 @@
-# FlintVPN Manager — Project Overview
+# Flint VPN Manager — Project Overview
 
 A local web dashboard for managing ProtonVPN WireGuard and OpenVPN profiles on a GL.iNet Flint 2 (GL-MT6000) router. Runs on a small always-on Linux host on the LAN, serves a Svelte frontend to any device on the LAN.
 

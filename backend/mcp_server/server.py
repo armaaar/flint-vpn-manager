@@ -1,6 +1,6 @@
-"""FlintVPN MCP Server — manage your local network via Claude.
+"""Flint VPN Manager MCP Server — manage your local network via Claude.
 
-Exposes the FlintVPN REST API as MCP tools so a Claude session with no
+Exposes the Flint VPN Manager REST API as MCP tools so a Claude session with no
 project context can manage VPN tunnels, device routing, LAN access, and
 network settings on a GL.iNet Flint 2 router.
 
@@ -35,7 +35,7 @@ BASE_URL = os.environ.get("FLINTVPN_API_URL", "http://localhost:5000")
 mcp = FastMCP(
     "flint-vpn-manager",
     instructions=(
-        "FlintVPN Manager — manage ProtonVPN tunnels and device routing on a "
+        "Flint VPN Manager — manage ProtonVPN tunnels and device routing on a "
         "GL.iNet Flint 2 router.\n\n"
         "WORKFLOW:\n"
         "1. Call flint_get_status to check if the app is locked or unlocked.\n"

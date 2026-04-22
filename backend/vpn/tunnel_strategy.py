@@ -438,7 +438,7 @@ class OpenVPNStrategy(TunnelStrategy):
 class ProtonWGStrategy(TunnelStrategy):
     """Userspace WireGuard TCP/TLS tunnel via the proton-wg binary.
 
-    Managed entirely by FlintVPN outside vpn-client. Supports both TCP
+    Managed entirely by Flint VPN Manager outside vpn-client. Supports both TCP
     and TLS transports (set at construction time).
     """
 

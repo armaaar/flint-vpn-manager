@@ -13,13 +13,13 @@ class RouterPolicy:
         self._uci = uci
         self._ssh = ssh  # raw exec for grep/pipe commands
 
-    # ── FlintVPN Rule Queries ────────────────────────────────────────────
+    # ── Flint VPN Manager Rule Queries ────────────────────────────────────────────
 
     def get_flint_vpn_rules(self) -> list[dict]:
-        """Get all FlintVPN route policy rules.
+        """Get all Flint VPN Manager route policy rules.
 
         Returns rules whose UCI section starts with 'fvpn_rule' (created by us)
-        OR whose group_id matches the FlintVPN groups (1957 for WG, 28216 for OVPN).
+        OR whose group_id matches the Flint VPN Manager groups (1957 for WG, 28216 for OVPN).
         The latter handles the case where the GL.iNet UI replaced our named
         section with an anonymous '@rule[N]' section after editing.
 
@@ -59,7 +59,7 @@ class RouterPolicy:
         self._uci.commit("route_policy")
 
     def heal_anonymous_rule_section(self, anon_section: str, target_name: str):
-        """Rename an anonymous route_policy section back to its FlintVPN name.
+        """Rename an anonymous route_policy section back to its Flint VPN Manager name.
 
         When the GL.iNet UI edits a rule, it sometimes replaces the named
         section (e.g. fvpn_rule_9001) with an anonymous one (@rule[4]).
@@ -75,7 +75,7 @@ class RouterPolicy:
             pass
 
     def get_flint_vpn_peers(self) -> list[dict]:
-        """Get all FlintVPN WireGuard peer configs (peer_9001 through peer_9099).
+        """Get all Flint VPN Manager WireGuard peer configs (peer_9001 through peer_9099).
 
         Returns list of dicts with peer UCI fields.
         """

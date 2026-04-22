@@ -1,6 +1,6 @@
 # Security Policy
 
-FlintVPN Manager handles two kinds of sensitive material:
+Flint VPN Manager handles two kinds of sensitive material:
 
 1. **ProtonVPN account credentials** (stored encrypted in `secrets.enc`, unlocked by a master password)
 2. **Router SSH access** (a key that allows root commands on the router)

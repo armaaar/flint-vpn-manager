@@ -1,4 +1,4 @@
-# FlintVPN Manager
+# Flint VPN Manager
 
 ![CI](https://github.com/armaaar/flint-vpn-manager/actions/workflows/ci.yml/badge.svg)
 [![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm%20NC%201.0.0-blue)](LICENSE)

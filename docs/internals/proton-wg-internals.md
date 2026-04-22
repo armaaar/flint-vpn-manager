@@ -50,4 +50,4 @@ The firewall include (`mangle_rules.sh`) is fully self-contained: it creates ips
 
 ## Device registration names
 
-Proton cert registrations use `"FlintVPN-{profile_name}"` as the device name. Since persistent certs cannot be deleted via the VPN API (requires `password` scope, returns 403 with VPN token), meaningful names matter. Cleanup is only possible through the Proton web dashboard at account.protonvpn.com → Downloads → WireGuard configurations.
+Proton cert registrations use `"Flint VPN Manager-{profile_name}"` as the device name. Since persistent certs cannot be deleted via the VPN API (requires `password` scope, returns 403 with VPN token), meaningful names matter. Cleanup is only possible through the Proton web dashboard at account.protonvpn.com → Downloads → WireGuard configurations.

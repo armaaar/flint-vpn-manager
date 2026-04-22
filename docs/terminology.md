@@ -18,7 +18,7 @@
 | **Guest Group** | Auto-assign target for new MACs. Any group type. |
 | **DNS Ad Blocker** | Per-group DNS-level blocking via `addn-hosts` injection into per-tunnel dnsmasq conf-dirs. Blocklist file at `/etc/fvpn/blocklist.hosts` with dual-stack entries (IPv4 `0.0.0.0` + IPv6 `::`). Profile field `adblock: true/false`. VPN + NoVPN groups only. `sync_adblock(ifaces)` manages snippet lifecycle. |
 | **Anonymous section** | `@rule[N]` from GL.iNet UI edits. Self-healed to `fvpn_rule_*` by `heal_anonymous_rule_section`. |
-| **proton-wg** | Userspace WG (TCP/TLS). ARM64 binary at `/usr/bin/proton-wg`. FlintVPN-managed. |
+| **proton-wg** | Userspace WG (TCP/TLS). ARM64 binary at `/usr/bin/proton-wg`. Flint VPN Manager-managed. |
 | **Persistent cert** | 365-day WG cert, `Mode: "persistent"`. Per-profile Ed25519 key. No local agent needed. |
 | **Smart Protocol** | Auto protocol fallback: 45s timeout → cycles WG UDP → OVPN UDP → OVPN TCP → WG TCP → WG TLS. See [smart-protocol.md](internals/smart-protocol.md). |
 | **Custom DNS** | Per-profile DNS override (**kernel WG UDP only**). Single IPv4 (`ipaddress.IPv4Address`). Disables NetShield DNS. |

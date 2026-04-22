@@ -4,7 +4,7 @@ Non-obvious behaviors and limitations of the ProtonVPN API and `proton-vpn-api-c
 
 ## Persistent vs Session certificates
 
-- **Persistent mode** (`Mode: "persistent"`, 365 days): no Local Agent required. The router is fully standalone after config upload. This is what FlintVPN uses.
+- **Persistent mode** (`Mode: "persistent"`, 365 days): no Local Agent required. The router is fully standalone after config upload. This is what Flint VPN Manager uses.
 - **Session mode** (`Mode: "session"`, 7 days): requires a Local Agent at `10.2.0.1:65432` (JSON over mutual TLS) to authenticate after WG handshake. Without the agent, the server keeps the connection in `HARD_JAILED` state — WG handshake succeeds but the exit gateway drops all forwarded traffic.
 
 ## Certificate deletion is not possible via API

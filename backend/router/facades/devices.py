@@ -238,7 +238,7 @@ class RouterDevices:
     # ── Device Assignments ───────────────────────────────────────────────
 
     def get_device_assignments(self) -> dict:
-        """Return {mac: rule_name} for every device in any FlintVPN rule's from_mac.
+        """Return {mac: rule_name} for every device in any Flint VPN Manager rule's from_mac.
 
         VPN device assignments are router-canonical. This is the live
         source of truth.
@@ -293,7 +293,7 @@ class RouterDevices:
                 return
 
     def remove_device_from_all_vpn(self, mac: str):
-        """Remove a device from ALL FlintVPN route policy rules AND proton-wg ipsets.
+        """Remove a device from ALL Flint VPN Manager route policy rules AND proton-wg ipsets.
 
         Iterates every fvpn rule, matches the MAC case-insensitively, and
         deletes using the EXACT stored case so UCI del_list succeeds.

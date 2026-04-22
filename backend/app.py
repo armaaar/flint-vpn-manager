@@ -1,4 +1,4 @@
-"""FlintVPN Manager — Flask REST API + SSE.
+"""Flint VPN Manager — Flask REST API + SSE.
 
 Main application server. Registers route blueprints and configures logging.
 

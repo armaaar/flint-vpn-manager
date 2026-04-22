@@ -1,8 +1,8 @@
 # Router Features Translation
 
-A complete reference mapping every FlintVPN Manager feature to the exact router-level artifacts it creates, reads, and modifies on the GL.iNet Flint 2 (GL-MT6000, OpenWrt 21.02) router.
+A complete reference mapping every Flint VPN Manager feature to the exact router-level artifacts it creates, reads, and modifies on the GL.iNet Flint 2 (GL-MT6000, OpenWrt 21.02) router.
 
-**Intended audience**: a Claude/debug session that needs to inspect or repair router state over SSH without the full FlintVPN codebase in scope. Every feature section lists *what it is*, *where it lives on the router*, *how it was put there*, *how to inspect it*, and *what is safe vs unsafe to touch*.
+**Intended audience**: a Claude/debug session that needs to inspect or repair router state over SSH without the full Flint VPN Manager codebase in scope. Every feature section lists *what it is*, *where it lives on the router*, *how it was put there*, *how to inspect it*, and *what is safe vs unsafe to touch*.
 
 Router default address: **192.168.8.1**. Root login via SSH key at `~/.ssh/id_ed25519`.
 
@@ -43,7 +43,7 @@ Router default address: **192.168.8.1**. Root login via SSH key at `~/.ssh/id_ed
 
 ## 1. Global Naming, ID Ranges, and Fwmark Map
 
-All FlintVPN artifacts use predictable prefixes so they can be distinguished from GL.iNet's own config and from user-created config done via the stock UI.
+All Flint VPN Manager artifacts use predictable prefixes so they can be distinguished from GL.iNet's own config and from user-created config done via the stock UI.
 
 ### UCI section prefixes
 
@@ -68,8 +68,8 @@ All FlintVPN artifacts use predictable prefixes so they can be distinguished fro
 | `fvpn_ipv6_fwd` | `firewall` (include) | IPv6 forward/leak script registration |
 
 ### `group_id` marker values (used by GL.iNet dashboard to mark "FromApp" configs):
-- `1957` → WireGuard (FlintVPN)
-- `28216` → OpenVPN (FlintVPN)
+- `1957` → WireGuard (Flint VPN Manager)
+- `28216` → OpenVPN (Flint VPN Manager)
 
 ### Tunnel slot / ID allocation
 
@@ -89,7 +89,7 @@ OpenVPN                ovpnclient1..5    0xa000..0xe000      2000               
 Proton-wg (TCP/TLS)    protonwg0..3      0x6000,0x7000,      6000               1006,1007,
                                          0x9000,0xf000                          1009,1015
 VPN Bypass             (no iface — WAN)  0x8000              100                1008
-WAN (no FlintVPN mark) n/a               0x0000              —                  main
+WAN (no Flint VPN Manager mark) n/a               0x0000              —                  main
 ```
 
 Fwmark mask is always `/0xf000` — the 4 high bits of the lower 16 bits encode the slot.
@@ -101,7 +101,7 @@ Proton-wg table numbers are computed as `1000 + (mark >> 12)` — i.e. `1000 + 0
 | Prefix | Type | Owner | Notes |
 |---|---|---|---|
 | `src_mac_<tunnel_id>` | `hash:mac` | vpn-client (kernel WG + OVPN) | Flushed by `/etc/init.d/vpn-client restart`; rebuilt from `from_mac` UCI list |
-| `pwg_mac_<tunnel_id>` | `hash:mac` | FlintVPN (proton-wg) | Immune to vpn-client restart; rebuilt from `/etc/fvpn/protonwg/<iface>.macs` on firewall reload |
+| `pwg_mac_<tunnel_id>` | `hash:mac` | Flint VPN Manager (proton-wg) | Immune to vpn-client restart; rebuilt from `/etc/fvpn/protonwg/<iface>.macs` on firewall reload |
 | `fvpn_byp_<exc_id>_b<N>` | `hash:net` | VPN bypass | One per rule block; CIDRs added statically, domain IPs added by dnsmasq |
 | `fvpn_noint_macs` | `hash:mac` | NoInternet | Populated from `/etc/fvpn/noint.macs` |
 
@@ -261,7 +261,7 @@ Slots: `ovpnclient1`..`ovpnclient5`. Fwmarks `0xa000`..`0xe000`. Tables 200..204
 
 **Switch server**: OpenVPN cannot hot-swap. The strategy captures current `from_mac`, section position, and enabled state; deletes the old config; recreates; restores order and device assignments; only re-enables if previously enabled. See [server-switch-internals.md](server-switch-internals.md).
 
-### 3.3 proton-wg (TCP / TLS) — managed entirely by FlintVPN, NOT vpn-client
+### 3.3 proton-wg (TCP / TLS) — managed entirely by Flint VPN Manager, NOT vpn-client
 
 Slots: `protonwg0`..`protonwg3`. Fwmarks `0x6000`, `0x7000`, `0x9000`, `0xf000`. Tables 1006, 1007, 1009, 1015.
 
@@ -389,7 +389,7 @@ The `--mark 0x0/0xf000` condition prevents double-marking (bypass-marked packets
 ...
 2000:  from all fwmark 0xa000/0xf000 lookup 200           # ovpnclient1
 ...
-6000:  from all fwmark 0x6000/0xf000 lookup 1006          # protonwg0 (FlintVPN)
+6000:  from all fwmark 0x6000/0xf000 lookup 1006          # protonwg0 (Flint VPN Manager)
 6000:  from all fwmark 0x7000/0xf000 lookup 1007
 6000:  from all fwmark 0x9000/0xf000 lookup 1009
 6000:  from all fwmark 0xf000/0xf000 lookup 1015
@@ -500,7 +500,7 @@ Only NoInternet propagates to the router (via `fvpn_noint_macs` ipset — see §
 
 ### 6.4 Reconciliation
 
-`RouterDevices.get_device_assignments()` returns `{mac: rule_name}` merged from `route_policy.*.from_mac` across all FlintVPN rules. `remove_device_from_all_vpn` ([backend/router/facades/devices.py:295-329](backend/router/facades/devices.py#L295-L329)) iterates every rule + every `pwg_mac_*` / `src_mac_*` ipset to strip a MAC everywhere.
+`RouterDevices.get_device_assignments()` returns `{mac: rule_name}` merged from `route_policy.*.from_mac` across all Flint VPN Manager rules. `remove_device_from_all_vpn` ([backend/router/facades/devices.py:295-329](backend/router/facades/devices.py#L295-L329)) iterates every rule + every `pwg_mac_*` / `src_mac_*` ipset to strip a MAC everywhere.
 
 ---
 
@@ -534,7 +534,7 @@ Done client-side. A MAC is "private" if 2nd hex char ∈ `{2, 6, A, E}` (locally
 
 ## 8. Reserved IP / DHCP Static Lease
 
-User picks an IP → FlintVPN creates a `dhcp.host` UCI section so the MAC always gets that IP.
+User picks an IP → Flint VPN Manager creates a `dhcp.host` UCI section so the MAC always gets that IP.
 
 **Artifacts** ([backend/router/facades/devices.py:363-384](backend/router/facades/devices.py#L363-L384)):
 ```sh
@@ -835,10 +835,10 @@ iptables -t raw -L pre_dns_deal_conn_zone -n -v
 
 ## 17. LAN / Networks
 
-"Networks" = fw3 zones with their own bridge, subnet, DHCP pool, and 0+ SSIDs. Discovered from UCI `wireless`/`network`/`firewall`. Built-in: `lan`, `guest` (GL.iNet-provided). User-created via FlintVPN get the `fvpn_<zone_id>` prefix.
+"Networks" = fw3 zones with their own bridge, subnet, DHCP pool, and 0+ SSIDs. Discovered from UCI `wireless`/`network`/`firewall`. Built-in: `lan`, `guest` (GL.iNet-provided). User-created via Flint VPN Manager get the `fvpn_<zone_id>` prefix.
 
 ### Zone name limit — **11 characters**
-fw3 **silently ignores** zones with names > 11 chars — no error, no warning, no NAT. FlintVPN format: `fvpn_` (5) + `zone_id` (≤6) = ≤11.
+fw3 **silently ignores** zones with names > 11 chars — no error, no warning, no NAT. Flint VPN Manager format: `fvpn_` (5) + `zone_id` (≤6) = ≤11.
 
 ### Network creation (`RouterLanAccess.create_network`)
 Atomic UCI batch ([backend/router/facades/lan_access.py:426-510](backend/router/facades/lan_access.py#L426-L510)). For zone_id `iot` creating network `IoT`:
@@ -1011,7 +1011,7 @@ sed -i '/^\[server\]/a allow-interfaces=br-lan,br-guest,br-fvpn_iot' /etc/avahi/
 
 ## 22. IPv6 Dual-Stack
 
-Managed by FlintVPN because vpn-client is IPv4-only.
+Managed by Flint VPN Manager because vpn-client is IPv4-only.
 
 ### Router-level IPv6
 - Kernel enable: `sysctl net.ipv6.conf.all.disable_ipv6=0` persisted in `/etc/sysctl.d/99-fvpn-ipv6.conf`.
@@ -1050,14 +1050,14 @@ During normal operation, every `profile_store.save()` pushes the updated store b
 
 ## 24. Firewall Include Scripts
 
-OpenWrt's fw3 supports external firewall include scripts. FlintVPN uses them so our rules survive every `firewall reload` without requiring the app to be running.
+OpenWrt's fw3 supports external firewall include scripts. Flint VPN Manager uses them so our rules survive every `firewall reload` without requiring the app to be running.
 
-All FlintVPN includes use `option reload '1'` — they re-run on `firewall reload` (not just `firewall start`). GL.iNet's own `vpnclient` include uses `reload='0'` — it only runs on start — which is why:
+All Flint VPN Manager includes use `option reload '1'` — they re-run on `firewall reload` (not just `firewall start`). GL.iNet's own `vpnclient` include uses `reload='0'` — it only runs on start — which is why:
 
 - `/etc/init.d/firewall reload` is **safe**: ~0.22 s, our includes re-run, `vpnclient` include (rtp2.sh) does NOT, kernel WG interfaces survive.
 - `/etc/init.d/firewall restart` is **dangerous**: full stop+start, re-runs `rtp2.sh`, which tears down our interfaces and corrupts WG handshakes. **Never use** restart.
 
-### All FlintVPN includes
+### All Flint VPN Manager includes
 
 | UCI section | Path | Purpose |
 |---|---|---|
@@ -1171,9 +1171,9 @@ wifi down (without bringing it back up)  # Disconnects every WiFi client
 ### CRITICAL — data loss / brick potential
 ```
 rm -rf /etc/config/*                     # Wipes all router config
-rm -rf /etc/fvpn/*                       # Wipes FlintVPN state: profile backup, adblock, bypass, noint, protonwg
+rm -rf /etc/fvpn/*                       # Wipes Flint VPN Manager state: profile backup, adblock, bypass, noint, protonwg
 sysupgrade / firstboot / jffs2reset      # Factory reset / full wipe
-uci delete route_policy                  # Removes every FlintVPN VPN rule
+uci delete route_policy                  # Removes every Flint VPN Manager VPN rule
 ```
 
 ---
@@ -1236,14 +1236,14 @@ See §1 for the full tree. Each file section cross-referenced above in §9, §14
 |---|---|
 | 100..104 | wgclient1..5 (vpn-client kernel WG) |
 | 200..204 | ovpnclient1..5 (vpn-client OVPN) |
-| 1006, 1007, 1009, 1015 | protonwg0..3 (FlintVPN) |
+| 1006, 1007, 1009, 1015 | protonwg0..3 (Flint VPN Manager) |
 | 1008 | VPN bypass (§14) — routes 0x8000-marked via WAN |
 
 ### Fwmarks (lower 16 bits, mask 0xf000)
 
 | Mark | Owner |
 |---|---|
-| 0x0000 | No FlintVPN involvement (WAN default) |
+| 0x0000 | No Flint VPN Manager involvement (WAN default) |
 | 0x1000..0x5000 | vpn-client kernel WG tunnels 1..5 |
 | 0x6000 | protonwg0 |
 | 0x7000 | protonwg1 |
@@ -1287,7 +1287,7 @@ wg show protonwg0 latest-handshakes
 ```sh
 # 1. Find the device
 cat /tmp/dhcp.leases | grep <mac or hostname>
-# 2. Is it in any FlintVPN VPN rule's from_mac?
+# 2. Is it in any Flint VPN Manager VPN rule's from_mac?
 uci show route_policy | grep -i <mac>
 # 3. Is it in any VPN ipset?
 for s in $(ipset list -n | grep -E 'src_mac_|pwg_mac_'); do

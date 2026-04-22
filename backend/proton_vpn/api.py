@@ -1,4 +1,4 @@
-"""ProtonVPN API wrapper for FlintVPN Manager.
+"""ProtonVPN API wrapper for Flint VPN Manager.
 
 Thin wrapper around the official proton-vpn-api-core library.
 Handles authentication (including 2FA/TOTP), server list queries,

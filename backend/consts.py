@@ -1,4 +1,4 @@
-"""Shared constants for FlintVPN Manager.
+"""Shared constants for Flint VPN Manager.
 
 Centralizes magic strings used across multiple modules to eliminate
 connascence of meaning.

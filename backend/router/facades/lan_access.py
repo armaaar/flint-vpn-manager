@@ -19,7 +19,7 @@ _SAFE_IP_RE = re.compile(r'^[0-9a-fA-F.:/%]+$')
 
 # Zone names to skip in cross-network rules (wan is managed separately)
 _SKIP_ZONES = {"wan"}
-# Prefixes used by vpn-client / FlintVPN for tunnel interfaces — not real LANs
+# Prefixes used by vpn-client / Flint VPN Manager for tunnel interfaces — not real LANs
 _VPN_ZONE_PREFIXES = ("wgclient", "ovpnclient", "protonwg", "wgserver", "ovpnserver")
 
 
@@ -340,7 +340,7 @@ class RouterLanAccess:
         """Write firewall include script for reboot persistence (dual-stack)."""
         lines = [
             "#!/bin/sh",
-            "# FlintVPN LAN access exceptions — auto-generated",
+            "# Flint VPN Manager LAN access exceptions — auto-generated",
         ]
 
         for binary in ("iptables", "ip6tables"):
@@ -510,7 +510,7 @@ class RouterLanAccess:
         self._reload_wifi_driver()
 
     def delete_network(self, zone_id: str) -> None:
-        """Delete a FlintVPN-created network and all its UCI sections."""
+        """Delete a Flint VPN Manager-created network and all its UCI sections."""
         if zone_id in ("lan", "guest"):
             raise ValueError(f"Cannot delete built-in network: {zone_id}")
         if not _SAFE_NAME_RE.match(zone_id):

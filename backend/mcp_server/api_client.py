@@ -1,4 +1,4 @@
-"""Thin HTTP client wrapping the FlintVPN REST API at localhost:5000."""
+"""Thin HTTP client wrapping the Flint VPN Manager REST API at localhost:5000."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ TIMEOUT = 30.0
 
 
 class APIError(Exception):
-    """Raised when the FlintVPN API returns a non-2xx response."""
+    """Raised when the Flint VPN Manager API returns a non-2xx response."""
 
     def __init__(self, status_code: int, message: str):
         self.status_code = status_code
@@ -18,7 +18,7 @@ class APIError(Exception):
 
 
 class FlintAPI:
-    """Synchronous HTTP client for the FlintVPN REST API."""
+    """Synchronous HTTP client for the Flint VPN Manager REST API."""
 
     def __init__(self, base_url: str = DEFAULT_BASE_URL):
         self._base_url = base_url.rstrip("/")

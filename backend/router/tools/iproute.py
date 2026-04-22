@@ -102,7 +102,7 @@ class Iproute:
     #
     # Mirror the IPv4 methods above using ``ip -6`` for dual-stack
     # routing.  GL.iNet's vpn-client only manages IPv4 rules, so
-    # FlintVPN must set up IPv6 routing independently.
+    # Flint VPN Manager must set up IPv6 routing independently.
 
     def addr_add_v6(self, addr: str, dev: str) -> None:
         """Add an IPv6 address to an interface."""

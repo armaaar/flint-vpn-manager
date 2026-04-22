@@ -58,7 +58,7 @@ def download_and_merge_blocklists():
         return None, 0, failed
 
     sorted_domains = sorted(all_domains)
-    content = "# FlintVPN merged blocklist\n"
+    content = "# Flint VPN Manager merged blocklist\n"
     content += f"# Sources: {', '.join(sources)}\n"
     content += f"# Domains: {len(sorted_domains)}\n\n"
     for d in sorted_domains:

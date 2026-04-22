@@ -1,4 +1,4 @@
-/** Shared TypeScript types for the FlintVPN frontend. */
+/** Shared TypeScript types for the Flint VPN Manager frontend. */
 
 // ── Profile Types ──────────────────────────────────────────────────────────
 

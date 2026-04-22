@@ -353,7 +353,7 @@ class TestDevicePolicy:
         assert out["11:22:33:44:55:66"] == "fvpn_rule_9001"
 
     def test_get_flint_vpn_rules_recognizes_anonymous_section(self, mock_router):
-        """Stage 5 fix: anonymous @rule[N] sections matching FlintVPN groups are picked up."""
+        """Stage 5 fix: anonymous @rule[N] sections matching Flint VPN Manager groups are picked up."""
         mock_router._exec_responses["uci show route_policy"] = (
             "route_policy.@rule[4]=rule\n"
             "route_policy.@rule[4].name='Trusted'\n"

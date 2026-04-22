@@ -14,7 +14,7 @@ Holds `ProtonAPI`, `RouterAPI`, and `VPNService` instances plus the `session_unl
 `PROFILE_TYPES`, `LAN_STATES`, `PROTOCOLS`, `ADBLOCK_*` — used across modules to avoid magic strings.
 
 ### `mcp_server/` — MCP server for Claude AI integration
-Exposes the FlintVPN REST API as 46 MCP tools so a Claude session with no project context can manage the local network. Uses `FastMCP` (from the `mcp` SDK) with stdio transport. The server is a thin HTTP client that calls `localhost:5000` — no direct service imports. Tool modules: session, groups, tunnels, servers, devices, settings, adblock, lan_access, logs.
+Exposes the Flint VPN Manager REST API as 46 MCP tools so a Claude session with no project context can manage the local network. Uses `FastMCP` (from the `mcp` SDK) with stdio transport. The server is a thin HTTP client that calls `localhost:5000` — no direct service imports. Tool modules: session, groups, tunnels, servers, devices, settings, adblock, lan_access, logs.
 
 ---
 

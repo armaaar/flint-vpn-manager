@@ -24,7 +24,7 @@
 
 <div class="auth-screen">
   <div class="auth-card">
-    <h2>FlintVPN Setup</h2>
+    <h2>Flint VPN Setup</h2>
     <p class="subtitle">Connect your ProtonVPN account and router</p>
 
     <div class="form-group">

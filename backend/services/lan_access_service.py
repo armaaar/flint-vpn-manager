@@ -200,7 +200,7 @@ class LanAccessService:
         return {"success": True}
 
     def delete_network(self, zone_id: str) -> dict:
-        """Delete a FlintVPN-created network."""
+        """Delete a Flint VPN Manager-created network."""
         self.router.lan_access.delete_network(zone_id)
         # Clean config.json rules/exceptions referencing this zone
         config = sm.get_config()

@@ -1,4 +1,4 @@
-"""Shared test fixtures for FlintVPN Manager tests."""
+"""Shared test fixtures for Flint VPN Manager tests."""
 
 import logging
 import os

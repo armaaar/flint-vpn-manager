@@ -1,4 +1,4 @@
-# FlintVPN Manager — Frontend
+# Flint VPN Manager — Frontend
 
 Svelte 5 + Vite SPA served by the Flask backend at `http://<host-ip>:5000`. Not a standalone app — it talks to the Python backend via the REST API documented in [`../docs/rest-api.md`](../docs/rest-api.md) and receives live updates over SSE.
 

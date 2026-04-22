@@ -21,7 +21,7 @@ Three concrete strategies implement this interface:
 |----------|-----------|------------|
 | `WireGuardStrategy` | `wireguard` (kernel UDP) | GL.iNet `vpn-client` service |
 | `OpenVPNStrategy` | `openvpn` (UDP/TCP) | GL.iNet `vpn-client` service |
-| `ProtonWGStrategy` | `wireguard-tcp`, `wireguard-tls` | FlintVPN directly (userspace `proton-wg` binary) |
+| `ProtonWGStrategy` | `wireguard-tcp`, `wireguard-tls` | Flint VPN Manager directly (userspace `proton-wg` binary) |
 
 `ProtonWGStrategy` takes a `transport` parameter (`"tcp"` or `"tls"`) at construction time. The two transports share identical lifecycle logic — only the transport hint passed to `proton.generate_wireguard_config` differs.
 

@@ -31,7 +31,7 @@ class RouterWireguard:
         for pid in range(9001, 9051):
             if pid not in used:
                 return pid
-        raise RuntimeError("No available peer IDs (max 50 FlintVPN WireGuard configs)")
+        raise RuntimeError("No available peer IDs (max 50 Flint VPN Manager WireGuard configs)")
 
     def upload_wireguard_config(
         self,

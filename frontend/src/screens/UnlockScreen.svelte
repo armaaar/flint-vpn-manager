@@ -27,7 +27,7 @@
 
 <div class="auth-screen">
   <div class="auth-card">
-    <h2>FlintVPN Manager</h2>
+    <h2>Flint VPN Manager</h2>
     <p class="subtitle">Enter your master password to unlock</p>
 
     <div class="form-group">

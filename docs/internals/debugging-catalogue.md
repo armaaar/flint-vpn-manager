@@ -118,7 +118,7 @@ Related docs: [router-features-translation.md](router-features-translation.md), 
 
 #### `uci del_list` requires exact-case MAC match `ACTIVE`
 - **Symptom**: `uci del_list` silently no-op'd when removing a device.
-- **Root cause**: UCI's `del_list` is a string-equality match. GL.iNet UI may store uppercase MAC, FlintVPN stores lowercase. Our `del_list` with lowercase didn't match.
+- **Root cause**: UCI's `del_list` is a string-equality match. GL.iNet UI may store uppercase MAC, Flint VPN Manager stores lowercase. Our `del_list` with lowercase didn't match.
 - **Fix**: `RouterPolicy.from_mac_tokens()` preserves case; `set_device_vpn` / `remove_device_from_vpn` look up the exact stored token and use it in `del_list`. See [backend/router/facades/policy.py:144-155](backend/router/facades/policy.py#L144-L155) and [backend/router/facades/devices.py:277-330](backend/router/facades/devices.py#L277-L330).
 
 #### `firewall restart` (not reload) corrupts WG handshakes `ACTIVE` (hard invariant)
@@ -199,7 +199,7 @@ Related docs: [router-features-translation.md](router-features-translation.md), 
 #### fw3 silently ignores zones with names > 11 chars `ACTIVE` (hard invariant)
 - **Symptom**: Newly-created zone had no firewall rules, no NAT; no error anywhere.
 - **Root cause**: fw3 silently ignores zones where `name` exceeds 11 characters.
-- **Fix**: FlintVPN uses `fvpn_` (5) + zone_id (≤6). `LanAccessService.create_network()` in [backend/services/lan_access_service.py:155](backend/services/lan_access_service.py#L155) truncates and handles collisions.
+- **Fix**: Flint VPN Manager uses `fvpn_` (5) + zone_id (≤6). `LanAccessService.create_network()` in [backend/services/lan_access_service.py:155](backend/services/lan_access_service.py#L155) truncates and handles collisions.
 
 #### MediaTek `mt_wifi` driver doesn't reload `BssidNum` from `.dat` files `ACTIVE` (hard invariant)
 - **Symptom**: After editing `/etc/wireless/mediatek/mt7986-ax6000.dbdc.b*.dat`, `wifi reload` didn't create new `ra<N>`/`rax<N>` interfaces.
@@ -227,7 +227,7 @@ Related docs: [router-features-translation.md](router-features-translation.md), 
 - **Symptom**: VPN-assigned devices could leak real IPv6 addresses despite kill switch.
 - **Root cause**: GL.iNet's `route_policy`/`rtp2.sh` handles IPv4 fwmark rules only. IPv6 packets skip the VPN tunnel entirely.
 - **Debug**: `ip6tables -t mangle -S ROUTE_POLICY` empty; confirmed by GL.iNet forum ("IPv6 VPN policy not implemented in fw 4.x").
-- **Fix**: FlintVPN manages the entire IPv6 routing layer: `ip6tables -t mangle` chains, IPv6 FORWARD default DROP with `ESTABLISHED,RELATED` + per-tunnel mark ACCEPT. Scripts at `/etc/fvpn/ipv6_mangle_rules.sh` and `/etc/fvpn/ipv6_forward.sh`, registered as firewall includes. `RouterFirewall.ensure_ipv6_leak_protection` + `RouterProtonWG._rebuild_ipv6_mangle_rules`.
+- **Fix**: Flint VPN Manager manages the entire IPv6 routing layer: `ip6tables -t mangle` chains, IPv6 FORWARD default DROP with `ESTABLISHED,RELATED` + per-tunnel mark ACCEPT. Scripts at `/etc/fvpn/ipv6_mangle_rules.sh` and `/etc/fvpn/ipv6_forward.sh`, registered as firewall includes. `RouterFirewall.ensure_ipv6_leak_protection` + `RouterProtonWG._rebuild_ipv6_mangle_rules`.
 
 #### sysctl IPv6 disable doesn't survive reboot `ACTIVE`
 - **Symptom**: Disable IPv6 via Settings → reboot → IPv6 came back.
