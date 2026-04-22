@@ -20,7 +20,7 @@
 | **Anonymous section** | `@rule[N]` from GL.iNet UI edits. Self-healed to `fvpn_rule_*` by `heal_anonymous_rule_section`. |
 | **proton-wg** | Userspace WG (TCP/TLS). ARM64 binary at `/usr/bin/proton-wg`. FlintVPN-managed. |
 | **Persistent cert** | 365-day WG cert, `Mode: "persistent"`. Per-profile Ed25519 key. No local agent needed. |
-| **Smart Protocol** | Auto protocol fallback: 45s timeout → cycles WG UDP → OVPN UDP → OVPN TCP → WG TCP → WG TLS. See [smart-protocol.md](smart-protocol.md). |
+| **Smart Protocol** | Auto protocol fallback: 45s timeout → cycles WG UDP → OVPN UDP → OVPN TCP → WG TCP → WG TLS. See [smart-protocol.md](internals/smart-protocol.md). |
 | **Custom DNS** | Per-profile DNS override (**kernel WG UDP only**). Single IPv4 (`ipaddress.IPv4Address`). Disables NetShield DNS. |
 | **Port Override** | Alternate ports per protocol from Proton's `clientconfig`. |
 | **Alternative Routing** | DoH fallback for API calls via `proton-vpn-api-core`'s `AutoTransport`. |

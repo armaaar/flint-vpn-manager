@@ -30,7 +30,7 @@ A local web dashboard for managing ProtonVPN WireGuard and OpenVPN profiles on a
 - **Disaster recovery**: local state backed up to router, auto-restored on unlock
 - **GL.iNet compatible**: configs visible in the router's native dashboard as fallback
 
-For detailed feature specs, see [FEATURES_AND_SPECS.md](FEATURES_AND_SPECS.md).
+For detailed feature specs, see [features-and-specs.md](features-and-specs.md).
 
 ## Architecture
 

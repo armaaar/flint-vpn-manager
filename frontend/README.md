@@ -19,7 +19,7 @@ src/
 e2e/                         Playwright E2E specs (require backend on :5000)
 ```
 
-See [`../docs/frontend.md`](../docs/frontend.md) for the component-by-component breakdown and [`../docs/design-system.md`](../docs/design-system.md) for the Sentry-inspired design reference.
+See [`../docs/internals/frontend.md`](../docs/internals/frontend.md) for the component-by-component breakdown and [`../docs/internals/design-system.md`](../docs/internals/design-system.md) for the Sentry-inspired design reference.
 
 ## Development
 
@@ -42,4 +42,4 @@ npx playwright test --ui     # interactive
 
 ## Design tokens
 
-Never hardcode colors, fonts, shadows, or radii in component `<style>` blocks. Use `var(--token-name)` from `src/app.css` `:root`. Buttons use uppercase text with `letter-spacing: 0.2px`. Full reference in [`../docs/design-tokens.md`](../docs/design-tokens.md).
+Never hardcode colors, fonts, shadows, or radii in component `<style>` blocks. Use `var(--token-name)` from `src/app.css` `:root`. Buttons use uppercase text with `letter-spacing: 0.2px`. Full reference in [`../docs/internals/design-tokens.md`](../docs/internals/design-tokens.md).

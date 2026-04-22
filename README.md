@@ -63,7 +63,7 @@ Linux host on LAN                       GL.iNet Flint 2 Router
 
 The router is the **source of truth** for tunnel state, device→group mappings, kill switch, group names, and ordering. The host's local JSON store only holds UI metadata (color, icon, server scope, options) and non-VPN assignments. Every read goes live to the router over SSH; almost nothing is cached on the host.
 
-For the full source-of-truth contract and module-by-module breakdown, see [`CLAUDE.md`](CLAUDE.md) and the [`docs/`](docs/) folder (especially [`docs/project-overview.md`](docs/project-overview.md), [`docs/backend-structure.md`](docs/backend-structure.md), and [`docs/proton-wg-internals.md`](docs/proton-wg-internals.md)).
+For the full source-of-truth contract and module-by-module breakdown, see [`CLAUDE.md`](CLAUDE.md) and the [`docs/`](docs/) folder (especially [`docs/project-overview.md`](docs/project-overview.md), [`docs/internals/backend-structure.md`](docs/internals/backend-structure.md), and [`docs/internals/proton-wg-internals.md`](docs/internals/proton-wg-internals.md)).
 
 ---
 
@@ -285,7 +285,7 @@ Driving a router's firewall and routing over SSH means a typo can take the whole
 - `ipset add/del` against our MAC-assignment sets
 - `wg show`, `ifstatus`, `ipset list`, `iptables -L`, `cat`, `grep`, `ls`, `ps` — any read-only command
 
-Full rules and reasoning in [`CLAUDE.md`](CLAUDE.md#router-interaction-safety-rules) and [`docs/proton-wg-internals.md`](docs/proton-wg-internals.md).
+Full rules and reasoning in [`CLAUDE.md`](CLAUDE.md#router-interaction-safety-rules) and [`docs/internals/proton-wg-internals.md`](docs/internals/proton-wg-internals.md).
 
 ---
 

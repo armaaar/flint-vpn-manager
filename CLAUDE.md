@@ -4,30 +4,32 @@ A local web dashboard for managing ProtonVPN WireGuard and OpenVPN profiles on a
 
 ## Documentation
 
-All project documentation lives in `docs/`:
+User-facing docs live at the top of `docs/`. Implementation deep-dives live in `docs/internals/`.
+
+**User-facing** (`docs/`):
 
 - [docs/project-overview.md](docs/project-overview.md) — Features, architecture, environment, dependencies
 - [docs/terminology.md](docs/terminology.md) — Domain glossary (Group, Device, Rule, Peer, Server Scope, etc.)
-- [docs/backend-structure.md](docs/backend-structure.md) — Package layout, dependency graph, import conventions, where to put new code
-- [docs/backend-modules.md](docs/backend-modules.md) — Detailed module descriptions per package
-- [docs/frontend.md](docs/frontend.md) — Svelte components, stores, API client
 - [docs/rest-api.md](docs/rest-api.md) — All REST API endpoints
-- [docs/router-reference.md](docs/router-reference.md) — Config naming, limits, tunnel lifecycle, proton-wg, MediaTek constraints
-- [docs/design-system.md](docs/design-system.md) — Sentry-inspired design reference
-- [docs/design-tokens.md](docs/design-tokens.md) — CSS variable token catalog
-- [docs/FEATURES_AND_SPECS.md](docs/FEATURES_AND_SPECS.md) — Detailed user-facing feature specs
+- [docs/features-and-specs.md](docs/features-and-specs.md) — Detailed user-facing feature specs
 
-### Implementation Internals
+**Implementation internals** (`docs/internals/`) — **MUST READ before modifying these subsystems**; contain non-obvious constraints, real bugs that were hit, and design decisions that look wrong but are intentional:
 
-**MUST READ before modifying these subsystems** — contains non-obvious constraints, real bugs that were hit, and design decisions that look wrong but are intentional:
-
-- [docs/proton-wg-internals.md](docs/proton-wg-internals.md) — process targeting, mangle ordering, tunnel ID allocation, firewall reload safety
-- [docs/smart-protocol.md](docs/smart-protocol.md) — SSE-tick design, RLock threading, cancel semantics, protocol restrictions
-- [docs/server-switch-internals.md](docs/server-switch-internals.md) — WG hot-swap vs OVPN teardown, cert handling, latency probe constraints
-- [docs/tunnel-strategy-internals.md](docs/tunnel-strategy-internals.md) — Strategy pattern design, protocol behaviour matrix, how to add a new protocol
-- [docs/router-layer-internals.md](docs/router-layer-internals.md) — Three-layer router architecture (SSH + tools + facades), constructor injection, testing patterns
-- [docs/proton-api-gotchas.md](docs/proton-api-gotchas.md) — persistent vs session certs, cert deletion limitation, library attribute renames, OVPN username suffixes
-- [docs/source-of-truth.md](docs/source-of-truth.md) — full field tables, JSON schema, sync mechanisms, ipset naming
+- [docs/internals/backend-structure.md](docs/internals/backend-structure.md) — Package layout, dependency graph, import conventions, where to put new code
+- [docs/internals/backend-modules.md](docs/internals/backend-modules.md) — Detailed module descriptions per package
+- [docs/internals/frontend.md](docs/internals/frontend.md) — Svelte components, stores, API client
+- [docs/internals/router-reference.md](docs/internals/router-reference.md) — Config naming, limits, tunnel lifecycle, proton-wg, MediaTek constraints
+- [docs/internals/design-system.md](docs/internals/design-system.md) — Sentry-inspired design reference
+- [docs/internals/design-tokens.md](docs/internals/design-tokens.md) — CSS variable token catalog
+- [docs/internals/proton-wg-internals.md](docs/internals/proton-wg-internals.md) — process targeting, mangle ordering, tunnel ID allocation, firewall reload safety
+- [docs/internals/smart-protocol.md](docs/internals/smart-protocol.md) — SSE-tick design, RLock threading, cancel semantics, protocol restrictions
+- [docs/internals/server-switch-internals.md](docs/internals/server-switch-internals.md) — WG hot-swap vs OVPN teardown, cert handling, latency probe constraints
+- [docs/internals/tunnel-strategy-internals.md](docs/internals/tunnel-strategy-internals.md) — Strategy pattern design, protocol behaviour matrix, how to add a new protocol
+- [docs/internals/router-layer-internals.md](docs/internals/router-layer-internals.md) — Three-layer router architecture (SSH + tools + facades), constructor injection, testing patterns
+- [docs/internals/proton-api-gotchas.md](docs/internals/proton-api-gotchas.md) — persistent vs session certs, cert deletion limitation, library attribute renames, OVPN username suffixes
+- [docs/internals/source-of-truth.md](docs/internals/source-of-truth.md) — full field tables, JSON schema, sync mechanisms, ipset naming
+- [docs/internals/debugging-catalogue.md](docs/internals/debugging-catalogue.md) — historical debugging stories and hard-won invariants
+- [docs/internals/router-features-translation.md](docs/internals/router-features-translation.md) — feature → router artifact mapping
 
 ## Quick Start
 
@@ -51,7 +53,7 @@ cd frontend && npx playwright test --ui                 # E2E with interactive U
 
 ## Source-of-Truth Rules
 
-**Every piece of state lives at exactly one source. The router is always the source of truth.** Read [docs/source-of-truth.md](docs/source-of-truth.md) for full details.
+**Every piece of state lives at exactly one source. The router is always the source of truth.** Read [docs/internals/source-of-truth.md](docs/internals/source-of-truth.md) for full details.
 
 - **Router-canonical**: tunnel health, kill switch, profile name, device→VPN assignments (kernel WG + OpenVPN), device info — always read live, never cached locally
 - **Router backup is source of truth for profile_store.json**: On every unlock, the app pulls `profile_store.bak.json` from the router and overwrites local. No timestamp comparison. New router (no backup) = clean slate (empty store). Swapping back to old router restores its backup.
@@ -69,7 +71,7 @@ cd frontend && npx playwright test --ui                 # E2E with interactive U
 - `uci show/get/set/add_list/del_list/delete/commit/reorder/rename` — config reads/writes
 - `/etc/init.d/vpn-client restart` — only when no tunnels are stuck connecting. **Side effect**: flushes ALL `src_mac_*` ipsets (kernel WG/OVPN). Proton-wg ipsets use `pwg_mac_*` prefix and are **immune** to vpn-client restart. Device assignments are also persisted in `.macs` files on the router — the firewall include script (`mangle_rules.sh`) repopulates ipsets from these files on every firewall reload.
 - `ipset add/del` — MAC-assignment ipsets
-- `/etc/init.d/firewall reload` — safe (~0.22s, WG survives). **NOT** `firewall restart` (re-runs rtp2.sh). See [docs/proton-wg-internals.md](docs/proton-wg-internals.md).
+- `/etc/init.d/firewall reload` — safe (~0.22s, WG survives). **NOT** `firewall restart` (re-runs rtp2.sh). See [docs/internals/proton-wg-internals.md](docs/internals/proton-wg-internals.md).
 - `wg show`, `ifstatus`, `ipset list`, `iptables -L -n`, `ubus call gl-clients list/status`, `cat`, `grep`, `ls`, `ps` — read-only
 
 ### NEVER run these:
@@ -81,7 +83,7 @@ cd frontend && npx playwright test --ui                 # E2E with interactive U
 
 ## Design System Rules
 
-See [docs/design-system.md](docs/design-system.md) for the full Sentry-inspired reference and [docs/design-tokens.md](docs/design-tokens.md) for the token catalog.
+See [docs/internals/design-system.md](docs/internals/design-system.md) for the full Sentry-inspired reference and [docs/internals/design-tokens.md](docs/internals/design-tokens.md) for the token catalog.
 
 - **Always consult design-system.md before creating or modifying UI components**
 - **Never hardcode colors, fonts, shadows, or radii in component `<style>` blocks** — use `var(--token-name)` from `frontend/src/app.css` `:root`

@@ -9,7 +9,7 @@ A curated collection of real debugging stories from this project. Every entry is
 - **Every entry is tagged `ACTIVE` or `OBSOLETE`.** Obsolete means the shape of the bug can no longer occur because the code has been restructured (a whole feature was rewritten, a naming scheme was changed, etc.). They're kept for context — the *lesson* may still apply even if the specific failure mode can't reproduce.
 - **The "Invariants" sections at the end** distil the hard-won rules into one-liners that are cheap to skim before acting.
 
-Related docs: [docs/router-features-translation.md](router-features-translation.md), [docs/source-of-truth.md](source-of-truth.md), [docs/router-reference.md](router-reference.md), [docs/proton-wg-internals.md](proton-wg-internals.md).
+Related docs: [router-features-translation.md](router-features-translation.md), [source-of-truth.md](source-of-truth.md), [router-reference.md](router-reference.md), [proton-wg-internals.md](proton-wg-internals.md).
 
 ---
 
@@ -87,7 +87,7 @@ Related docs: [docs/router-features-translation.md](router-features-translation.
 #### Mangle rules MUST be created AFTER firewall reload `ACTIVE` (ordering invariant)
 - **Symptom**: Proton-wg mangle rules disappeared immediately after creation.
 - **Root cause**: Creating mangle rules *before* a `firewall reload` causes fw3 to wipe them (fw3 only preserves its own `!fw3`-marked rules).
-- **Fix**: In `start_proton_wg_tunnel()`, `firewall reload` runs first to create the zone; then `_rebuild_proton_wg_mangle_rules()` writes + executes the include script. See [docs/proton-wg-internals.md](proton-wg-internals.md).
+- **Fix**: In `start_proton_wg_tunnel()`, `firewall reload` runs first to create the zone; then `_rebuild_proton_wg_mangle_rules()` writes + executes the include script. See [proton-wg-internals.md](proton-wg-internals.md).
 
 #### Proton-wg profiles not marked ghost on fresh router `ACTIVE`
 - **Symptom**: On a fresh router, proton-wg profiles showed `health: red` but no `_ghost: true` flag. Clicking Connect ran `wg setconf` against a missing `.conf` and crashed with an SSH error instead of the friendly "No tunnel configured" message.
@@ -114,7 +114,7 @@ Related docs: [docs/router-features-translation.md](router-features-translation.
 #### `vpn-client restart` flushes every `src_mac_*` ipset `ACTIVE` (hard invariant)
 - **Symptom**: During kernel WG/OVPN connect/disconnect, proton-wg ipsets would get flushed briefly.
 - **Root cause**: GL.iNet's `vpn-client` cleans up ipsets by name glob `src_mac_*`. Proton-wg originally used the same prefix and got caught in the blast radius.
-- **Fix**: Proton-wg moved to `pwg_mac_*` prefix. Documented in [docs/router-features-translation.md §6.2](router-features-translation.md). **Don't use the `src_mac_` prefix for anything new** — it's vpn-client territory.
+- **Fix**: Proton-wg moved to `pwg_mac_*` prefix. Documented in [router-features-translation.md §6.2](router-features-translation.md). **Don't use the `src_mac_` prefix for anything new** — it's vpn-client territory.
 
 #### `uci del_list` requires exact-case MAC match `ACTIVE`
 - **Symptom**: `uci del_list` silently no-op'd when removing a device.
@@ -124,7 +124,7 @@ Related docs: [docs/router-features-translation.md](router-features-translation.
 #### `firewall restart` (not reload) corrupts WG handshakes `ACTIVE` (hard invariant)
 - **Symptom**: Running `/etc/init.d/firewall restart` dropped every WireGuard tunnel into `connecting` state.
 - **Root cause**: `firewall restart` = `stop+start` → re-runs `vpnclient` include (`rtp2.sh`) which tears down our interfaces. `firewall reload` (~0.22s) does NOT re-run rtp2.sh (include has `reload='0'`) and our tunnels survive.
-- **Fix**: **Never call `firewall restart`.** Always `firewall reload`. Our own includes use `reload='1'` so they re-run on reload. Documented in [docs/router-features-translation.md §24](router-features-translation.md#24-firewall-include-scripts).
+- **Fix**: **Never call `firewall restart`.** Always `firewall reload`. Our own includes use `reload='1'` so they re-run on reload. Documented in [router-features-translation.md §24](router-features-translation.md#24-firewall-include-scripts).
 
 #### Ghost orphan `src_mac_303` re-created after unlock `OBSOLETE`
 - **Note**: Cause was the old timestamp-based backup restore that would pull stale config from `/etc/fvpn/profile_store.bak.json` during migration. Now that backup is unconditionally router-wins (see "Backup logic inverted" below), this specific re-creation pattern is gone. If you see orphan `src_mac_*` ipsets, destroy them manually; the cause is no longer the app.
@@ -296,7 +296,7 @@ Related docs: [docs/router-features-translation.md](router-features-translation.
 
 #### Flask "Address already in use" on restart `ACTIVE`
 - **Symptom**: `Port 5000 is in use by another program`.
-- **Fix**: Always `pkill -f "python backend/app.py"; sleep 1` before restart. Documented in [CLAUDE.md](../CLAUDE.md).
+- **Fix**: Always `pkill -f "python backend/app.py"; sleep 1` before restart. Documented in [CLAUDE.md](../../CLAUDE.md).
 
 #### VPN Bypass page returning HTML 404 instead of JSON `ACTIVE`
 - **Symptom**: Opening `/#bypass` → `Unexpected token '<', "<!doctype "... is not valid JSON`.
@@ -325,7 +325,7 @@ Related docs: [docs/router-features-translation.md](router-features-translation.
 #### Backup logic inverted — stale router backup overwrote local edit `OBSOLETE` (but the lesson lives)
 - **Symptom**: Edited `profile_store.json` on disk, server restart + unlock, local edit got overwritten by stale router backup, proton-wg ipsets briefly misnamed, all tunnels "appeared removed".
 - **Root cause**: `check_and_auto_restore()` used timestamp comparison (newest wins) + fingerprint gating.
-- **Why obsolete**: Rewritten — router backup is unconditionally source of truth. No backup → empty store (clean-slate semantic for a new router). See [docs/source-of-truth.md](source-of-truth.md).
+- **Why obsolete**: Rewritten — router backup is unconditionally source of truth. No backup → empty store (clean-slate semantic for a new router). See [source-of-truth.md](source-of-truth.md).
 - **Lesson (still active)**: **If you've decided a specific side is the source of truth, don't smuggle in a "whichever is newer" fallback.** One-directional logic is the only way the invariant holds under edit.
 
 #### MCP server returning IDE-like stack traces through Claude `ACTIVE`
@@ -430,9 +430,9 @@ Paste-ready reminders to skim before acting on the router.
 
 ## References
 
-- [docs/router-features-translation.md](router-features-translation.md) — feature → router artifact mapping
-- [docs/router-reference.md](router-reference.md) — naming, limits, MediaTek constraints
-- [docs/source-of-truth.md](source-of-truth.md) — state-ownership rules
-- [docs/proton-wg-internals.md](proton-wg-internals.md) — proton-wg non-obvious constraints
-- [docs/server-switch-internals.md](server-switch-internals.md) — hot-swap vs teardown mechanics
-- [docs/smart-protocol.md](smart-protocol.md) — protocol fallback details
+- [router-features-translation.md](router-features-translation.md) — feature → router artifact mapping
+- [router-reference.md](router-reference.md) — naming, limits, MediaTek constraints
+- [source-of-truth.md](source-of-truth.md) — state-ownership rules
+- [proton-wg-internals.md](proton-wg-internals.md) — proton-wg non-obvious constraints
+- [server-switch-internals.md](server-switch-internals.md) — hot-swap vs teardown mechanics
+- [smart-protocol.md](smart-protocol.md) — protocol fallback details

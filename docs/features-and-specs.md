@@ -1,6 +1,6 @@
 # FlintVPN Manager — Features & Specs
 
-User-facing feature reference. For architecture, see [project-overview.md](project-overview.md). For source-of-truth rules, see [source-of-truth.md](source-of-truth.md).
+User-facing feature reference. For architecture, see [project-overview.md](project-overview.md). For source-of-truth rules, see [source-of-truth.md](internals/source-of-truth.md).
 
 ---
 
@@ -265,7 +265,7 @@ GET    /                                → serve Svelte frontend
 |------|----------|-----------|
 | `secrets.enc` | Encrypted Proton + router credentials. **Never delete.** | Via app only |
 | `config.json` | Router IP, master password salt, auto-optimize schedule, alternative routing toggle, server blacklist/favourites. **Never delete.** | Via SettingsModal |
-| `profile_store.json` | UI metadata for profiles, non-VPN device assignments. Slim by design (see [source-of-truth.md](source-of-truth.md)) | Via app only |
+| `profile_store.json` | UI metadata for profiles, non-VPN device assignments. Slim by design (see [source-of-truth.md](internals/source-of-truth.md)) | Via app only |
 | `logs/app.log`, `error.log`, `access.log` | Application logs | Cleared via LogsModal |
 | `static/` | Compiled Svelte frontend (Vite output) | Rebuilt by `cd frontend && npm run build` |
 

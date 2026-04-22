@@ -175,7 +175,7 @@ LAN-only; WAN blocked. See §9 for full details.
 
 ### Where name, health, kill switch live
 
-Per [docs/source-of-truth.md](source-of-truth.md):
+Per [source-of-truth.md](source-of-truth.md):
 - **Profile name** (router-canonical, atomic 3-write): `route_policy.<rule>.name` + `wireguard.<peer>.name` + `ovpnclient.<client>.name`. For proton-wg there is no route_policy rule; the name lives only in `profile_store.json`.
 - **Profile health**: derived live from `wg show <iface> latest-handshakes` or `ifstatus <iface>` at request time — never cached.
 - **Kill switch**: `route_policy.<rule>.killswitch='0'|'1'`. Proton-wg has no UCI killswitch flag — kill switch is always-on via the per-tunnel blackhole route (§5).
@@ -259,7 +259,7 @@ Slots: `ovpnclient1`..`ovpnclient5`. Fwmarks `0xa000`..`0xe000`. Tables 200..204
 
 **Connect**: same `route_policy.enabled=1` → `vpn-client restart` flow as WG.
 
-**Switch server**: OpenVPN cannot hot-swap. The strategy captures current `from_mac`, section position, and enabled state; deletes the old config; recreates; restores order and device assignments; only re-enables if previously enabled. See [docs/server-switch-internals.md](server-switch-internals.md).
+**Switch server**: OpenVPN cannot hot-swap. The strategy captures current `from_mac`, section position, and enabled state; deletes the old config; recreates; restores order and device assignments; only re-enables if previously enabled. See [server-switch-internals.md](server-switch-internals.md).
 
 ### 3.3 proton-wg (TCP / TLS) — managed entirely by FlintVPN, NOT vpn-client
 
@@ -684,7 +684,7 @@ Tor and Secure Core profiles skip Smart Protocol entirely (they're WG-only on Pr
 
 Cancel triggers (no retry): explicit disconnect, profile delete, type change away from VPN.
 
-Reference: [docs/smart-protocol.md](smart-protocol.md).
+Reference: [smart-protocol.md](smart-protocol.md).
 
 ---
 
@@ -1044,7 +1044,7 @@ The router is the **source of truth** for `profile_store.json`. On every unlock,
 - Backup unparseable → leave local alone.
 - SSH read failure → leave local alone.
 
-During normal operation, every `profile_store.save()` pushes the updated store back to the router via a registered callback. See [docs/source-of-truth.md](source-of-truth.md) for full semantics.
+During normal operation, every `profile_store.save()` pushes the updated store back to the router via a registered callback. See [source-of-truth.md](source-of-truth.md) for full semantics.
 
 ---
 
@@ -1414,14 +1414,14 @@ echo "=== DHCP leases ==="; cat /tmp/dhcp.leases
 
 ## References
 
-- [docs/project-overview.md](project-overview.md) — architecture overview
-- [docs/terminology.md](terminology.md) — domain glossary
-- [docs/source-of-truth.md](source-of-truth.md) — what's router-canonical, Proton-canonical, or local
-- [docs/router-reference.md](router-reference.md) — concise naming and limits reference
-- [docs/router-layer-internals.md](router-layer-internals.md) — three-layer backend architecture
-- [docs/proton-wg-internals.md](proton-wg-internals.md) — proton-wg non-obvious constraints
-- [docs/tunnel-strategy-internals.md](tunnel-strategy-internals.md) — Strategy pattern, per-protocol behaviour matrix
-- [docs/server-switch-internals.md](server-switch-internals.md) — switch mechanisms
-- [docs/smart-protocol.md](smart-protocol.md) — smart protocol fallback
-- [docs/FEATURES_AND_SPECS.md](FEATURES_AND_SPECS.md) — user-facing feature specs
-- [docs/proton-api-gotchas.md](proton-api-gotchas.md) — Proton library pitfalls
+- [project-overview.md](../project-overview.md) — architecture overview
+- [terminology.md](../terminology.md) — domain glossary
+- [source-of-truth.md](source-of-truth.md) — what's router-canonical, Proton-canonical, or local
+- [router-reference.md](router-reference.md) — concise naming and limits reference
+- [router-layer-internals.md](router-layer-internals.md) — three-layer backend architecture
+- [proton-wg-internals.md](proton-wg-internals.md) — proton-wg non-obvious constraints
+- [tunnel-strategy-internals.md](tunnel-strategy-internals.md) — Strategy pattern, per-protocol behaviour matrix
+- [server-switch-internals.md](server-switch-internals.md) — switch mechanisms
+- [smart-protocol.md](smart-protocol.md) — smart protocol fallback
+- [features-and-specs.md](../features-and-specs.md) — user-facing feature specs
+- [proton-api-gotchas.md](proton-api-gotchas.md) — Proton library pitfalls

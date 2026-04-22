@@ -11,7 +11,7 @@ What problem are you trying to solve? Describe a concrete scenario, not an abstr
 
 ## Why it fits
 
-This is a personal hobby project for managing **ProtonVPN on a GL.iNet Flint 2** from a **single home LAN**. Features that extend this scope (different routers, different VPN providers, multi-tenant usage, commercial features) are unlikely to be accepted — see [CONTRIBUTING.md](../CONTRIBUTING.md).
+This is a personal hobby project for managing **ProtonVPN on a GL.iNet Flint 2** from a **single home LAN**. Features that extend this scope (different routers, different VPN providers, multi-tenant usage, commercial features) are unlikely to be accepted — see [CONTRIBUTING.md](../../CONTRIBUTING.md).
 
 Why does this fit the project's scope?
 
