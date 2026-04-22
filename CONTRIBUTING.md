@@ -50,6 +50,36 @@ Make sure both are green. If you're touching router-interaction code, also descr
 - Keep comments sparse — the code should read well without them. Only comment the non-obvious *why*.
 - Follow the safety rules in [CLAUDE.md](CLAUDE.md#router-interaction-safety-rules).
 
-## Development setup
+## Development
 
-See the [Development](README.md#development) section of the README.
+### Initial setup
+
+Follow [docs/installation.md](docs/installation.md) to get the backend + frontend running. The same `--system-site-packages` venv works for development.
+
+### Common commands
+
+```bash
+# Backend with hot-reload (Flask debug)
+source venv/bin/activate && python backend/app.py
+
+# Frontend dev server (hot reload, proxies API to :5000)
+cd frontend && npm run dev     # → http://localhost:5173
+
+# Backend unit tests (no router, no Proton creds) — the CI default
+source venv/bin/activate && python -m pytest tests/ -m "not integration"
+
+# Backend integration tests (requires live router on 192.168.8.1)
+python -m pytest tests/ -m integration
+
+# Frontend unit tests (vitest)
+cd frontend && npm test
+
+# Frontend E2E tests (Playwright — needs backend running on :5000)
+cd frontend && npx playwright test
+```
+
+**Important:** The frontend **must be rebuilt** (`cd frontend && npm run build`) before testing in a browser against the Flask server. Flask serves the contents of `static/` directly; the dev server on :5173 is only for interactive development.
+
+### Where to put new code
+
+Architecture guidance lives in [docs/internals/backend-structure.md](docs/internals/backend-structure.md) and [docs/internals/backend-modules.md](docs/internals/backend-modules.md). Before adding a new module, check those for the intended layering.
