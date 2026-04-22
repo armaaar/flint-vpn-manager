@@ -42,7 +42,7 @@ The repo ships with a `.mcp.json` at the root that Claude Code auto-detects when
 ```json
 {
   "mcpServers": {
-    "flint-vpn": {
+    "flint-vpn-manager": {
       "type": "stdio",
       "command": "bash",
       "args": ["-c", "source venv/bin/activate && cd backend && python -m mcp_server"]
@@ -51,7 +51,7 @@ The repo ships with a `.mcp.json` at the root that Claude Code auto-detects when
 }
 ```
 
-Run `claude` from inside the repo and the tools will be available immediately (prefix `mcp__flint-vpn__flint_*`).
+Run `claude` from inside the repo and the tools will be available immediately (prefix `mcp__flint-vpn-manager__flint_*`).
 
 ### Claude Code (from any directory)
 
@@ -60,7 +60,7 @@ Add to your user-scope config at `~/.claude/settings.json` (or the project-scope
 ```json
 {
   "mcpServers": {
-    "flint-vpn": {
+    "flint-vpn-manager": {
       "type": "stdio",
       "command": "bash",
       "args": ["-c", "cd /absolute/path/to/flint-vpn-manager && source venv/bin/activate && cd backend && python -m mcp_server"]
@@ -78,7 +78,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS 
 ```json
 {
   "mcpServers": {
-    "flint-vpn": {
+    "flint-vpn-manager": {
       "command": "ssh",
       "args": [
         "user@<linux-host>",

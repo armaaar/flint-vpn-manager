@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "flint-vpn": {
+    "flint-vpn-manager": {
       "type": "stdio",
       "command": "bash",
       "args": ["-c", "source venv/bin/activate && cd backend && python -m mcp_server"]

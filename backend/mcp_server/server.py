@@ -33,7 +33,7 @@ from mcp_server.tools import (
 BASE_URL = os.environ.get("FLINTVPN_API_URL", "http://localhost:5000")
 
 mcp = FastMCP(
-    "flint-vpn",
+    "flint-vpn-manager",
     instructions=(
         "FlintVPN Manager — manage ProtonVPN tunnels and device routing on a "
         "GL.iNet Flint 2 router.\n\n"
