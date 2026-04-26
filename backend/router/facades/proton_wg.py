@@ -15,6 +15,7 @@ from consts import (
     PROTO_WIREGUARD_TCP,
     PROTO_WIREGUARD_TLS,
 )
+from router.tools.uci import Uci
 
 PROTON_WG_MARKS = ["0x6000", "0x7000", "0x9000", "0xf000"]
 PROTON_WG_DIR = "/etc/fvpn/protonwg"
@@ -22,6 +23,9 @@ PROTON_WG_BIN = "/usr/bin/proton-wg"
 # Proton-wg ipsets use a distinct prefix so vpn-client restart (which
 # flushes all src_mac_* ipsets) never touches proton-wg device assignments.
 PWG_IPSET_PREFIX = "pwg_mac_"
+# Zones that should never be forwarded to a proton-wg tunnel.
+_NON_FORWARD_ZONES = {"wan"}
+_VPN_ZONE_PREFIXES = ("wgclient", "ovpnclient", "protonwg", "wgserver", "ovpnserver")
 
 
 class RouterProtonWG:
@@ -35,6 +39,27 @@ class RouterProtonWG:
         self._service_ctl = service_ctl
         self._alloc_tunnel_id = alloc_tunnel_id
         self._ssh = ssh  # raw exec for wg, pidof, kill, cat, ip link show, etc.; write_file for configs
+
+    def _get_lan_side_zones(self) -> list[str]:
+        """Return all firewall zones eligible to forward into a proton-wg tunnel.
+
+        Excludes ``wan`` and any zone whose name matches a VPN tunnel
+        prefix. Returns a deterministic, sorted list (so callers can build
+        idempotent UCI sections).
+        """
+        raw = self._ssh.exec("uci show firewall 2>/dev/null") or ""
+        firewall = Uci.parse_show(raw, "firewall")
+        zones: list[str] = []
+        for fields in firewall.values():
+            if fields.get("_type") != "zone":
+                continue
+            name = fields.get("name", "")
+            if not name or name in _NON_FORWARD_ZONES:
+                continue
+            if any(name.startswith(p) for p in _VPN_ZONE_PREFIXES):
+                continue
+            zones.append(name)
+        return sorted(zones)
 
     # ── Persistent MAC file management ──────────────────────────────────────
     #
@@ -281,22 +306,33 @@ class RouterProtonWG:
             self._iproute.route_add_blackhole_v6("default", table_num, metric=254)
             self._iproute.rule_add_v6(mark, "0xf000", table_num, 6000)
 
-        # 6. Firewall zone via UCI
-        self._ssh.exec(
-            f"uci set firewall.fvpn_zone_{iface}=zone && "
-            f"uci set firewall.fvpn_zone_{iface}.name='{iface}' && "
-            f"uci add_list firewall.fvpn_zone_{iface}.device='{iface}' && "
-            f"uci set firewall.fvpn_zone_{iface}.input='DROP' && "
-            f"uci set firewall.fvpn_zone_{iface}.output='ACCEPT' && "
-            f"uci set firewall.fvpn_zone_{iface}.forward='REJECT' && "
-            f"uci set firewall.fvpn_zone_{iface}.masq='1' && "
-            f"uci set firewall.fvpn_zone_{iface}.mtu_fix='1' && "
-            f"uci set firewall.fvpn_fwd_{iface}=forwarding && "
-            f"uci set firewall.fvpn_fwd_{iface}.src='lan' && "
-            f"uci set firewall.fvpn_fwd_{iface}.dest='{iface}' && "
-            f"uci commit firewall && "
-            f"/etc/init.d/firewall reload >/dev/null 2>&1"
-        )
+        # 6. Firewall zone + per-LAN-zone forwarding rules via UCI.
+        # Devices on any LAN-side zone (lan, guest, fvpn_iot, …) may be
+        # assigned to this tunnel, so every non-wan, non-VPN zone needs a
+        # forwarding entry into the proton-wg zone — otherwise marked
+        # traffic from that zone is dropped by fw3 even though routing,
+        # mangle and ipset are all correct.
+        zones = self._get_lan_side_zones() or ["lan"]
+        cmds = [
+            f"uci set firewall.fvpn_zone_{iface}=zone",
+            f"uci set firewall.fvpn_zone_{iface}.name='{iface}'",
+            f"uci add_list firewall.fvpn_zone_{iface}.device='{iface}'",
+            f"uci set firewall.fvpn_zone_{iface}.input='DROP'",
+            f"uci set firewall.fvpn_zone_{iface}.output='ACCEPT'",
+            f"uci set firewall.fvpn_zone_{iface}.forward='REJECT'",
+            f"uci set firewall.fvpn_zone_{iface}.masq='1'",
+            f"uci set firewall.fvpn_zone_{iface}.mtu_fix='1'",
+            # Drop legacy single-zone forwarding from older app versions
+            f"uci -q delete firewall.fvpn_fwd_{iface} 2>/dev/null; true",
+        ]
+        for zone in zones:
+            section = f"fvpn_fwd_{iface}_{zone}"
+            cmds.append(f"uci set firewall.{section}=forwarding")
+            cmds.append(f"uci set firewall.{section}.src='{zone}'")
+            cmds.append(f"uci set firewall.{section}.dest='{iface}'")
+        cmds.append("uci commit firewall")
+        cmds.append("/etc/init.d/firewall reload >/dev/null 2>&1")
+        self._ssh.exec(" && ".join(cmds))
 
         # 7. Rebuild ALL proton-wg mangle MARK rules
         self._rebuild_proton_wg_mangle_rules()
@@ -341,9 +377,11 @@ class RouterProtonWG:
         # 4. Remove the interface
         self._iproute.link_delete(iface)
 
-        # 5. Remove firewall zone + forwarding, rebuild mangle
+        # 5. Remove firewall zone + forwarding (legacy + per-zone), rebuild mangle
         self._uci.delete(f"firewall.fvpn_zone_{iface}")
         self._uci.delete(f"firewall.fvpn_fwd_{iface}")
+        for zone in self._get_lan_side_zones():
+            self._uci.delete(f"firewall.fvpn_fwd_{iface}_{zone}")
         self._uci.commit("firewall")
         # Rebuild mangle script BEFORE firewall reload so the reload
         # picks up the corrected script (without the stopped tunnel).
@@ -399,6 +437,53 @@ class RouterProtonWG:
              f"--dport 53 -j REDIRECT --to-ports {port}"),
         ]
 
+    @staticmethod
+    def _dns_mark_register_cmd(iface: str, mark: str, tunnel_id: str) -> str:
+        """Build a shell snippet that registers a /proc/dns_mark/ rule for a tunnel.
+
+        The rule_id is the tunnel_id (matches the wgclient convention used by
+        GL.iNet's dns_mark_ctl.lua). Idempotent: clears any existing rule with
+        the same id before recreating, and reads MAC list from the persisted
+        ``.macs`` file so changes survive firewall reloads.
+        """
+        macs_file = f"{PROTON_WG_DIR}/{iface}.macs"
+        return (
+            f"if [ -e /proc/dns_mark/create ]; then "
+            f"[ -d /proc/dns_mark/rule{tunnel_id} ] && "
+            f"echo {tunnel_id} > /proc/dns_mark/clear 2>/dev/null; "
+            f"echo {tunnel_id} > /proc/dns_mark/create 2>/dev/null && "
+            f"echo {mark} > /proc/dns_mark/rule{tunnel_id}/mark && "
+            f"echo 0 > /proc/dns_mark/rule{tunnel_id}/mac_flag && "
+            f"echo 1 > /proc/dns_mark/rule{tunnel_id}/domain_flag && "
+            f"[ -f {macs_file} ] && "
+            f"tr '\\n' ' ' < {macs_file} > /proc/dns_mark/rule{tunnel_id}/macs; "
+            f"fi; true"
+        )
+
+    @staticmethod
+    def _dns_mark_rotate_default_cmd() -> str:
+        """Recreate rule100 (the wan default catch-all) so it sorts last.
+
+        dns_mark evaluates rules in creation order and stops at the first
+        match. rule100 has an empty MAC blacklist (matches everything), so it
+        must come *after* every specific rule. GL.iNet's lua loader places it
+        last by default, but firewall reloads append our proton-wg rules
+        afterwards. This snippet preserves rule100's existing settings,
+        re-creates it, and only touches the rule if dns_mark is loaded.
+        """
+        return (
+            "if [ -d /proc/dns_mark/rule100 ]; then "
+            "_m=$(cat /proc/dns_mark/rule100/mark 2>/dev/null); "
+            "_mf=$(cat /proc/dns_mark/rule100/mac_flag 2>/dev/null); "
+            "_df=$(cat /proc/dns_mark/rule100/domain_flag 2>/dev/null); "
+            "echo 100 > /proc/dns_mark/clear 2>/dev/null; "
+            "echo 100 > /proc/dns_mark/create 2>/dev/null && "
+            "echo \"$_m\" > /proc/dns_mark/rule100/mark && "
+            "echo \"$_mf\" > /proc/dns_mark/rule100/mac_flag && "
+            "echo \"$_df\" > /proc/dns_mark/rule100/domain_flag; "
+            "fi; true"
+        )
+
     def _start_proton_wg_dnsmasq(self, iface: str, mark: str,
                                   dns: str = "10.2.0.1") -> None:
         """Set up a per-tunnel dnsmasq instance with CT zone + DNS redirect.
@@ -410,14 +495,17 @@ class RouterProtonWG:
         port = self._dns_port(mark)
         zone = self._ct_zone(mark)
         conf_dir = f"/tmp/dnsmasq.d.{iface}"
-        resolv_file = f"/tmp/resolv.conf.d/resolv.conf.{iface}"
         conf_path = f"/var/etc/dnsmasq.conf.{iface}"
 
-        # 1. Create conf-dir and resolv-file
-        self._ssh.exec(f"mkdir -p {conf_dir} /tmp/resolv.conf.d")
-        self._ssh.write_file(resolv_file, f"# Interface {iface}\nnameserver {dns}\n")
+        # 1. Create conf-dir
+        self._ssh.exec(f"mkdir -p {conf_dir}")
 
-        # 2. Write minimal dnsmasq config (matches firmware pattern)
+        # 2. Write minimal dnsmasq config.
+        # Use ``server={dns}@{iface}`` instead of a resolv-file — the proton-wg
+        # peer DNS (10.2.0.1) is only reachable via the tunnel with the right
+        # fwmark. ``@iface`` forces dnsmasq to bind upstream queries to the
+        # tunnel interface so they take the protonwg0 route, not main/wan.
+        # Without this, dnsmasq's queries leak out wan and timeout.
         dnsmasq_conf = (
             f"# Auto-generated by Flint VPN Manager — per-tunnel DNS for {iface}\n"
             f"port={port}\n"
@@ -425,7 +513,7 @@ class RouterProtonWG:
             f"no-dhcp-interface=\n"
             f"no-hosts\n"
             f"cache-size=1000\n"
-            f"resolv-file={resolv_file}\n"
+            f"server={dns}@{iface}\n"
             f"conf-dir={conf_dir}\n"
             f"log-facility=/dev/null\n"
         )
@@ -530,7 +618,9 @@ class RouterProtonWG:
                 f"iptables -t nat -D policy_redirect "
                 f"-p udp -m mark --mark {mark}/0xf000 "
                 f"-m addrtype --dst-type LOCAL "
-                f"--dport 53 -j REDIRECT --to-ports {port} 2>/dev/null; true"
+                f"--dport 53 -j REDIRECT --to-ports {port} 2>/dev/null; "
+                f"[ -d /proc/dns_mark/rule{tid} ] && "
+                f"echo {tid} > /proc/dns_mark/clear 2>/dev/null; true"
             )
 
         cmds = []
@@ -558,12 +648,36 @@ class RouterProtonWG:
                 f"iptables -t mangle -I ROUTE_POLICY 1 -j {chain}"
             )
 
-        # DNS infrastructure: CT zone + REDIRECT for each tunnel's dnsmasq
+        # DNS infrastructure: CT zone + REDIRECT for each tunnel's dnsmasq.
+        # Also re-spawn the per-tunnel dnsmasq if it has died — the REDIRECT
+        # rules point to a fixed port; without a live listener, all DNS for
+        # devices in that group silently black-holes (no internet).
         dns_cmds = []
         for iface, mark, ipset_name, tid in tunnels:
+            conf_path = f"/var/etc/dnsmasq.conf.{iface}"
+            dns_cmds.append(
+                f"if [ -f {conf_path} ] && "
+                f"! pgrep -f 'dnsmasq.*{conf_path}' >/dev/null 2>&1; then "
+                f"/usr/sbin/dnsmasq -C {conf_path} 2>/dev/null || true; "
+                f"fi"
+            )
             dns_cmds.extend(self._dns_iptables_cmds(
                 mark, self._dns_port(mark), self._ct_zone(mark),
             ))
+            # GL.iNet's dns_mark.ko kernel module pre-marks every DNS packet
+            # *before* iptables based on rules in /proc/dns_mark/. The catch-all
+            # rule100 (mark 0x8000 = wan) matches anything not registered, so
+            # without an explicit rule for our tunnel, devices in this group get
+            # their DNS marked 0x8000 → REDIRECT to per-tunnel dnsmasq never
+            # fires → DNS leaks out wan. We register a per-tunnel rule (mark
+            # 0x6000 etc.) and clear+recreate rule100 so it sorts AFTER ours
+            # in evaluation order (the module checks rules in creation order
+            # and stops at first match).
+            dns_cmds.append(self._dns_mark_register_cmd(iface, mark, tid))
+        # After registering all proton-wg dns_mark rules, recreate rule100 so
+        # it sits at the end of the evaluation list. Run only once per rebuild.
+        if tunnels:
+            dns_cmds.append(self._dns_mark_rotate_default_cmd())
 
         all_cmds = cmds + dns_cmds
 

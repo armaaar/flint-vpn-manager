@@ -141,6 +141,64 @@ class TestStopProtonWgTunnel:
         uci.delete.assert_any_call("firewall.fvpn_fwd_protonwg0")
         service_ctl.reload.assert_called_with("firewall")
 
+    def test_cleanup_deletes_per_zone_forwarding(self, pwg, ssh, uci):
+        """Per-zone forwarding sections (lan, fvpn_iot, guest) must also be deleted."""
+        zones_uci = (
+            "firewall.@zone[0]=zone\n"
+            "firewall.@zone[0].name='lan'\n"
+            "firewall.@zone[1]=zone\n"
+            "firewall.@zone[1].name='wan'\n"
+            "firewall.@zone[2]=zone\n"
+            "firewall.@zone[2].name='guest'\n"
+            "firewall.fvpn_iot_zone=zone\n"
+            "firewall.fvpn_iot_zone.name='fvpn_iot'\n"
+            "firewall.wgclient1=zone\n"
+            "firewall.wgclient1.name='wgclient1'\n"
+        )
+
+        def exec_side_effect(cmd, **kw):
+            if "uci show firewall" in cmd:
+                return zones_uci
+            return ""
+
+        ssh.exec.side_effect = exec_side_effect
+        with patch("time.sleep"):
+            pwg.stop_proton_wg_tunnel("protonwg0", "0x6000", 1006, 100)
+
+        # Per-zone sections deleted (wan and wgclient* skipped)
+        uci.delete.assert_any_call("firewall.fvpn_fwd_protonwg0_lan")
+        uci.delete.assert_any_call("firewall.fvpn_fwd_protonwg0_guest")
+        uci.delete.assert_any_call("firewall.fvpn_fwd_protonwg0_fvpn_iot")
+        # And the legacy single section is still deleted for backward compat
+        uci.delete.assert_any_call("firewall.fvpn_fwd_protonwg0")
+        # wan and VPN-prefixed zones are NOT touched
+        for c in uci.delete.call_args_list:
+            assert "fvpn_fwd_protonwg0_wan" not in str(c)
+            assert "fvpn_fwd_protonwg0_wgclient" not in str(c)
+
+
+class TestGetLanSideZones:
+    def test_filters_wan_and_vpn_prefixes(self, pwg, ssh):
+        ssh.exec.return_value = (
+            "firewall.@zone[0]=zone\n"
+            "firewall.@zone[0].name='lan'\n"
+            "firewall.@zone[1]=zone\n"
+            "firewall.@zone[1].name='wan'\n"
+            "firewall.guest=zone\n"
+            "firewall.guest.name='guest'\n"
+            "firewall.fvpn_iot_zone=zone\n"
+            "firewall.fvpn_iot_zone.name='fvpn_iot'\n"
+            "firewall.wgclient1=zone\n"
+            "firewall.wgclient1.name='wgclient1'\n"
+            "firewall.fvpn_zone_protonwg0=zone\n"
+            "firewall.fvpn_zone_protonwg0.name='protonwg0'\n"
+        )
+        assert pwg._get_lan_side_zones() == ["fvpn_iot", "guest", "lan"]
+
+    def test_empty_when_uci_returns_nothing(self, pwg, ssh):
+        ssh.exec.return_value = ""
+        assert pwg._get_lan_side_zones() == []
+
 
 class TestDeleteProtonWgConfig:
     def test_removes_files_ipset_and_rebuilds(self, pwg, ssh, ipset):
@@ -303,21 +361,20 @@ class TestStartProtonWgDnsmasq:
         ssh.exec.return_value = ""
         pwg._start_proton_wg_dnsmasq("protonwg0", "0x6000", dns="10.2.0.1")
 
-        # Should create conf-dir and resolv-file
+        # Should create conf-dir
         exec_calls = [str(c) for c in ssh.exec.call_args_list]
         assert any("mkdir -p /tmp/dnsmasq.d.protonwg0" in c for c in exec_calls)
 
-        # Should write resolv file with DNS server
-        resolv_writes = [c for c in ssh.write_file.call_args_list
-                         if "resolv.conf.protonwg0" in str(c)]
-        assert resolv_writes
-        assert "10.2.0.1" in resolv_writes[0][0][1]
-
         # Should write dnsmasq config with correct port (2653 for 0x6000)
+        # and bind upstream queries to the protonwg interface
         conf_writes = [c for c in ssh.write_file.call_args_list
                        if "dnsmasq.conf.protonwg0" in str(c)]
         assert conf_writes
-        assert "port=2653" in conf_writes[0][0][1]
+        conf_body = conf_writes[0][0][1]
+        assert "port=2653" in conf_body
+        assert "server=10.2.0.1@protonwg0" in conf_body
+        # No resolv-file: upstream goes via the @iface server line
+        assert "resolv-file" not in conf_body
 
         # Should set up CT zone rules (raw table)
         assert any("pre_dns_deal_conn_zone" in c for c in exec_calls)
@@ -325,6 +382,32 @@ class TestStartProtonWgDnsmasq:
 
         # Should set up DNS REDIRECT rule (nat table)
         assert any("REDIRECT --to-ports 2653" in c for c in exec_calls)
+
+
+class TestDnsMarkRegistration:
+    """Test the /proc/dns_mark/ rule snippets used in mangle_rules.sh."""
+
+    def test_register_cmd_includes_clear_create_and_macs(self):
+        cmd = RouterProtonWG._dns_mark_register_cmd("protonwg0", "0x6000", "303")
+        # Idempotent: clear before create
+        assert "echo 303 > /proc/dns_mark/clear" in cmd
+        assert "echo 303 > /proc/dns_mark/create" in cmd
+        # Mark + flags
+        assert "echo 0x6000 > /proc/dns_mark/rule303/mark" in cmd
+        assert "echo 0 > /proc/dns_mark/rule303/mac_flag" in cmd
+        assert "echo 1 > /proc/dns_mark/rule303/domain_flag" in cmd
+        # MAC list sourced from the persistent .macs file
+        assert "/etc/fvpn/protonwg/protonwg0.macs" in cmd
+        # Guarded so the script is a no-op when dns_mark.ko is not loaded
+        assert "[ -e /proc/dns_mark/create ]" in cmd
+
+    def test_rotate_default_preserves_rule100_settings(self):
+        cmd = RouterProtonWG._dns_mark_rotate_default_cmd()
+        # Save existing values, clear, recreate, restore
+        assert "cat /proc/dns_mark/rule100/mark" in cmd
+        assert "echo 100 > /proc/dns_mark/clear" in cmd
+        assert "echo 100 > /proc/dns_mark/create" in cmd
+        assert 'echo "$_m" > /proc/dns_mark/rule100/mark' in cmd
 
 
 class TestStopProtonWgDnsmasq:
