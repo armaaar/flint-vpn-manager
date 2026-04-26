@@ -442,46 +442,52 @@ class RouterProtonWG:
         """Build a shell snippet that registers a /proc/dns_mark/ rule for a tunnel.
 
         The rule_id is the tunnel_id (matches the wgclient convention used by
-        GL.iNet's dns_mark_ctl.lua). Idempotent: clears any existing rule with
-        the same id before recreating, and reads MAC list from the persisted
-        ``.macs`` file so changes survive firewall reloads.
+        GL.iNet's dns_mark_ctl.lua). Idempotent — `echo <id> > create` is a
+        no-op if the rule directory already exists, and we re-write the
+        mark/flags/macs every time so changes survive firewall reloads.
+
+        Important: do NOT write to ``/proc/dns_mark/clear``. That file wipes
+        ALL rules regardless of the value written, which would nuke GL.iNet's
+        wgclient rules and leave devices in those groups without internet.
         """
         macs_file = f"{PROTON_WG_DIR}/{iface}.macs"
         return (
-            f"if [ -e /proc/dns_mark/create ]; then "
-            f"[ -d /proc/dns_mark/rule{tunnel_id} ] && "
-            f"echo {tunnel_id} > /proc/dns_mark/clear 2>/dev/null; "
-            f"echo {tunnel_id} > /proc/dns_mark/create 2>/dev/null && "
+            f"if [ -e /proc/dns_mark/create ] && [ -f {macs_file} ]; then "
+            f"echo {tunnel_id} > /proc/dns_mark/create 2>/dev/null; "
             f"echo {mark} > /proc/dns_mark/rule{tunnel_id}/mark && "
             f"echo 0 > /proc/dns_mark/rule{tunnel_id}/mac_flag && "
             f"echo 1 > /proc/dns_mark/rule{tunnel_id}/domain_flag && "
-            f"[ -f {macs_file} ] && "
-            f"tr '\\n' ' ' < {macs_file} > /proc/dns_mark/rule{tunnel_id}/macs; "
+            f"cat {macs_file} > /proc/dns_mark/rule{tunnel_id}/macs; "
             f"fi; true"
         )
 
     @staticmethod
-    def _dns_mark_rotate_default_cmd() -> str:
-        """Recreate rule100 (the wan default catch-all) so it sorts last.
+    def _dns_mark_blacklist_default_cmd(macs_files: list[str]) -> str:
+        """Add proton-wg device MACs to rule100's MAC blacklist.
 
-        dns_mark evaluates rules in creation order and stops at the first
-        match. rule100 has an empty MAC blacklist (matches everything), so it
-        must come *after* every specific rule. GL.iNet's lua loader places it
-        last by default, but firewall reloads append our proton-wg rules
-        afterwards. This snippet preserves rule100's existing settings,
-        re-creates it, and only touches the rule if dns_mark is loaded.
+        rule100 is GL.iNet's wan-default catch-all (mark 0x8000) with
+        ``mac_flag=1`` (blacklist mode). Empty blacklist = matches every
+        device. The dns_mark module evaluates rules in creation order and
+        stops at the first match — and rule100 always sorts after our
+        per-tunnel rules because lua loads it last and our mangle_rules.sh
+        runs after lua.
+
+        Listing proton-wg MACs in rule100's blacklist makes rule100 *not*
+        match those devices, so evaluation falls through to our per-tunnel
+        rule (e.g. rule303) and DNS gets the right mark. This is
+        non-destructive — we never call /proc/dns_mark/clear, so other
+        rules (300/301/306/307) are untouched.
         """
+        if not macs_files:
+            return "true"
+        # `cat` empty/missing files cleanly with `2>/dev/null`; sort -u
+        # collapses duplicates if a MAC is somehow listed in two tunnels.
+        sources = " ".join(macs_files)
         return (
-            "if [ -d /proc/dns_mark/rule100 ]; then "
-            "_m=$(cat /proc/dns_mark/rule100/mark 2>/dev/null); "
-            "_mf=$(cat /proc/dns_mark/rule100/mac_flag 2>/dev/null); "
-            "_df=$(cat /proc/dns_mark/rule100/domain_flag 2>/dev/null); "
-            "echo 100 > /proc/dns_mark/clear 2>/dev/null; "
-            "echo 100 > /proc/dns_mark/create 2>/dev/null && "
-            "echo \"$_m\" > /proc/dns_mark/rule100/mark && "
-            "echo \"$_mf\" > /proc/dns_mark/rule100/mac_flag && "
-            "echo \"$_df\" > /proc/dns_mark/rule100/domain_flag; "
-            "fi; true"
+            f"if [ -d /proc/dns_mark/rule100 ]; then "
+            f"cat {sources} 2>/dev/null | "
+            f"awk 'NF && !seen[$0]++' > /proc/dns_mark/rule100/macs; "
+            f"fi; true"
         )
 
     def _start_proton_wg_dnsmasq(self, iface: str, mark: str,
@@ -619,8 +625,13 @@ class RouterProtonWG:
                 f"-p udp -m mark --mark {mark}/0xf000 "
                 f"-m addrtype --dst-type LOCAL "
                 f"--dport 53 -j REDIRECT --to-ports {port} 2>/dev/null; "
+                # Drain the dns_mark rule's MAC list so it stops matching
+                # anything. We can't delete an individual rule (the only
+                # delete API is /proc/dns_mark/clear which wipes ALL rules
+                # including GL.iNet's, leaving wgclient devices without
+                # internet), so the next-best thing is to empty its macs.
                 f"[ -d /proc/dns_mark/rule{tid} ] && "
-                f"echo {tid} > /proc/dns_mark/clear 2>/dev/null; true"
+                f": > /proc/dns_mark/rule{tid}/macs 2>/dev/null; true"
             )
 
         cmds = []
@@ -667,17 +678,21 @@ class RouterProtonWG:
             # GL.iNet's dns_mark.ko kernel module pre-marks every DNS packet
             # *before* iptables based on rules in /proc/dns_mark/. The catch-all
             # rule100 (mark 0x8000 = wan) matches anything not registered, so
-            # without an explicit rule for our tunnel, devices in this group get
-            # their DNS marked 0x8000 → REDIRECT to per-tunnel dnsmasq never
-            # fires → DNS leaks out wan. We register a per-tunnel rule (mark
-            # 0x6000 etc.) and clear+recreate rule100 so it sorts AFTER ours
-            # in evaluation order (the module checks rules in creation order
-            # and stops at first match).
+            # without an explicit rule for our tunnel, devices in this group
+            # get their DNS marked 0x8000 → REDIRECT to per-tunnel dnsmasq
+            # never fires → DNS leaks out wan.
             dns_cmds.append(self._dns_mark_register_cmd(iface, mark, tid))
-        # After registering all proton-wg dns_mark rules, recreate rule100 so
-        # it sits at the end of the evaluation list. Run only once per rebuild.
+        # The dns_mark module evaluates rules in creation order and stops at
+        # the first match. rule100 always sorts AFTER our proton-wg rules
+        # (lua loads it last; firewall reloads append ours afterwards), so we
+        # blacklist proton-wg MACs in rule100 to make it skip them — then
+        # evaluation falls through to our specific rule. This is the
+        # non-destructive alternative to clearing+recreating rule100.
         if tunnels:
-            dns_cmds.append(self._dns_mark_rotate_default_cmd())
+            macs_files = [
+                f"{PROTON_WG_DIR}/{iface}.macs" for iface, _, _, _ in tunnels
+            ]
+            dns_cmds.append(self._dns_mark_blacklist_default_cmd(macs_files))
 
         all_cmds = cmds + dns_cmds
 

@@ -387,10 +387,9 @@ class TestStartProtonWgDnsmasq:
 class TestDnsMarkRegistration:
     """Test the /proc/dns_mark/ rule snippets used in mangle_rules.sh."""
 
-    def test_register_cmd_includes_clear_create_and_macs(self):
+    def test_register_cmd_creates_rule_with_mark_and_macs(self):
         cmd = RouterProtonWG._dns_mark_register_cmd("protonwg0", "0x6000", "303")
-        # Idempotent: clear before create
-        assert "echo 303 > /proc/dns_mark/clear" in cmd
+        # Idempotent create (no-op if rule already exists)
         assert "echo 303 > /proc/dns_mark/create" in cmd
         # Mark + flags
         assert "echo 0x6000 > /proc/dns_mark/rule303/mark" in cmd
@@ -401,13 +400,28 @@ class TestDnsMarkRegistration:
         # Guarded so the script is a no-op when dns_mark.ko is not loaded
         assert "[ -e /proc/dns_mark/create ]" in cmd
 
-    def test_rotate_default_preserves_rule100_settings(self):
-        cmd = RouterProtonWG._dns_mark_rotate_default_cmd()
-        # Save existing values, clear, recreate, restore
-        assert "cat /proc/dns_mark/rule100/mark" in cmd
-        assert "echo 100 > /proc/dns_mark/clear" in cmd
-        assert "echo 100 > /proc/dns_mark/create" in cmd
-        assert 'echo "$_m" > /proc/dns_mark/rule100/mark' in cmd
+    def test_register_cmd_never_uses_clear(self):
+        """`/proc/dns_mark/clear` wipes ALL rules — must never appear."""
+        cmd = RouterProtonWG._dns_mark_register_cmd("protonwg0", "0x6000", "303")
+        assert "/proc/dns_mark/clear" not in cmd
+
+    def test_blacklist_default_writes_to_rule100_macs(self):
+        cmd = RouterProtonWG._dns_mark_blacklist_default_cmd([
+            "/etc/fvpn/protonwg/protonwg0.macs",
+            "/etc/fvpn/protonwg/protonwg1.macs",
+        ])
+        # Concatenates per-tunnel .macs files into rule100/macs
+        assert "/etc/fvpn/protonwg/protonwg0.macs" in cmd
+        assert "/etc/fvpn/protonwg/protonwg1.macs" in cmd
+        assert "/proc/dns_mark/rule100/macs" in cmd
+        # Guarded
+        assert "[ -d /proc/dns_mark/rule100 ]" in cmd
+        # Non-destructive: never clears
+        assert "/proc/dns_mark/clear" not in cmd
+
+    def test_blacklist_default_with_no_tunnels_is_noop(self):
+        cmd = RouterProtonWG._dns_mark_blacklist_default_cmd([])
+        assert cmd == "true"
 
 
 class TestStopProtonWgDnsmasq:
