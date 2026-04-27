@@ -176,6 +176,71 @@ class TestDeleteNetwork:
         assert result["success"]
         r.lan_access.delete_network.assert_called_once_with("fvpn_iot")
 
+    def test_delete_refreshes_lan_routing(self):
+        """Subnet list shrank — the priority-50 ip-rule override must be
+        refreshed so the deleted bridge's stale rule is dropped on the
+        next firewall reload (and the runtime apply replaces the in-memory
+        rule set with the surviving subnets only)."""
+        r = _mock_router()
+
+        with patch("services.lan_access_service.sm") as mock_sm:
+            mock_sm.get_config.return_value = {"lan_access": {"rules": [], "exceptions": []}}
+            svc = LanAccessService(r)
+            svc.delete_network("fvpn_iot")
+
+        r.lan_access.apply_device_exceptions.assert_called_once_with([])
+
+
+class TestCreateNetwork:
+    def test_create_refreshes_lan_routing(self):
+        """Subnet list grew — the priority-50 ip-rule override must be
+        refreshed so the new bridge gets a rule. Without this, devices on
+        the new network would be broken until the next unlock."""
+        r = _mock_router()
+        r.lan_access.get_networks.return_value = []
+        existing_exceptions = [
+            {"id": "exc_1", "from_ip": "1.1.1.1", "to_ip": "2.2.2.2", "direction": "both"},
+        ]
+
+        with patch("services.lan_access_service.sm") as mock_sm:
+            mock_sm.get_config.return_value = {
+                "lan_access": {"exceptions": existing_exceptions}
+            }
+            svc = LanAccessService(r)
+            svc.create_network({
+                "name": "test",
+                "password": "test-pwd-12",
+                "isolation": True,
+            })
+
+        # Existing exceptions must be carried through — the routing override
+        # piggybacks on the same call so we can't pass an empty list and
+        # accidentally wipe user exceptions.
+        r.lan_access.apply_device_exceptions.assert_called_once_with(existing_exceptions)
+
+
+class TestUpdateNetwork:
+    def test_enable_toggle_refreshes_lan_routing(self):
+        """Disabling a network removes its subnet from ``_lan_subnets()``,
+        so the priority-50 override needs to drop the now-stale rule."""
+        r = _mock_router()
+        r.lan_access.get_networks.return_value = [
+            {
+                "id": "fvpn_iot",
+                "subnet": "192.168.10.0/24",
+                "bridge": "br-fvpn_iot",
+                "enabled": True,
+                "ssids": [{"section": "fvpn_iot_ra1"}],
+            }
+        ]
+
+        with patch("services.lan_access_service.sm") as mock_sm:
+            mock_sm.get_config.return_value = {"lan_access": {"exceptions": []}}
+            svc = LanAccessService(r)
+            svc.update_network("fvpn_iot", {"enabled": False})
+
+        r.lan_access.apply_device_exceptions.assert_called_once_with([])
+
     def test_delete_cleans_rules_referencing_zone(self):
         r = _mock_router()
         rules = [
@@ -223,7 +288,16 @@ class TestReapplyAll:
 
         r.lan_access.apply_device_exceptions.assert_called_once()
 
-    def test_noop_when_no_exceptions(self):
+    def test_applies_unconditionally_with_empty_exceptions(self):
+        """Even with zero exceptions, ``apply_device_exceptions`` must run
+        on unlock. The LAN-destined ip-rule override (priority 50,
+        ``to <subnet> lookup 9910``) is the load-bearing side effect — it
+        prevents the router's own dnsmasq DNS replies from being
+        fwmark-routed out via WAN to unassigned/NoInternet devices.
+
+        Regression guard: previously this was gated behind ``if exceptions:``
+        which left a clean install (no exceptions yet) without the override
+        and resurrected the ChromeCast incident on every reboot."""
         r = _mock_router()
 
         with patch("services.lan_access_service.sm") as mock_sm:
@@ -231,7 +305,7 @@ class TestReapplyAll:
             svc = LanAccessService(r)
             svc.reapply_all()
 
-        r.lan_access.apply_device_exceptions.assert_not_called()
+        r.lan_access.apply_device_exceptions.assert_called_once_with([])
 
     def test_keeps_subnet_form_exceptions_after_prune(self):
         """Regression: an exception with a CIDR ``from_ip`` (e.g. an

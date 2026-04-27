@@ -166,6 +166,12 @@ class LanAccessService:
         subnet_ip = self._pick_subnet()
         self.router.lan_access.create_network(zone_id, name, password, subnet_ip, isolation)
         self._sync_mdns()
+        # Subnet list changed — refresh the LAN-destined ip-rule override so
+        # the new bridge gets a priority-50 rule (see lan_access.py class
+        # docstring). Apply with current exceptions; ``apply_device_exceptions``
+        # is idempotent and the routing override is the load-bearing side
+        # effect here.
+        self._reapply_lan_routing()
         log.info(f"Created network '{name}' (zone=fvpn_{zone_id}, subnet={subnet_ip}/24)")
         return {"success": True, "zone_id": f"fvpn_{zone_id}"}
 
@@ -183,6 +189,10 @@ class LanAccessService:
             if not net_section:
                 net_section = "guest" if zone_id == "guest" else ""
             self.router.lan_access.enable_network(sections, net_section, data["enabled"])
+            # Toggling enable/disable changes the active subnet list, so
+            # the LAN-destined ip-rule override needs to drop or add the
+            # affected subnet. See class docstring in lan_access.py.
+            self._reapply_lan_routing()
 
         # Handle per-SSID wireless settings
         for ssid_update in data.get("ssids", []):
@@ -211,6 +221,10 @@ class LanAccessService:
                             if zone_id not in e.get("label", "")]
         sm.update_config(lan_access=la)
         self._sync_mdns()
+        # Subnet list changed — strip the deleted bridge's priority-50 rule
+        # and refresh the include script so a firewall reload regenerates
+        # only the rules for the surviving subnets.
+        self._reapply_lan_routing()
         log.info(f"Deleted network '{zone_id}'")
         return {"success": True}
 
@@ -350,9 +364,15 @@ class LanAccessService:
                 sm.update_config(lan_access=la)
             exceptions = la.get("exceptions", [])
 
-        if exceptions:
-            self._apply_exceptions(exceptions)
-            log.info(f"LAN access: reapplied {len(exceptions)} exception(s)")
+        # ALWAYS apply, even with an empty exceptions list. The
+        # ``apply_device_exceptions`` call also installs the priority-50
+        # LAN-destined ip-rule override that fixes router-originated DNS
+        # replies to unassigned/NoInternet devices — see the class
+        # docstring in router/facades/lan_access.py and the ChromeCast
+        # incident in docs/internals/debugging-catalogue.md. The override
+        # must run regardless of whether the user has any LAN exceptions.
+        self._apply_exceptions(exceptions)
+        log.info(f"LAN access: reapplied {len(exceptions)} exception(s)")
 
         self._sync_mdns()
 
@@ -436,6 +456,18 @@ class LanAccessService:
             self.router.lan_access.apply_device_exceptions(exceptions)
         except Exception as e:
             log.warning(f"Failed to apply LAN access exceptions: {e}")
+
+    def _reapply_lan_routing(self) -> None:
+        """Refresh the LAN-destined priority-50 ip rules + firewall include.
+
+        Called after any mutation that changes the active LAN subnet list
+        (network create/delete/enable). Idempotent — safe to call multiple
+        times. The routing override is unconditional so we always pass the
+        current exceptions list (possibly empty).
+        """
+        config = sm.get_config()
+        exceptions = config.get("lan_access", {}).get("exceptions", [])
+        self._apply_exceptions(exceptions)
 
     def _sync_mdns(self) -> None:
         """Ensure mDNS reflection is configured for all current networks."""

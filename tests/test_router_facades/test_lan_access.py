@@ -177,11 +177,13 @@ class TestDeviceExceptions:
 
 
 class TestLanRouteOverride:
-    """Cross-bridge ip rule override — see RouterLanAccess class comment.
+    """LAN-destined ip rule override — see RouterLanAccess class comment.
 
-    Without these, Flint VPN Manager LAN exceptions only allow the forward
-    direction; reply traffic gets fwmark-routed via WAN and rejected by
-    FVPN_NOINT. See docs/internals/debugging-catalogue.md.
+    Without these, vpn-client's priority-100 fwmark rule sends ANY
+    0x8000-marked traffic destined to a LAN subnet out via WAN — including
+    the router's own dnsmasq DNS replies to unassigned devices. See
+    docs/internals/debugging-catalogue.md (cross-bridge LAN exceptions
+    incident and the ChromeCast locally-emitted DNS reply incident).
     """
 
     @staticmethod
@@ -191,45 +193,64 @@ class TestLanRouteOverride:
             {"subnet": "192.168.10.0/24", "bridge": "br-fvpn_iot", "enabled": True},
         ]
 
-    def test_pairs_skips_disabled_networks(self, lan):
+    def test_subnets_skips_disabled_networks(self, lan):
         with patch.object(lan, "get_networks", return_value=[
             {"subnet": "192.168.8.0/24", "bridge": "br-lan", "enabled": True},
             {"subnet": "192.168.9.0/24", "bridge": "br-guest", "enabled": False},
         ]):
-            pairs = lan._lan_route_pairs()
-        assert pairs == [("192.168.8.0/24", "br-lan")]
+            subnets = lan._lan_subnets()
+        assert subnets == ["192.168.8.0/24"]
 
-    def test_pairs_skips_networks_without_subnet_or_bridge(self, lan):
+    def test_subnets_skips_networks_without_subnet(self, lan):
         with patch.object(lan, "get_networks", return_value=[
             {"subnet": "", "bridge": "br-foo", "enabled": True},
-            {"subnet": "192.168.8.0/24", "bridge": "", "enabled": True},
             {"subnet": "192.168.9.0/24", "bridge": "br-guest", "enabled": True},
         ]):
-            pairs = lan._lan_route_pairs()
-        assert pairs == [("192.168.9.0/24", "br-guest")]
+            subnets = lan._lan_subnets()
+        assert subnets == ["192.168.9.0/24"]
 
-    def test_runtime_apply_emits_cross_pair_rules(self, lan, ssh):
+    def test_runtime_apply_emits_iif_less_rules_per_subnet(self, lan, ssh):
+        """One ``to <subnet> lookup 9910`` rule per LAN subnet, no ``iif``.
+
+        Dropping the ``iif`` filter is load-bearing — it's how the rule
+        catches locally-emitted packets (the router's own dnsmasq DNS
+        replies have ``iif lo``, not a bridge, and the previous
+        ``iif br-X`` form silently missed them).
+        """
         with patch.object(lan, "get_networks", return_value=self._two_networks()):
             lan._apply_lan_route_rules_runtime()
         cmd = ssh.exec.call_args[0][0]
-        # Forward direction: br-lan → 192.168.10.0/24
-        assert "to 192.168.10.0/24 iif br-lan lookup 9910" in cmd
-        # Reply direction: br-fvpn_iot → 192.168.8.0/24 (the one the bug killed)
-        assert "to 192.168.8.0/24 iif br-fvpn_iot lookup 9910" in cmd
-        # Idempotent del-then-add for each pair
+        assert "ip rule add priority 50 to 192.168.10.0/24 lookup 9910" in cmd
+        assert "ip rule add priority 50 to 192.168.8.0/24 lookup 9910" in cmd
+        # CRITICAL: no ``iif`` selector — would re-introduce the
+        # locally-emitted-traffic bug (ChromeCast incident).
+        assert " iif " not in cmd
+        # Idempotent del-then-add for each subnet
         assert cmd.count("while ip rule del priority 50") == 2
+        assert cmd.count("ip rule add priority 50") == 2
 
-    def test_runtime_apply_skips_when_only_one_network(self, lan, ssh):
-        """No bridges to bridge — single LAN means no cross-bridge traffic."""
+    def test_runtime_apply_runs_with_single_network(self, lan, ssh):
+        """Single-LAN setups need the override too — locally-emitted DNS
+        replies to unassigned devices still get fwmark-routed via WAN
+        even when there's only one bridge to deliver them on. (Regression
+        guard for the ChromeCast incident.)"""
         with patch.object(lan, "get_networks", return_value=self._two_networks()[:1]):
+            lan._apply_lan_route_rules_runtime()
+        cmd = ssh.exec.call_args[0][0]
+        assert "ip rule add priority 50 to 192.168.8.0/24 lookup 9910" in cmd
+
+    def test_runtime_apply_noop_when_no_networks(self, lan, ssh):
+        with patch.object(lan, "get_networks", return_value=[]):
             lan._apply_lan_route_rules_runtime()
         ssh.exec.assert_not_called()
 
-    def test_runtime_remove_strips_each_pair(self, lan, ssh):
+    def test_runtime_remove_strips_each_subnet(self, lan, ssh):
         with patch.object(lan, "get_networks", return_value=self._two_networks()):
             lan._remove_lan_route_rules_runtime()
         cmd = ssh.exec.call_args[0][0]
         assert cmd.count("while ip rule del priority 50") == 2
+        # Subnet-only selector — must match the apply form so the dels hit
+        assert " iif " not in cmd
         # No add commands in the cleanup path
         assert "ip rule add" not in cmd
 
@@ -241,13 +262,24 @@ class TestLanRouteOverride:
                 "from_ip": "192.168.8.10", "to_ip": "192.168.10.20", "direction": "both",
             }])
         script = ssh.write_file.call_args[0][1]
-        assert "ip rule add priority 50 to 192.168.10.0/24 iif br-lan lookup 9910" in script
-        assert "ip rule add priority 50 to 192.168.8.0/24 iif br-fvpn_iot lookup 9910" in script
-        # Idempotent flush before each add
-        assert "while ip rule del priority 50 to 192.168.8.0/24 iif br-lan" in script
+        assert "ip rule add priority 50 to 192.168.10.0/24 lookup 9910" in script
+        assert "ip rule add priority 50 to 192.168.8.0/24 lookup 9910" in script
+        # Idempotent flush before each add — must NOT have ``iif`` (would
+        # mismatch the runtime apply form and leave stale rules in the kernel).
+        assert "while ip rule del priority 50 to 192.168.8.0/24 " in script
+        assert " iif " not in script
 
-    def test_firewall_include_omits_ip_rules_with_single_network(self, lan, ssh):
+    def test_firewall_include_emits_ip_rules_with_single_network(self, lan, ssh):
+        """Single-LAN persistence — same regression guard as the runtime
+        apply test. Without this, a reboot would leave a single-LAN setup
+        without the override and resurrect the ChromeCast incident."""
         with patch.object(lan, "get_networks", return_value=self._two_networks()[:1]):
+            lan._write_firewall_include([])
+        script = ssh.write_file.call_args[0][1]
+        assert "ip rule add priority 50 to 192.168.8.0/24 lookup 9910" in script
+
+    def test_firewall_include_omits_ip_rules_with_no_networks(self, lan, ssh):
+        with patch.object(lan, "get_networks", return_value=[]):
             lan._write_firewall_include([])
         script = ssh.write_file.call_args[0][1]
         assert "ip rule add priority 50" not in script
