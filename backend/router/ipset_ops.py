@@ -63,7 +63,7 @@ class IpsetOps:
         if store_data is None:
             store_data = ps.load()
         self._sync_macs_to_router(store_data)
-        self._router.proton_wg._rebuild_proton_wg_mangle_rules()
+        self._router.proton_wg.rebuild_mangle_rules()
 
     def _sync_macs_to_router(self, store_data):
         """Write .macs files on the router from local store assignments.

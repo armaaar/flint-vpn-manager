@@ -48,6 +48,28 @@ Device-to-tunnel MAC assignments are stored in three places (triple-write):
 
 The firewall include (`mangle_rules.sh`) is fully self-contained: it creates ipsets, populates them from `.macs` files, and applies mangle rules. No app intervention required for recovery.
 
+## dns_mark.ko procfs gotcha — zero-byte writes are no-ops
+
+GL.iNet's `dns_mark.ko` exposes per-rule MAC lists at `/proc/dns_mark/rule<id>/macs`. The handler has a non-obvious quirk that broke device-unassignment cleanup before the fix in `_dns_mark_register_cmd`: **zero-byte writes are silently ignored.**
+
+Empirically verified live on the Flint 2 (against rule302):
+
+| Operation | Effect |
+|---|---|
+| `echo "AA:BB:CC:DD:EE:FF" > .../macs` | **Replaces content** |
+| `: > .../macs` (shell truncate, no write) | **No-op — list unchanged** |
+| `cat empty_file > .../macs` | **No-op — list unchanged** |
+| `echo "" > .../macs` (writes one `\n`) | **Clears the list** |
+| `cat one_mac.macs > .../macs` | **Replaces** (not append) |
+
+So when a device is unassigned and the persistent `.macs` file is rewritten empty, a naive `cat .macs > /proc/.../macs` does nothing — the kernel keeps matching the stale MAC and the device's DNS queries keep getting marked through the tunnel it no longer belongs to. Always force-clear with `echo "" > .../macs` before the cat.
+
+Also note: the **only** delete API at module level is `/proc/dns_mark/clear`, which wipes ALL rules regardless of the value written. Never use it — it would nuke GL.iNet's wgclient rules and strand every device on a vpn-client group.
+
+## Device assignment must trigger mangle rebuild
+
+Adding/removing a MAC on a proton-wg group updates three pieces of state — the `.macs` file, the `pwg_mac_<id>` ipset, and `/proc/dns_mark/rule<id>/macs` (the kernel pre-routing DNS marker). The first two are written directly in the assignment code path; the third is only touched by `rebuild_mangle_rules()`. So `assign_device()` calls the rebuild at the end, otherwise dns_mark drifts out of sync and unassigned devices keep DNS-routing through the old tunnel.
+
 ## Device registration names
 
 Proton cert registrations use `"Flint VPN Manager-{profile_name}"` as the device name. Since persistent certs cannot be deleted via the VPN API (requires `password` scope, returns 403 with VPN token), meaningful names matter. Cleanup is only possible through the Proton web dashboard at account.protonvpn.com → Downloads → WireGuard configurations.

@@ -75,7 +75,7 @@ Related docs: [router-features-translation.md](router-features-translation.md), 
 
 #### Stale DNS REDIRECT to dead dnsmasq after disconnect `ACTIVE`
 - **Symptom**: Devices in a proton-wg group had no internet (not even DNS) after disconnecting the tunnel. DNS redirect rule sent queries to a port nothing was listening on.
-- **Root cause**: `_rebuild_proton_wg_mangle_rules()` rebuilt from every `*.env` file including tunnels whose interface was DOWN. The per-tunnel dnsmasq was gone but the REDIRECT rule pointed at its old port.
+- **Root cause**: `rebuild_mangle_rules()` rebuilt from every `*.env` file including tunnels whose interface was DOWN. The per-tunnel dnsmasq was gone but the REDIRECT rule pointed at its old port.
 - **Debug**: `wg show`, `ip link show protonwg0` (missing), `iptables -t mangle -S ROUTE_POLICY` (TUNNEL303 still present), `iptables -t nat -S policy_redirect` (REDIRECT to port 2653 still active), `cat /etc/fvpn/protonwg/mangle_rules.sh`.
 - **Fix**: Added interface-UP check before including a tunnel in rebuild; explicit cleanup for `.env`-exists-but-iface-down tunnels; reordered `stop_proton_wg_tunnel` so rebuild happens BEFORE `firewall reload` ([backend/router/facades/proton_wg.py](backend/router/facades/proton_wg.py#L468-L535)).
 
@@ -87,7 +87,7 @@ Related docs: [router-features-translation.md](router-features-translation.md), 
 #### Mangle rules MUST be created AFTER firewall reload `ACTIVE` (ordering invariant)
 - **Symptom**: Proton-wg mangle rules disappeared immediately after creation.
 - **Root cause**: Creating mangle rules *before* a `firewall reload` causes fw3 to wipe them (fw3 only preserves its own `!fw3`-marked rules).
-- **Fix**: In `start_proton_wg_tunnel()`, `firewall reload` runs first to create the zone; then `_rebuild_proton_wg_mangle_rules()` writes + executes the include script. See [proton-wg-internals.md](proton-wg-internals.md).
+- **Fix**: In `start_proton_wg_tunnel()`, `firewall reload` runs first to create the zone; then `rebuild_mangle_rules()` writes + executes the include script. See [proton-wg-internals.md](proton-wg-internals.md).
 
 #### Proton-wg profiles not marked ghost on fresh router `ACTIVE`
 - **Symptom**: On a fresh router, proton-wg profiles showed `health: red` but no `_ghost: true` flag. Clicking Connect ran `wg setconf` against a missing `.conf` and crashed with an SSH error instead of the friendly "No tunnel configured" message.

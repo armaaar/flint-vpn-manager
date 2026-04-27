@@ -72,7 +72,7 @@ Key differences from kernel WG: no route_policy rule, no vpn-client, kill switch
 
 Config files: `/etc/fvpn/protonwg/<iface>.{conf,env}`, `mangle_rules.sh` (firewall include), `/etc/init.d/fvpn-protonwg` (boot persistence).
 
-**Mangle rules must include ALL configured tunnels**, not just those with live interfaces. The ipset-based matching works regardless of interface state. Skipping down tunnels produces empty `mangle_rules.sh` that persists and breaks routing after firewall reload. `_rebuild_proton_wg_mangle_rules()` also creates ipsets (`ipset create ... hash:mac -exist`) before the iptables rules that reference them, and these create commands are included in the persisted script.
+**Mangle rules must include ALL configured tunnels**, not just those with live interfaces. The ipset-based matching works regardless of interface state. Skipping down tunnels produces empty `mangle_rules.sh` that persists and breaks routing after firewall reload. `rebuild_mangle_rules()` also creates ipsets (`ipset create ... hash:mac -exist`) before the iptables rules that reference them, and these create commands are included in the persisted script.
 
 See [proton-wg-internals.md](proton-wg-internals.md) for process targeting, mangle ordering, tunnel ID allocation, and other critical constraints.
 

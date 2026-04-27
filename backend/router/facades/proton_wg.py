@@ -335,7 +335,7 @@ class RouterProtonWG:
         self._ssh.exec(" && ".join(cmds))
 
         # 7. Rebuild ALL proton-wg mangle MARK rules
-        self._rebuild_proton_wg_mangle_rules()
+        self.rebuild_mangle_rules()
 
         # 8. Per-tunnel dnsmasq (DNS isolation + adblock support)
         self._start_proton_wg_dnsmasq(iface, mark, dns)
@@ -385,7 +385,7 @@ class RouterProtonWG:
         self._uci.commit("firewall")
         # Rebuild mangle script BEFORE firewall reload so the reload
         # picks up the corrected script (without the stopped tunnel).
-        self._rebuild_proton_wg_mangle_rules()
+        self.rebuild_mangle_rules()
         self._service_ctl.reload("firewall")
 
         # 6. Clean up log
@@ -412,7 +412,7 @@ class RouterProtonWG:
         """Build the 3 check-or-append iptables commands for DNS CT zone + REDIRECT.
 
         Used by both _start_proton_wg_dnsmasq (live apply) and
-        _rebuild_proton_wg_mangle_rules (firewall include script).
+        rebuild_mangle_rules (firewall include script).
         """
         return [
             (f"iptables -t raw -C pre_dns_deal_conn_zone "
@@ -449,6 +449,23 @@ class RouterProtonWG:
         Important: do NOT write to ``/proc/dns_mark/clear``. That file wipes
         ALL rules regardless of the value written, which would nuke GL.iNet's
         wgclient rules and leave devices in those groups without internet.
+
+        Empirically observed semantics of the dns_mark.ko procfs ``macs``
+        handler (verified live on the Flint 2 against rule302):
+
+        - **Zero-byte writes are no-ops.** ``: > file`` and
+          ``cat empty_file > file`` both leave the existing MAC list intact.
+          This was the root cause of devices "stuck" in a tunnel after being
+          unassigned — the persistent ``.macs`` file is empty but the kernel
+          still matches the old MAC.
+        - **Single-byte writes clear the list.** ``echo "" > file`` writes
+          one ``\\n`` byte and the kernel parses it as "no MACs".
+        - **Non-empty writes REPLACE** the entire list (not append).
+
+        The fix: always force-clear with ``echo "" >`` first, then ``cat`` the
+        current ``.macs`` file. If ``.macs`` is empty, the cat is a no-op and
+        the rule stays cleared from the echo. If ``.macs`` has content, the
+        cat replaces whatever was there.
         """
         macs_file = f"{PROTON_WG_DIR}/{iface}.macs"
         return (
@@ -457,6 +474,10 @@ class RouterProtonWG:
             f"echo {mark} > /proc/dns_mark/rule{tunnel_id}/mark && "
             f"echo 0 > /proc/dns_mark/rule{tunnel_id}/mac_flag && "
             f"echo 1 > /proc/dns_mark/rule{tunnel_id}/domain_flag && "
+            # Force-clear the MAC list with a single-byte write before
+            # repopulating. See docstring for why ``cat empty_file`` alone
+            # would silently fail to clear stale entries.
+            f"echo '' > /proc/dns_mark/rule{tunnel_id}/macs && "
             f"cat {macs_file} > /proc/dns_mark/rule{tunnel_id}/macs; "
             f"fi; true"
         )
@@ -559,7 +580,7 @@ class RouterProtonWG:
             f"rm -rf {conf_dir} {resolv_file} {conf_path}; true"
         )
 
-    def _rebuild_proton_wg_mangle_rules(self) -> None:
+    def rebuild_mangle_rules(self) -> None:
         """Rebuild mangle MARK rules for ALL active proton-wg tunnels."""
         envs = self._ssh.exec(f"ls {PROTON_WG_DIR}/*.env 2>/dev/null || true").strip()
         if not envs:
@@ -630,8 +651,14 @@ class RouterProtonWG:
                 # delete API is /proc/dns_mark/clear which wipes ALL rules
                 # including GL.iNet's, leaving wgclient devices without
                 # internet), so the next-best thing is to empty its macs.
+                #
+                # Use ``echo '' >`` (writes one \\n byte) NOT ``: >`` —
+                # the dns_mark procfs handler treats zero-byte writes as
+                # no-ops, so shell truncation alone leaves stale MACs in
+                # place. See ``_dns_mark_register_cmd`` for the full
+                # empirical observation.
                 f"[ -d /proc/dns_mark/rule{tid} ] && "
-                f": > /proc/dns_mark/rule{tid}/macs 2>/dev/null; true"
+                f"echo '' > /proc/dns_mark/rule{tid}/macs 2>/dev/null; true"
             )
 
         cmds = []
@@ -857,7 +884,7 @@ class RouterProtonWG:
             f"{PROTON_WG_DIR}/{iface}.macs"
         )
         self._ipset.destroy(ipset_name)
-        self._rebuild_proton_wg_mangle_rules()
+        self.rebuild_mangle_rules()
 
     def ensure_proton_wg_initd(self) -> None:
         """Install the proton-wg init.d service for boot persistence."""

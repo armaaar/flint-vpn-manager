@@ -137,11 +137,11 @@ class TestReconcileProtonWgFull:
         # Should write .macs file
         router.proton_wg.write_tunnel_macs.assert_called_once()
         # Should rebuild mangle rules (which includes ipset creation + population)
-        router.proton_wg._rebuild_proton_wg_mangle_rules.assert_called_once()
+        router.proton_wg.rebuild_mangle_rules.assert_called_once()
 
     @patch("router.ipset_ops.ps.load")
     def test_empty_profiles(self, mock_load, ipset, router):
         mock_load.return_value = {"profiles": [], "device_assignments": {}}
         ipset.reconcile_proton_wg_full()
         # Only mangle rebuild should happen
-        router.proton_wg._rebuild_proton_wg_mangle_rules.assert_called_once()
+        router.proton_wg.rebuild_mangle_rules.assert_called_once()

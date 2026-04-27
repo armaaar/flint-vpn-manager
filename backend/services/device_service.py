@@ -324,6 +324,37 @@ class DeviceService:
         if sync_adblock_fn:
             sync_adblock_fn()
 
+        # Re-sync /proc/dns_mark/rule<id>/macs for all active proton-wg
+        # tunnels.
+        #
+        # The MAC mutations above (remove_mac_from_all_tunnels, add_tunnel_mac,
+        # ipset add/remove) updated on-disk .macs files and runtime ipsets,
+        # but NOT the kernel dns_mark proc state. dns_mark is GL.iNet's
+        # pre-routing DNS-marking module — it stamps an fwmark on every DNS
+        # packet *before* iptables, based on the source MAC matching one of
+        # the rules in /proc/dns_mark/rule<id>/macs. Without this rebuild,
+        # a device unassigned from a proton-wg group keeps having its DNS
+        # queries marked through that tunnel even though it's no longer in
+        # the ipset. Result: DNS resolves through a tunnel the device
+        # shouldn't be using, and downstream apps see "can't resolve host".
+        #
+        # The rebuild is unconditional but cheap when no proton-wg tunnels
+        # exist (early return, single SSH call). Device assignments are
+        # user-initiated rare events — the SSH cost is well within the API's
+        # response budget. Wrapped in try/except because a router-side
+        # failure here must not surface as an assignment failure: the user-
+        # visible state (ipset + .macs + local store) is already correct,
+        # and the dns_mark drift will self-heal on the next firewall reload
+        # (the include script re-runs mangle_rules.sh which now properly
+        # clears stale entries).
+        try:
+            self._router.proton_wg.rebuild_mangle_rules()
+        except Exception as e:
+            log.warning(
+                f"rebuild_mangle_rules after assign_device({mac}) "
+                f"failed: {e}"
+            )
+
         # Invalidate the device cache so the next /api/devices call sees the new assignment
         self.invalidate_cache()
 

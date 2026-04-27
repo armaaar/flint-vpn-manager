@@ -405,6 +405,24 @@ class TestDnsMarkRegistration:
         cmd = RouterProtonWG._dns_mark_register_cmd("protonwg0", "0x6000", "303")
         assert "/proc/dns_mark/clear" not in cmd
 
+    def test_register_cmd_force_clears_macs_before_populating(self):
+        """The dns_mark procfs handler ignores zero-byte writes (verified
+        empirically), so ``cat empty_file > .../macs`` would silently fail
+        to clear stale MAC entries. The command must do an explicit
+        ``echo '' > .../macs`` (single-byte write) BEFORE the cat, so an
+        empty .macs file actually drains the kernel rule.
+
+        Regression test for the device-unassign bug where Chromecast
+        kept getting its DNS marked through the Streaming tunnel even
+        after being removed from the group.
+        """
+        cmd = RouterProtonWG._dns_mark_register_cmd("protonwg0", "0x6000", "303")
+        clear_idx = cmd.find("echo '' > /proc/dns_mark/rule303/macs")
+        cat_idx = cmd.find("cat /etc/fvpn/protonwg/protonwg0.macs > /proc/dns_mark/rule303/macs")
+        assert clear_idx != -1, "missing explicit clear before cat — would fail to drain on empty .macs"
+        assert cat_idx != -1, "missing cat to populate from .macs"
+        assert clear_idx < cat_idx, "clear must come BEFORE cat or we'd nuke the just-written content"
+
     def test_blacklist_default_writes_to_rule100_macs(self):
         cmd = RouterProtonWG._dns_mark_blacklist_default_cmd([
             "/etc/fvpn/protonwg/protonwg0.macs",

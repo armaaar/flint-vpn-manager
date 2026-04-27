@@ -142,3 +142,34 @@ class TestAssignDevice:
             mock_ps.get_profile.return_value = None
             svc.assign_device("aa:bb:cc:dd:ee:ff", None)
         mock_inv.assert_called_once()
+
+    def test_rebuild_proton_wg_mangle_called_after_assign(self):
+        """assign_device must trigger rebuild_mangle_rules so that
+        /proc/dns_mark/rule<id>/macs is re-synced with the current .macs files.
+
+        Without this, a device unassigned from a proton-wg group keeps having
+        its DNS queries marked through that tunnel — see proton-wg-internals.md
+        ("dns_mark.ko procfs gotcha") for the empirical cause.
+        """
+        svc = _make_service()
+        with patch("services.device_service.ps") as mock_ps:
+            mock_ps.validate_mac.return_value = "aa:bb:cc:dd:ee:ff"
+            mock_ps.load.return_value = {"profiles": [], "device_assignments": {}}
+            mock_ps.get_profile.return_value = None
+            svc.assign_device("aa:bb:cc:dd:ee:ff", None)
+        svc._router.proton_wg.rebuild_mangle_rules.assert_called_once()
+
+    def test_rebuild_failure_does_not_break_assign(self):
+        """A router-side rebuild failure is logged and swallowed — the user's
+        assignment is already persisted (ipset, .macs, local store) and
+        dns_mark drift will self-heal on the next firewall reload.
+        """
+        svc = _make_service()
+        svc._router.proton_wg.rebuild_mangle_rules.side_effect = RuntimeError("ssh down")
+        with patch("services.device_service.ps") as mock_ps:
+            mock_ps.validate_mac.return_value = "aa:bb:cc:dd:ee:ff"
+            mock_ps.load.return_value = {"profiles": [], "device_assignments": {}}
+            mock_ps.get_profile.return_value = None
+            # Must NOT raise — assignment is logically complete by this point
+            svc.assign_device("aa:bb:cc:dd:ee:ff", None)
+        svc._router.proton_wg.rebuild_mangle_rules.assert_called_once()
