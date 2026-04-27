@@ -376,18 +376,31 @@ class LanAccessService:
                 except ValueError:
                     pass
 
-        # Prune exceptions whose IPs don't belong to any current subnet
+        # Prune exceptions whose IPs don't belong to any current subnet.
+        # Each side may be either a single IPv4 address ("192.168.8.10")
+        # or an IPv4 subnet in CIDR form ("192.168.8.0/24"). Both forms
+        # are valid exception sources/destinations — without the CIDR
+        # branch, "entire network" exceptions would be incorrectly
+        # pruned on every unlock because IPv4Address() rejects "/".
         if subnets:
+            def _within_known_subnet(value: str) -> bool:
+                if not value:
+                    return False
+                try:
+                    if "/" in value:
+                        net = ipaddress.IPv4Network(value, strict=False)
+                        return any(net.subnet_of(s) for s in subnets)
+                    return any(ipaddress.IPv4Address(value) in s for s in subnets)
+                except ValueError:
+                    return False
+
             original = la.get("exceptions", [])
             valid = []
             for exc in original:
                 from_ip = exc.get("from_ip", "")
                 to_ip = exc.get("to_ip", "")
-                try:
-                    from_ok = any(ipaddress.IPv4Address(from_ip) in s for s in subnets)
-                    to_ok = any(ipaddress.IPv4Address(to_ip) in s for s in subnets)
-                except ValueError:
-                    from_ok = to_ok = False
+                from_ok = _within_known_subnet(from_ip)
+                to_ok = _within_known_subnet(to_ip)
                 if from_ok and to_ok:
                     valid.append(exc)
                 else:

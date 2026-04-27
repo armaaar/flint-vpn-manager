@@ -233,6 +233,35 @@ class TestReapplyAll:
 
         r.lan_access.apply_device_exceptions.assert_not_called()
 
+    def test_keeps_subnet_form_exceptions_after_prune(self):
+        """Regression: an exception with a CIDR ``from_ip`` (e.g. an
+        "entire LAN ↔ printer" rule) was being pruned on every unlock
+        because ``IPv4Address("192.168.8.0/24")`` raises ValueError.
+        The prune logic must accept either a single IP or a subnet
+        contained within a known network."""
+        r = _mock_router()
+        r.lan_access.get_networks.return_value = [
+            {"subnet": "192.168.8.0/24", "bridge": "br-lan", "enabled": True},
+            {"subnet": "192.168.10.0/24", "bridge": "br-fvpn_iot", "enabled": True},
+        ]
+        existing = [{
+            "id": "exc_subnet",
+            "from_ip": "192.168.8.0/24",
+            "to_ip": "192.168.10.225",
+            "direction": "both",
+        }]
+
+        with patch("services.lan_access_service.sm") as mock_sm:
+            mock_sm.get_config.return_value = {"lan_access": {"exceptions": existing}}
+            svc = LanAccessService(r)
+            svc.reapply_all()
+
+        # Exception must survive prune and be reapplied
+        r.lan_access.apply_device_exceptions.assert_called_once()
+        applied = r.lan_access.apply_device_exceptions.call_args[0][0]
+        assert len(applied) == 1
+        assert applied[0]["from_ip"] == "192.168.8.0/24"
+
 
 # ── Facade-level tests ───────────────────────────────────────────────
 

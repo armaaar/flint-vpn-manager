@@ -971,8 +971,15 @@ iptables -A fvpn_lan_exc -s 192.168.20.100 -d 192.168.8.42 -j ACCEPT     # inbou
 
 IPv6 exceptions use `ip6tables` with the same structure.
 
+### Cross-bridge route override (priority-50 ip rules)
+Exceptions alone are not sufficient: vpn-client's priority-100 fwmark rule (`from all fwmark 0x8000/0xf000 lookup 1008` → `default via <gw> dev eth1`) will route reply traffic from any device with the `0x8000` fallback mark — every NoInternet device, plus unassigned MACs — out the WAN interface, where `FVPN_NOINT` rejects it. To force LAN-to-LAN traffic to use the LAN routing table 9910 instead, the include also installs:
+```sh
+ip rule add priority 50 to <other_subnet> iif <bridge> lookup 9910
+```
+…for every cross-bridge pair. Priority 50 beats vpn-client's priority-100 fwmark rule, so reply traffic from any LAN bridge to any other LAN bridge always uses the local route regardless of fwmark. Filter ACCEPT in `fvpn_lan_exc` is still the gate for whether the traffic is allowed — these rules only fix the routing decision. See [debugging-catalogue.md → "Cross-bridge LAN exception silently drops reply traffic"](debugging-catalogue.md).
+
 ### Persistence
-Written to `/etc/fvpn/lan_access_rules.sh` and registered with fw3 via `ensure_firewall_include("fvpn_lan_access", ...)`. Re-applied by `LanAccessService.reapply_all()` on unlock.
+Written to `/etc/fvpn/lan_access_rules.sh` (iptables ACCEPT rules + cross-bridge ip rules) and registered with fw3 via `ensure_firewall_include("fvpn_lan_access", ...)`. Re-applied by `LanAccessService.reapply_all()` on unlock and on every `firewall reload`. The ip rules are also pushed at runtime by `_apply_lan_route_rules_runtime` so changes take effect without waiting for a reload.
 
 ### Stale exception pruning
 On unlock, exceptions whose IPs no longer belong to any current subnet, and forwarding rules whose zones no longer exist, are pruned. See `_prune_stale_lan_config` in [backend/services/lan_access_service.py](backend/services/lan_access_service.py).

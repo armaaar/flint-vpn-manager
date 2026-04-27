@@ -288,7 +288,11 @@ class RouterLanAccess:
     # ── Device Exceptions ─────────────────────────────────────────────
 
     def apply_device_exceptions(self, exceptions: list[dict]) -> None:
-        """Write iptables + ip6tables ACCEPT rules for device-level exceptions."""
+        """Write iptables + ip6tables ACCEPT rules for device-level exceptions.
+
+        Also installs cross-bridge ``ip rule`` overrides — see
+        :py:meth:`_lan_route_pairs` for why filter ACCEPT alone is not enough.
+        """
         for ipt in self._all_iptables():
             ipt.ensure_chain("filter", "fvpn_lan_exc")
             ipt.flush_chain("filter", "fvpn_lan_exc")
@@ -320,6 +324,9 @@ class RouterLanAccess:
                 "-m mark ! --mark 0x0/0xf000 -j ACCEPT",
             )
 
+        # Apply the ip-rule routing override at runtime so the fix takes
+        # effect immediately without waiting for a firewall reload.
+        self._apply_lan_route_rules_runtime()
         self._write_firewall_include(exceptions)
 
     def _all_iptables(self):
@@ -332,12 +339,124 @@ class RouterLanAccess:
         """Remove all exception iptables/ip6tables rules and firewall include."""
         for ipt in self._all_iptables():
             ipt.delete_chain("filter", "forwarding_rule", "fvpn_lan_exc")
+        # Remove the ip-rule routing overrides at runtime as well.
+        self._remove_lan_route_rules_runtime()
         self._ssh.exec("rm -f /etc/fvpn/lan_access_rules.sh")
         self._uci.delete("firewall.fvpn_lan_access")
         self._uci.commit("firewall")
 
+    # ── Cross-bridge route override ───────────────────────────────────
+    #
+    # WHY THIS EXISTS:
+    #
+    # On the Flint 2, vpn-client installs a policy-routing rule at priority
+    # 100 — ``from all fwmark 0x8000/0xf000 lookup 1008`` — and table 1008
+    # is just ``default via <gateway> dev eth1`` (the WAN). Any device that
+    # doesn't match a tunnel ipset (typically devices in a ``no_internet``
+    # group, but also unassigned MACs) gets the fallback mark ``0x8000``
+    # stamped by the ``TUNNEL100_ROUTE_POLICY`` "last sort default policy"
+    # chain. Reply packets from such a device to a host on a *different*
+    # LAN bridge are then routed via eth1 instead of the LAN bridge —
+    # which immediately gets rejected by ``FVPN_NOINT`` (which rejects
+    # ``out eth1`` traffic from MACs in ``fvpn_noint_macs`` with
+    # icmp-port-unreachable). Net effect: forward direction works (the
+    # *source* bridge has rule 800 ``lookup 9910 suppress_prefixlength 0``
+    # winning for specific-prefix LAN destinations) but the *reply*
+    # direction silently dies, so a Flint LAN exception alone gives you
+    # half-working connectivity.
+    #
+    # The fix is to install higher-priority (priority 50) ip rules that
+    # force any traffic destined to a LAN subnet, arriving on a *different*
+    # LAN bridge, to use the LAN routing table 9910. This runs before
+    # vpn-client's priority-100 fwmark rule, so reply traffic from any
+    # LAN bridge to any other LAN bridge always uses the local route,
+    # regardless of fwmark. Filter ACCEPT in ``fvpn_lan_exc`` is still
+    # the gate for whether the traffic is allowed — these rules only
+    # fix the routing decision.
+    #
+    # See docs/internals/debugging-catalogue.md for the original incident.
+
+    _LAN_RULE_PRIORITY = 50
+    _LAN_ROUTE_TABLE = 9910
+
+    def _lan_route_pairs(self) -> list[tuple[str, str]]:
+        """Return (subnet, bridge) tuples for every active LAN-side network.
+
+        A "LAN-side network" is anything :py:meth:`get_networks` returns —
+        which already excludes ``wan`` and tunnel interfaces. Disabled
+        networks are skipped because their bridges have no IP address and
+        the rule would be useless.
+        """
+        pairs = []
+        try:
+            networks = self.get_networks()
+        except Exception:
+            return pairs
+        for net in networks:
+            subnet = net.get("subnet", "")
+            bridge = net.get("bridge", "")
+            if not subnet or not bridge:
+                continue
+            if not net.get("enabled", True):
+                continue
+            pairs.append((subnet, bridge))
+        return pairs
+
+    def _apply_lan_route_rules_runtime(self) -> None:
+        """Install priority-50 ip rules at runtime for every cross-bridge pair.
+
+        Idempotent: any existing rule with the same priority + selector is
+        flushed first via a ``while ip rule del`` loop so a repeated apply
+        doesn't accumulate duplicates.
+        """
+        pairs = self._lan_route_pairs()
+        if len(pairs) < 2:
+            return  # Nothing to bridge — single LAN means no cross-bridge traffic
+        cmds = []
+        for subnet, bridge in pairs:
+            # Strip stale entries with the same selector.
+            cmds.append(
+                f"while ip rule del priority {self._LAN_RULE_PRIORITY} "
+                f"to {subnet} iif {bridge} 2>/dev/null; do :; done"
+            )
+        for dst_subnet, _dst_bridge in pairs:
+            for _src_subnet, src_bridge in pairs:
+                if src_bridge == _dst_bridge:
+                    continue  # Same-bridge traffic doesn't transit the router
+                cmds.append(
+                    f"ip rule add priority {self._LAN_RULE_PRIORITY} "
+                    f"to {dst_subnet} iif {src_bridge} "
+                    f"lookup {self._LAN_ROUTE_TABLE} 2>/dev/null"
+                )
+        if cmds:
+            self._ssh.exec("; ".join(cmds))
+
+    def _remove_lan_route_rules_runtime(self) -> None:
+        """Strip every priority-50 ip rule we may have added.
+
+        Uses the bridge/subnet pairs as they exist *now* — if a network has
+        since been deleted its rule will already be gone, so a missing ``ip
+        rule del`` simply no-ops.
+        """
+        pairs = self._lan_route_pairs()
+        if not pairs:
+            return
+        cmds = [
+            f"while ip rule del priority {self._LAN_RULE_PRIORITY} "
+            f"to {subnet} iif {bridge} 2>/dev/null; do :; done"
+            for subnet, bridge in pairs
+        ]
+        self._ssh.exec("; ".join(cmds))
+
     def _write_firewall_include(self, exceptions: list[dict]) -> None:
-        """Write firewall include script for reboot persistence (dual-stack)."""
+        """Write firewall include script for reboot persistence (dual-stack).
+
+        The script also re-installs the priority-50 ``ip rule`` overrides
+        described in :py:meth:`_lan_route_pairs` — these are kernel state
+        that does NOT survive a router reboot, and ``firewall reload``
+        re-runs every fw3 include so this is the canonical place to keep
+        them in sync with the live network topology.
+        """
         lines = [
             "#!/bin/sh",
             "# Flint VPN Manager LAN access exceptions — auto-generated",
@@ -374,6 +493,37 @@ class RouterLanAccess:
                 f"{binary} -C forwarding_rule -m mark ! --mark 0x0/0xf000 -j ACCEPT 2>/dev/null || "
                 f"{binary} -I forwarding_rule -m mark ! --mark 0x0/0xf000 -j ACCEPT"
             )
+
+        # Cross-bridge route override (see _lan_route_pairs docstring for
+        # why filter ACCEPT alone is not sufficient — vpn-client's
+        # priority-100 fwmark rule sends NoInternet/unassigned reply
+        # traffic out via WAN where FVPN_NOINT rejects it).
+        pairs = self._lan_route_pairs()
+        if len(pairs) >= 2:
+            lines.append(
+                "# Cross-bridge LAN routing override — beats vpn-client's"
+            )
+            lines.append(
+                "# priority-100 fwmark rule so reply traffic uses the LAN bridge"
+            )
+            lines.append(
+                "# instead of leaking to WAN. Without this, Flint LAN exceptions"
+            )
+            lines.append("# are half-broken (forward OK, reply dropped).")
+            for subnet, bridge in pairs:
+                lines.append(
+                    f"while ip rule del priority {self._LAN_RULE_PRIORITY} "
+                    f"to {subnet} iif {bridge} 2>/dev/null; do :; done"
+                )
+            for dst_subnet, dst_bridge in pairs:
+                for _src_subnet, src_bridge in pairs:
+                    if src_bridge == dst_bridge:
+                        continue
+                    lines.append(
+                        f"ip rule add priority {self._LAN_RULE_PRIORITY} "
+                        f"to {dst_subnet} iif {src_bridge} "
+                        f"lookup {self._LAN_ROUTE_TABLE} 2>/dev/null"
+                    )
 
         script = "\n".join(lines) + "\n"
         self._ssh.write_file("/etc/fvpn/lan_access_rules.sh", script)

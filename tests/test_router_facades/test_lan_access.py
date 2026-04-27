@@ -138,7 +138,8 @@ class TestDeviceExceptions:
         exceptions = [
             {"from_ip": "192.168.8.10", "to_ip": "192.168.9.20", "direction": "both"},
         ]
-        with patch.object(lan, "_write_firewall_include"):
+        with patch.object(lan, "_write_firewall_include"), \
+             patch.object(lan, "_apply_lan_route_rules_runtime"):
             lan.apply_device_exceptions(exceptions)
         iptables.ensure_chain.assert_called_once()
         iptables.flush_chain.assert_called_once()
@@ -149,15 +150,107 @@ class TestDeviceExceptions:
         exceptions = [
             {"from_ip": "192.168.8.10; rm -rf /", "to_ip": "192.168.9.20"},
         ]
-        with patch.object(lan, "_write_firewall_include"):
+        with patch.object(lan, "_write_firewall_include"), \
+             patch.object(lan, "_apply_lan_route_rules_runtime"):
             lan.apply_device_exceptions(exceptions)
         # No rules appended for invalid IPs
         iptables.append.assert_not_called()
 
+    def test_apply_exceptions_installs_runtime_ip_rules(self, lan):
+        """apply should also push priority-50 ip rules via SSH so the fix
+        takes effect immediately, without waiting for firewall reload."""
+        with patch.object(lan, "_write_firewall_include"), \
+             patch.object(lan, "_apply_lan_route_rules_runtime") as runtime:
+            lan.apply_device_exceptions([])
+        runtime.assert_called_once()
+
     def test_cleanup_exceptions(self, lan, iptables, ssh, uci):
-        lan.cleanup_exceptions()
+        with patch.object(lan, "_remove_lan_route_rules_runtime"):
+            lan.cleanup_exceptions()
         iptables.delete_chain.assert_called_once()
         uci.delete.assert_called_once_with("firewall.fvpn_lan_access")
+
+    def test_cleanup_exceptions_strips_ip_rules(self, lan):
+        with patch.object(lan, "_remove_lan_route_rules_runtime") as remove:
+            lan.cleanup_exceptions()
+        remove.assert_called_once()
+
+
+class TestLanRouteOverride:
+    """Cross-bridge ip rule override — see RouterLanAccess class comment.
+
+    Without these, Flint VPN Manager LAN exceptions only allow the forward
+    direction; reply traffic gets fwmark-routed via WAN and rejected by
+    FVPN_NOINT. See docs/internals/debugging-catalogue.md.
+    """
+
+    @staticmethod
+    def _two_networks():
+        return [
+            {"subnet": "192.168.8.0/24", "bridge": "br-lan", "enabled": True},
+            {"subnet": "192.168.10.0/24", "bridge": "br-fvpn_iot", "enabled": True},
+        ]
+
+    def test_pairs_skips_disabled_networks(self, lan):
+        with patch.object(lan, "get_networks", return_value=[
+            {"subnet": "192.168.8.0/24", "bridge": "br-lan", "enabled": True},
+            {"subnet": "192.168.9.0/24", "bridge": "br-guest", "enabled": False},
+        ]):
+            pairs = lan._lan_route_pairs()
+        assert pairs == [("192.168.8.0/24", "br-lan")]
+
+    def test_pairs_skips_networks_without_subnet_or_bridge(self, lan):
+        with patch.object(lan, "get_networks", return_value=[
+            {"subnet": "", "bridge": "br-foo", "enabled": True},
+            {"subnet": "192.168.8.0/24", "bridge": "", "enabled": True},
+            {"subnet": "192.168.9.0/24", "bridge": "br-guest", "enabled": True},
+        ]):
+            pairs = lan._lan_route_pairs()
+        assert pairs == [("192.168.9.0/24", "br-guest")]
+
+    def test_runtime_apply_emits_cross_pair_rules(self, lan, ssh):
+        with patch.object(lan, "get_networks", return_value=self._two_networks()):
+            lan._apply_lan_route_rules_runtime()
+        cmd = ssh.exec.call_args[0][0]
+        # Forward direction: br-lan → 192.168.10.0/24
+        assert "to 192.168.10.0/24 iif br-lan lookup 9910" in cmd
+        # Reply direction: br-fvpn_iot → 192.168.8.0/24 (the one the bug killed)
+        assert "to 192.168.8.0/24 iif br-fvpn_iot lookup 9910" in cmd
+        # Idempotent del-then-add for each pair
+        assert cmd.count("while ip rule del priority 50") == 2
+
+    def test_runtime_apply_skips_when_only_one_network(self, lan, ssh):
+        """No bridges to bridge — single LAN means no cross-bridge traffic."""
+        with patch.object(lan, "get_networks", return_value=self._two_networks()[:1]):
+            lan._apply_lan_route_rules_runtime()
+        ssh.exec.assert_not_called()
+
+    def test_runtime_remove_strips_each_pair(self, lan, ssh):
+        with patch.object(lan, "get_networks", return_value=self._two_networks()):
+            lan._remove_lan_route_rules_runtime()
+        cmd = ssh.exec.call_args[0][0]
+        assert cmd.count("while ip rule del priority 50") == 2
+        # No add commands in the cleanup path
+        assert "ip rule add" not in cmd
+
+    def test_firewall_include_persists_ip_rules(self, lan, ssh):
+        """The fw3 include must contain ip-rule statements so they survive
+        a router reboot — kernel ip rules are runtime-only state."""
+        with patch.object(lan, "get_networks", return_value=self._two_networks()):
+            lan._write_firewall_include([{
+                "from_ip": "192.168.8.10", "to_ip": "192.168.10.20", "direction": "both",
+            }])
+        script = ssh.write_file.call_args[0][1]
+        assert "ip rule add priority 50 to 192.168.10.0/24 iif br-lan lookup 9910" in script
+        assert "ip rule add priority 50 to 192.168.8.0/24 iif br-fvpn_iot lookup 9910" in script
+        # Idempotent flush before each add
+        assert "while ip rule del priority 50 to 192.168.8.0/24 iif br-lan" in script
+
+    def test_firewall_include_omits_ip_rules_with_single_network(self, lan, ssh):
+        with patch.object(lan, "get_networks", return_value=self._two_networks()[:1]):
+            lan._write_firewall_include([])
+        script = ssh.write_file.call_args[0][1]
+        assert "ip rule add priority 50" not in script
 
 
 class TestCreateNetwork:
