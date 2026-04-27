@@ -330,6 +330,10 @@ class RouterLanAccess:
         # Apply the ip-rule routing override at runtime so the fix takes
         # effect immediately without waiting for a firewall reload.
         self._apply_lan_route_rules_runtime()
+        # Enable subnet-broadcast forwarding (cross-subnet Wake-on-LAN).
+        # Same lifecycle as the priority-50 rules: unconditional, applied
+        # on every reapply, persisted via the same fw3 include below.
+        self._apply_bc_forwarding_runtime()
         self._write_firewall_include(exceptions)
 
     def _all_iptables(self):
@@ -344,6 +348,9 @@ class RouterLanAccess:
             ipt.delete_chain("filter", "forwarding_rule", "fvpn_lan_exc")
         # Remove the ip-rule routing overrides at runtime as well.
         self._remove_lan_route_rules_runtime()
+        # Reset bc_forwarding to the kernel default (off) — the include
+        # script that re-enabled it on every firewall reload is also gone.
+        self._remove_bc_forwarding_runtime()
         self._ssh.exec("rm -f /etc/fvpn/lan_access_rules.sh")
         self._uci.delete("firewall.fvpn_lan_access")
         self._uci.commit("firewall")
@@ -467,6 +474,94 @@ class RouterLanAccess:
         ]
         self._ssh.exec("; ".join(cmds))
 
+    # ── Subnet-broadcast forwarding (cross-subnet Wake-on-LAN) ────────
+    #
+    # WHY THIS EXISTS:
+    #
+    # Wake-on-LAN magic packets are L2-only broadcast — they don't cross
+    # subnets. When Home Assistant on br-lan (192.168.8.x) tries to wake
+    # a device on br-fvpn_iot (192.168.10.x) via ``wake_tv(mac, subnet)``
+    # it broadcasts to ``192.168.10.255`` (subnet-directed broadcast).
+    # By default Linux drops directed broadcasts on the forwarding path
+    # (``net.ipv4.conf.<iface>.bc_forwarding=0``, smurf-attack
+    # protection). With ``bc_forwarding=1`` on the input + output bridge
+    # interfaces, the kernel translates the IP broadcast into an L2
+    # broadcast (``ff:ff:ff:ff:ff:ff``) on the egress bridge, which the
+    # WoL listener on the target NIC then accepts.
+    #
+    # The cross-bridge ROUTING decision is already correct thanks to the
+    # priority-50 ip rules above (they beat vpn-client's priority-100
+    # fwmark rule for any traffic destined to a LAN subnet, broadcast or
+    # unicast). The cross-bridge FORWARDING decision is gated by fw3
+    # zone forwarding entries — so ``bc_forwarding=1`` only widens the
+    # broadcast surface to zones the user has already explicitly bridged
+    # (e.g. ``lan→fvpn_iot``). Same lifecycle as the priority-50 rules:
+    # unconditional, applied on every ``apply_device_exceptions`` call,
+    # persisted via the same fw3 include so it survives reboot.
+    #
+    # See docs/internals/debugging-catalogue.md for the original WoL
+    # debugging story.
+
+    def _apply_bc_forwarding_runtime(self) -> None:
+        """Enable directed-broadcast forwarding on every active LAN bridge.
+
+        Idempotent: ``sysctl -w`` always rewrites the value. Bridges that
+        no longer exist silently fall back to the ``2>/dev/null || true``
+        guard. Tunnel/VPN bridges are excluded by virtue of
+        :py:meth:`get_networks` filtering on LAN-side zones only.
+        """
+        bridges = self._lan_bridges()
+        if not bridges:
+            return
+        cmds = ["sysctl -wq net.ipv4.conf.all.bc_forwarding=1"]
+        for bridge in bridges:
+            cmds.append(
+                f'sysctl -wq "net.ipv4.conf.{bridge}.bc_forwarding=1" '
+                f"2>/dev/null || true"
+            )
+        self._ssh.exec("; ".join(cmds))
+
+    def _remove_bc_forwarding_runtime(self) -> None:
+        """Reset directed-broadcast forwarding to the kernel default (off).
+
+        Mirrors :py:meth:`_remove_lan_route_rules_runtime`: called only
+        from :py:meth:`cleanup_exceptions` when LAN access is being torn
+        down entirely.
+        """
+        bridges = self._lan_bridges()
+        if not bridges:
+            return
+        cmds = ["sysctl -wq net.ipv4.conf.all.bc_forwarding=0"]
+        for bridge in bridges:
+            cmds.append(
+                f'sysctl -wq "net.ipv4.conf.{bridge}.bc_forwarding=0" '
+                f"2>/dev/null || true"
+            )
+        self._ssh.exec("; ".join(cmds))
+
+    def _lan_bridges(self) -> list[str]:
+        """Return bridge interface names for every active LAN-side network.
+
+        Same filter as :py:meth:`_lan_subnets` (enabled networks only,
+        VPN/wan zones already excluded by :py:meth:`get_networks`), but
+        emits the bridge name (e.g. ``br-lan``, ``br-fvpn_iot``)
+        instead of the CIDR. Bridges with non-safe characters are
+        skipped — defense against UCI-injected malformed values.
+        """
+        bridges = []
+        try:
+            networks = self.get_networks()
+        except Exception:
+            return bridges
+        for net in networks:
+            bridge = net.get("bridge", "")
+            if not bridge or not net.get("enabled", True):
+                continue
+            if not _SAFE_NAME_RE.match(bridge):
+                continue
+            bridges.append(bridge)
+        return bridges
+
     def _write_firewall_include(self, exceptions: list[dict]) -> None:
         """Write firewall include script for reboot persistence (dual-stack).
 
@@ -533,6 +628,22 @@ class RouterLanAccess:
                 lines.append(
                     f"ip rule add priority {self._LAN_RULE_PRIORITY} "
                     f"to {subnet} lookup {self._LAN_ROUTE_TABLE} 2>/dev/null"
+                )
+
+        # Subnet-broadcast forwarding for cross-subnet Wake-on-LAN.
+        # Linux drops directed broadcasts by default; bc_forwarding=1
+        # lets the kernel translate an inbound IP broadcast (e.g.
+        # 192.168.10.255) into an L2 broadcast on the egress bridge so
+        # WoL packets actually reach the target NIC. fw3 zone forwarding
+        # still gates which bridges may be reached. See class docstring.
+        bridges = self._lan_bridges()
+        if bridges:
+            lines.append("# Subnet-broadcast forwarding — cross-subnet Wake-on-LAN.")
+            lines.append("sysctl -wq net.ipv4.conf.all.bc_forwarding=1")
+            for bridge in bridges:
+                lines.append(
+                    f'sysctl -wq "net.ipv4.conf.{bridge}.bc_forwarding=1" '
+                    f"2>/dev/null || true"
                 )
 
         script = "\n".join(lines) + "\n"

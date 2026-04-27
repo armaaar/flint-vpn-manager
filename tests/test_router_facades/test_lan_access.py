@@ -285,6 +285,106 @@ class TestLanRouteOverride:
         assert "ip rule add priority 50" not in script
 
 
+class TestSubnetBroadcastForwarding:
+    """bc_forwarding=1 on every LAN bridge — required for cross-subnet
+    Wake-on-LAN. Same lifecycle as the priority-50 ip rules: applied
+    on every reapply, persisted in the same fw3 include, removed on
+    full LAN-access teardown.
+
+    Without it, ``wake_tv(mac, "192.168.10")`` from a host on br-lan
+    routes the broadcast packet correctly to br-fvpn_iot but the kernel
+    drops it (smurf protection) before flooding it as L2 broadcast,
+    so the WoL listener never sees the magic packet. See
+    docs/internals/debugging-catalogue.md (Wake-on-LAN cross-subnet
+    incident).
+    """
+
+    @staticmethod
+    def _two_networks():
+        return [
+            {"subnet": "192.168.8.0/24", "bridge": "br-lan", "enabled": True},
+            {"subnet": "192.168.10.0/24", "bridge": "br-fvpn_iot", "enabled": True},
+        ]
+
+    def test_bridges_skips_disabled_networks(self, lan):
+        with patch.object(lan, "get_networks", return_value=[
+            {"subnet": "192.168.8.0/24", "bridge": "br-lan", "enabled": True},
+            {"subnet": "192.168.9.0/24", "bridge": "br-guest", "enabled": False},
+        ]):
+            bridges = lan._lan_bridges()
+        assert bridges == ["br-lan"]
+
+    def test_bridges_skips_unsafe_names(self, lan):
+        """Defense in depth — bridge names go straight into a sysctl
+        command, so reject anything that doesn't match _SAFE_NAME_RE."""
+        with patch.object(lan, "get_networks", return_value=[
+            {"subnet": "192.168.8.0/24", "bridge": "br-lan", "enabled": True},
+            {"subnet": "192.168.9.0/24", "bridge": "br-foo;rm -rf /", "enabled": True},
+        ]):
+            bridges = lan._lan_bridges()
+        assert bridges == ["br-lan"]
+
+    def test_runtime_apply_enables_bc_forwarding_per_bridge(self, lan, ssh):
+        with patch.object(lan, "get_networks", return_value=self._two_networks()):
+            lan._apply_bc_forwarding_runtime()
+        cmd = ssh.exec.call_args[0][0]
+        assert "sysctl -wq net.ipv4.conf.all.bc_forwarding=1" in cmd
+        assert 'net.ipv4.conf.br-lan.bc_forwarding=1' in cmd
+        assert 'net.ipv4.conf.br-fvpn_iot.bc_forwarding=1' in cmd
+
+    def test_runtime_apply_noop_when_no_networks(self, lan, ssh):
+        with patch.object(lan, "get_networks", return_value=[]):
+            lan._apply_bc_forwarding_runtime()
+        ssh.exec.assert_not_called()
+
+    def test_runtime_remove_disables_bc_forwarding_per_bridge(self, lan, ssh):
+        with patch.object(lan, "get_networks", return_value=self._two_networks()):
+            lan._remove_bc_forwarding_runtime()
+        cmd = ssh.exec.call_args[0][0]
+        assert "sysctl -wq net.ipv4.conf.all.bc_forwarding=0" in cmd
+        assert 'net.ipv4.conf.br-lan.bc_forwarding=0' in cmd
+        assert 'net.ipv4.conf.br-fvpn_iot.bc_forwarding=0' in cmd
+        # No ``=1`` anywhere in the cleanup path
+        assert "bc_forwarding=1" not in cmd
+
+    def test_firewall_include_persists_bc_forwarding(self, lan, ssh):
+        """Sysctl values are not preserved across reboot — the include
+        script must restore bc_forwarding=1 on every firewall reload."""
+        with patch.object(lan, "get_networks", return_value=self._two_networks()):
+            lan._write_firewall_include([])
+        script = ssh.write_file.call_args[0][1]
+        assert "sysctl -wq net.ipv4.conf.all.bc_forwarding=1" in script
+        assert 'net.ipv4.conf.br-lan.bc_forwarding=1' in script
+        assert 'net.ipv4.conf.br-fvpn_iot.bc_forwarding=1' in script
+
+    def test_firewall_include_omits_bc_forwarding_with_no_networks(self, lan, ssh):
+        with patch.object(lan, "get_networks", return_value=[]):
+            lan._write_firewall_include([])
+        script = ssh.write_file.call_args[0][1]
+        assert "bc_forwarding" not in script
+
+    def test_apply_device_exceptions_invokes_bc_forwarding_apply(
+        self, lan, iptables, ssh
+    ):
+        """``apply_device_exceptions`` is the single entry point both
+        unlock and network CRUD funnel through. It must always flip
+        bc_forwarding on, regardless of how many exceptions are passed.
+        Regression guard: any future refactor that drops this call
+        will silently break cross-subnet Wake-on-LAN."""
+        with patch.object(lan, "get_networks", return_value=self._two_networks()), \
+             patch.object(lan, "_apply_bc_forwarding_runtime") as apply_bc:
+            lan.apply_device_exceptions([])
+        apply_bc.assert_called_once()
+
+    def test_cleanup_exceptions_invokes_bc_forwarding_remove(
+        self, lan, iptables, uci, ssh
+    ):
+        with patch.object(lan, "get_networks", return_value=self._two_networks()), \
+             patch.object(lan, "_remove_bc_forwarding_runtime") as remove_bc:
+            lan.cleanup_exceptions()
+        remove_bc.assert_called_once()
+
+
 class TestCreateNetwork:
     def test_creates_full_infrastructure(self, lan, uci, ssh, service_ctl):
         ssh.exec.side_effect = [
