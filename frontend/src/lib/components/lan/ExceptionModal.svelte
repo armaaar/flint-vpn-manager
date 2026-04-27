@@ -3,6 +3,7 @@
 
   export let networks = [];
   export let networkDevices = {};
+  /** @type {{ from_ip?: string, to_ip?: string, direction?: string } | null} */
   export let exception = null; // existing exception for edit mode
 
   const dispatch = createEventDispatcher();
@@ -31,27 +32,35 @@
     return net?.id || '';
   }
 
-  // Pre-fill once when editing
+  function findMacByIp(zone, ip) {
+    if (!zone || !ip) return '';
+    return (networkDevices[zone] || []).find(d => d.ip === ip)?.mac || '';
+  }
+
+  // Pre-fill once when editing. The device-vs-network distinction is
+  // encoded in the IP shape (CIDR = network, single IP = device).
   $: if (exception && !initialized && Object.keys(networkDevices).length > 0) {
     initialized = true;
     direction = exception.direction || 'both';
 
-    if (exception.from_mac) {
-      fromType = 'device';
-      fromZone = findZoneByIp(exception.from_ip);
-      fromMac = exception.from_mac;
-    } else {
+    const fromIsSubnet = (exception.from_ip || '').includes('/');
+    if (fromIsSubnet) {
       fromType = 'network';
       fromZone = findZoneBySubnet(exception.from_ip);
+    } else {
+      fromType = 'device';
+      fromZone = findZoneByIp(exception.from_ip);
+      fromMac = findMacByIp(fromZone, exception.from_ip);
     }
 
-    if (exception.to_mac) {
-      toType = 'device';
-      toZone = findZoneByIp(exception.to_ip);
-      toMac = exception.to_mac;
-    } else {
+    const toIsSubnet = (exception.to_ip || '').includes('/');
+    if (toIsSubnet) {
       toType = 'network';
       toZone = findZoneBySubnet(exception.to_ip);
+    } else {
+      toType = 'device';
+      toZone = findZoneByIp(exception.to_ip);
+      toMac = findMacByIp(toZone, exception.to_ip);
     }
   }
 
@@ -61,10 +70,7 @@
   $: fromDevice = fromMac ? fromDevices.find(d => d.mac === fromMac) || null : null;
   $: toDevice = toMac ? toDevices.find(d => d.mac === toMac) || null : null;
 
-  // Determine effective zone for each side
-  $: fromEffectiveZone = fromType === 'network' ? fromZone : fromZone;
-  $: toEffectiveZone = toType === 'network' ? toZone : toZone;
-  $: sameNetwork = !!(fromEffectiveZone && toEffectiveZone && fromEffectiveZone === toEffectiveZone);
+  $: sameNetwork = !!(fromZone && toZone && fromZone === toZone);
 
   $: canSave = (() => {
     const hasFrom = fromType === 'network' ? !!fromZone : !!fromMac;
@@ -72,37 +78,17 @@
     return hasFrom && hasTo && !sameNetwork;
   })();
 
-  const buildLabel = () => {
-    const fromLabel = fromType === 'network'
-      ? networks.find(n => n.id === fromZone)?.ssids?.[0]?.name || fromZone
-      : fromDevice?.display_name || '';
-    const toLabel = toType === 'network'
-      ? networks.find(n => n.id === toZone)?.ssids?.[0]?.name || toZone
-      : toDevice?.display_name || '';
-    const arrow = direction === 'both' ? '⟷' : direction === 'outbound' ? '→' : '←';
-    return `${fromLabel} ${arrow} ${toLabel}`;
-  };
-
   const save = () => {
     if (!canSave || saving) return;
     saving = true;
 
-    const fIp = fromType === 'device' ? (fromDevice?.ip || '') : '';
-    const fMac = fromType === 'device' ? (fromDevice?.mac || fromMac) : '';
-    const tIp = toType === 'device' ? (toDevice?.ip || '') : '';
-    const tMac = toType === 'device' ? (toDevice?.mac || toMac) : '';
-
-    // For network targets, use subnet (router will handle it)
-    const targetNet = toType === 'network' ? networks.find(n => n.id === toZone) : null;
     const sourceNet = fromType === 'network' ? networks.find(n => n.id === fromZone) : null;
+    const targetNet = toType === 'network' ? networks.find(n => n.id === toZone) : null;
 
     dispatch('save', {
-      from_ip: fIp || (sourceNet?.subnet || ''),
-      from_mac: fMac,
-      to_ip: tIp || (targetNet?.subnet || ''),
-      to_mac: tMac,
+      from_ip: fromType === 'device' ? (fromDevice?.ip || '') : (sourceNet?.subnet || ''),
+      to_ip: toType === 'device' ? (toDevice?.ip || '') : (targetNet?.subnet || ''),
       direction,
-      label: buildLabel(),
     });
   };
 

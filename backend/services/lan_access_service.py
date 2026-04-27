@@ -211,14 +211,40 @@ class LanAccessService:
 
     def delete_network(self, zone_id: str) -> dict:
         """Delete a Flint VPN Manager-created network."""
+        # Look up the deleted network's subnet *before* deletion so we can
+        # prune exceptions referencing it.
+        target = next(
+            (n for n in self.router.lan_access.get_networks() if n["id"] == zone_id),
+            None,
+        )
+        target_subnet = None
+        if target and target.get("subnet"):
+            try:
+                target_subnet = ipaddress.IPv4Network(target["subnet"], strict=False)
+            except ValueError:
+                target_subnet = None
+
         self.router.lan_access.delete_network(zone_id)
         # Clean config.json rules/exceptions referencing this zone
         config = sm.get_config()
         la = config.get("lan_access", {})
         la["rules"] = [r for r in la.get("rules", [])
                        if r.get("src_zone") != zone_id and r.get("dest_zone") != zone_id]
-        la["exceptions"] = [e for e in la.get("exceptions", [])
-                            if zone_id not in e.get("label", "")]
+
+        def _in_deleted_subnet(value: str) -> bool:
+            if not target_subnet or not value:
+                return False
+            try:
+                if "/" in value:
+                    return ipaddress.IPv4Network(value, strict=False).subnet_of(target_subnet)
+                return ipaddress.IPv4Address(value) in target_subnet
+            except ValueError:
+                return False
+
+        la["exceptions"] = [
+            e for e in la.get("exceptions", [])
+            if not (_in_deleted_subnet(e.get("from_ip", "")) or _in_deleted_subnet(e.get("to_ip", "")))
+        ]
         sm.update_config(lan_access=la)
         self._sync_mdns()
         # Subnet list changed — strip the deleted bridge's priority-50 rule
@@ -303,12 +329,9 @@ class LanAccessService:
         """Add a device exception, apply to router, persist."""
         exc = {
             "id": f"exc_{uuid.uuid4().hex[:8]}",
-            "from_mac": data.get("from_mac", ""),
             "from_ip": data.get("from_ip", ""),
             "to_ip": data.get("to_ip", ""),
-            "to_mac": data.get("to_mac", ""),
             "direction": data.get("direction", "both"),
-            "label": data.get("label", ""),
         }
         if not exc["from_ip"] or not exc["to_ip"]:
             raise ValueError("from_ip and to_ip are required")

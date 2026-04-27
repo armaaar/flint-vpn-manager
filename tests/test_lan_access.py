@@ -132,7 +132,6 @@ class TestExceptions:
                 "from_ip": "192.168.8.101",
                 "to_ip": "192.168.9.50",
                 "direction": "both",
-                "label": "Phone -> Bulb",
             })
 
         assert result["success"]
@@ -261,9 +260,23 @@ class TestUpdateNetwork:
 
     def test_delete_cleans_exceptions_referencing_zone(self):
         r = _mock_router()
+        # Pre-deletion network list — delete_network() reads this to find
+        # the deleted zone's subnet so it can prune exceptions by IP.
+        r.lan_access.get_networks.return_value = [
+            {"id": "fvpn_iot", "zone": "fvpn_iot", "subnet": "192.168.10.0/24",
+             "ssids": [], "bridge": "br-fvpn_iot", "enabled": True},
+            {"id": "lan", "zone": "lan", "subnet": "192.168.8.0/24",
+             "ssids": [], "bridge": "br-lan", "enabled": True},
+            {"id": "guest", "zone": "guest", "subnet": "192.168.9.0/24",
+             "ssids": [], "bridge": "br-guest", "enabled": True},
+        ]
         exceptions = [
-            {"id": "exc_1", "label": "fvpn_iot -> lan"},
-            {"id": "exc_2", "label": "lan -> guest"},
+            # Single IP in deleted subnet → drop
+            {"id": "exc_1", "from_ip": "192.168.8.10", "to_ip": "192.168.10.50", "direction": "both"},
+            # Entire deleted subnet on either side → drop
+            {"id": "exc_2", "from_ip": "192.168.10.0/24", "to_ip": "192.168.9.5", "direction": "both"},
+            # Untouched by the deletion → keep
+            {"id": "exc_3", "from_ip": "192.168.8.10", "to_ip": "192.168.9.5", "direction": "both"},
         ]
 
         with patch("services.lan_access_service.sm") as mock_sm:
@@ -273,7 +286,7 @@ class TestUpdateNetwork:
 
         saved = mock_sm.update_config.call_args[1]["lan_access"]
         assert len(saved["exceptions"]) == 1
-        assert saved["exceptions"][0]["id"] == "exc_2"
+        assert saved["exceptions"][0]["id"] == "exc_3"
 
 
 class TestReapplyAll:

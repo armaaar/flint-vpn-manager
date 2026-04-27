@@ -307,6 +307,28 @@
   const ssidLabel = (network) => network.ssids.map(s => s.name).join(' / ') || network.zone;
   const canDelete = (network) => network.id !== 'lan' && network.id !== 'guest';
 
+  // Build a friendly label for each exception. Reactive on `networks`
+  // and `networkDevices` so the label re-resolves once devices arrive
+  // via SSE after the initial page render.
+  $: exceptionLabels = (() => {
+    const sideLabel = (ip) => {
+      if (!ip) return '';
+      if (ip.includes('/')) {
+        const net = networks.find(n => n.subnet === ip);
+        return net ? ssidLabel(net) : ip;
+      }
+      for (const devs of Object.values(networkDevices)) {
+        const d = devs.find(x => x.ip === ip);
+        if (d) return d.display_name;
+      }
+      return ip;
+    };
+    const arrow = (dir) => dir === 'both' ? '⟷' : dir === 'outbound' ? '→' : '←';
+    return Object.fromEntries(
+      exceptions.map(e => [e.id, `${sideLabel(e.from_ip)} ${arrow(e.direction)} ${sideLabel(e.to_ip)}`])
+    );
+  })();
+
   const reloadDevices = async () => {
     const d = await api.getDevices();
     devices.set(d);
@@ -562,7 +584,7 @@
         <div class="exception-list">
           {#each exceptions as exc}
             <div class="exception-row">
-              <span class="exc-label">{exc.label || `${exc.from_ip} → ${exc.to_ip}`}</span>
+              <span class="exc-label">{exceptionLabels[exc.id]}</span>
               <span class="exc-direction">{exc.direction === 'both' ? '⟷' : exc.direction === 'outbound' ? '→' : '←'}</span>
               <span class="exc-ips">{exc.from_ip} — {exc.to_ip}</span>
               <button class="exc-edit" on:click={() => editException(exc)} title="Edit">✎</button>
