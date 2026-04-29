@@ -203,7 +203,7 @@ uci set wireguard.peer_9001.public_key='<X25519 peer pubkey>'
 uci set wireguard.peer_9001.end_point='<host>:<port>'
 uci set wireguard.peer_9001.allowed_ips='0.0.0.0/0'
 uci set wireguard.peer_9001.dns='10.2.0.1'        # or Custom DNS (§11)
-uci set wireguard.peer_9001.mtu='1420'
+uci set wireguard.peer_9001.mtu='1420'    # PROTO_DEFAULT_MTU[wireguard]; override via profile.options.mtu
 uci set wireguard.peer_9001.persistent_keepalive='25'
 uci commit wireguard
 
@@ -300,10 +300,19 @@ Writes three files per tunnel under `/etc/fvpn/protonwg/`:
 # 4. Apply WG config
 wg setconf protonwg0 /etc/fvpn/protonwg/protonwg0.conf
 
-# 5. IP config
+# 5. IP config + tunnel MTU (read FVPN_MTU from .env; falls back to per-protocol
+#    default by socket_type. wg-tls=1320, wg-tcp=1380, plain WG=1420 — see
+#    proton-wg-internals.md "Tunnel MTU and MSS clamp" for why wg-tls needs this.)
 ip addr add 10.2.0.2/32 dev protonwg0
 ip link set protonwg0 up
+ip link set dev protonwg0 mtu 1320          # value from FVPN_MTU
 # IPv6 (if FVPN_IPV6=1): ip -6 addr add 2a07:b944::2:2/128 dev protonwg0
+
+# 5a. Router-wide sysctl drop-in (idempotent, written once per start)
+cat > /etc/sysctl.d/99-fvpn.conf <<EOF
+net.ipv4.tcp_mtu_probing=1
+EOF
+sysctl -p /etc/sysctl.d/99-fvpn.conf
 
 # 6. Routing table + ip rule
 ip route add default dev protonwg0 table 1006
@@ -327,6 +336,11 @@ uci commit firewall
 
 # 8. Rebuild ALL proton-wg mangle rules (§4, §16)
 #    Writes /etc/fvpn/protonwg/mangle_rules.sh and executes it.
+#    Includes per-tunnel fixed-MSS clamp at -I FORWARD 1 (both directions, v4+v6
+#    when enabled), tagged with --comment fvpn-mss-<iface> for self-cleaning.
+#    MSS is computed deterministically (mtu - 40 v4, mtu - 60 v6) — fw3's
+#    mtu_fix=1 zone clamp uses --clamp-mss-to-pmtu which is unreliable inside
+#    wg-tls because ICMP "Packet Too Big" doesn't survive the TLS framing.
 # 9. Start per-tunnel dnsmasq (§16)
 # 10. Wait for WG handshake
 ```

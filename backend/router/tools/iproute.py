@@ -38,6 +38,10 @@ class Iproute:
         """Bring an interface up."""
         self._ssh.exec(f"ip link set {iface} up")
 
+    def link_set_mtu(self, iface: str, mtu: int) -> None:
+        """Set an interface's MTU (idempotent)."""
+        self._ssh.exec(f"ip link set dev {iface} mtu {int(mtu)} 2>/dev/null; true")
+
     # ── Address management ──────────────────────────────────────────────
 
     def addr_add(self, addr: str, dev: str) -> None:

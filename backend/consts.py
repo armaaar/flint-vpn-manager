@@ -16,6 +16,19 @@ PROTO_WIREGUARD_TCP = "wireguard-tcp"
 PROTO_WIREGUARD_TLS = "wireguard-tls"
 PROTO_OPENVPN = "openvpn"
 
+# Per-protocol tunnel MTU (bytes). The wg-tls / wg-tcp values account for
+# Proton's TCP+TLS re-encapsulation overhead (~120B vs ~60B for plain WG).
+# Used at create-time; stored per-tunnel in the proton-wg .env so it
+# survives reconnects and informs MSS clamping in mangle_rules.sh.
+# Override per-profile via profile.options["mtu"].
+PROTO_DEFAULT_MTU = {
+    PROTO_WIREGUARD: 1420,      # plain UDP — current default
+    PROTO_WIREGUARD_TCP: 1380,  # TCP framing, no TLS
+    PROTO_WIREGUARD_TLS: 1320,  # TLS-over-TCP — needs the most headroom
+}
+# IPv6 minimum MTU; never clamp below this on a v6-enabled tunnel.
+MTU_FLOOR_V6 = 1280
+
 # DNS ad blocking
 ADBLOCK_HOSTS_PATH = "/etc/fvpn/blocklist.hosts"
 ADBLOCK_RULES_SCRIPT = "/etc/fvpn/adblock_rules.sh"

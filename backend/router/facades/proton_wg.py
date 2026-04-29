@@ -12,6 +12,8 @@ from consts import (
     HEALTH_CONNECTING,
     HEALTH_GREEN,
     HEALTH_RED,
+    MTU_FLOOR_V6,
+    PROTO_DEFAULT_MTU,
     PROTO_WIREGUARD_TCP,
     PROTO_WIREGUARD_TLS,
 )
@@ -20,6 +22,94 @@ from router.tools.uci import Uci
 PROTON_WG_MARKS = ["0x6000", "0x7000", "0x9000", "0xf000"]
 PROTON_WG_DIR = "/etc/fvpn/protonwg"
 PROTON_WG_BIN = "/usr/bin/proton-wg"
+# Sysctl file emitted from code so a fresh router reproduces the same state.
+# tcp_mtu_probing=1 lets the router's own TCP stack escape PMTU black holes
+# inside Proton's wg-tls tunnels, where ICMP "Packet Too Big" is unreliable.
+FVPN_SYSCTL_PATH = "/etc/sysctl.d/99-fvpn.conf"
+FVPN_SYSCTL_CONTENT = "net.ipv4.tcp_mtu_probing=1\n"
+# Tag for our generated MSS clamp rules so we can find/remove them.
+_MSS_COMMENT = "fvpn-mss"
+
+
+def _default_mtu_for_socket_type(socket_type: str) -> int:
+    """Map a proton-wg socket_type ("tcp"/"tls") to its default MTU."""
+    proto = {"tcp": PROTO_WIREGUARD_TCP, "tls": PROTO_WIREGUARD_TLS}.get(
+        socket_type, PROTO_WIREGUARD_TCP,
+    )
+    return PROTO_DEFAULT_MTU[proto]
+
+
+def _read_env_mtu(env_content: str) -> int:
+    """Resolve a tunnel's MTU from its .env content.
+
+    Prefers explicit ``FVPN_MTU`` then falls back to the per-protocol default
+    derived from ``PROTON_WG_SOCKET_TYPE``. Older envs (pre-MTU support) have
+    only the latter — they must keep working without a config rewrite.
+    """
+    socket_type = "tcp"
+    for line in env_content.splitlines():
+        if line.startswith("FVPN_MTU="):
+            try:
+                return int(line.split("=", 1)[1].strip())
+            except ValueError:
+                pass
+        elif line.startswith("PROTON_WG_SOCKET_TYPE="):
+            socket_type = line.split("=", 1)[1].strip()
+    return _default_mtu_for_socket_type(socket_type)
+
+
+def _mss_for_mtu(mtu: int, family: str) -> int:
+    """Compute the MSS to clamp at, given the tunnel MTU and IP family.
+
+    IPv4 reserves 40 bytes for IP+TCP headers; IPv6 reserves 60 bytes
+    (40 byte v6 header + 20 byte TCP). Floored at the IPv6 minimum so a
+    user-supplied low MTU never produces a negative or sub-1280 MSS.
+    """
+    overhead = 60 if family == "ip6" else 40
+    return max(MTU_FLOOR_V6 - overhead, mtu - overhead)
+
+
+def _build_mss_clamp_cmds(tunnels: list) -> list[str]:
+    """Build idempotent fixed-MSS clamp commands for proton-wg tunnels.
+
+    Emits, per tunnel and per direction (forward/reverse), one IPv4 rule
+    and (when v6 is enabled on that tunnel) one IPv6 rule. Each rule is
+    tagged with a ``fvpn-mss`` comment scoped to the interface so the
+    leading ``-D`` cleanup removes any prior copy before ``-I`` re-adds
+    it — re-running the script is a no-op on the live state.
+
+    Inserted at position 1 of FORWARD so the deterministic floor wins
+    over fw3's ``--clamp-mss-to-pmtu`` rule (whose PMTUD source is
+    unreliable inside wg-tls).
+    """
+    cmds: list[str] = []
+    # Comment-based sweep first: removes any prior fvpn-mss rules regardless
+    # of their MSS value (handles MTU changes between rebuilds).
+    for bin_ in ("iptables", "ip6tables"):
+        cmds.append(
+            f"{bin_} -t mangle -S FORWARD 2>/dev/null | "
+            f"grep -F '{_MSS_COMMENT}' | sed 's/^-A /-D /' | "
+            f"while read -r line; do "
+            f"{bin_} -t mangle $line 2>/dev/null; "
+            f"done; true"
+        )
+    for iface, _mark, _ipset, _tid, mtu, ipv6_enabled in tunnels:
+        v4_mss = _mss_for_mtu(mtu, "ip")
+        v6_mss = _mss_for_mtu(mtu, "ip6")
+        tag = f"{_MSS_COMMENT}-{iface}"
+        for direction in ("-o", "-i"):
+            cmds.append(
+                f"iptables -t mangle -I FORWARD 1 {direction} {iface} "
+                f"-p tcp --tcp-flags SYN,RST SYN "
+                f"-m comment --comment '{tag}' -j TCPMSS --set-mss {v4_mss}"
+            )
+            if ipv6_enabled:
+                cmds.append(
+                    f"ip6tables -t mangle -I FORWARD 1 {direction} {iface} "
+                    f"-p tcp --tcp-flags SYN,RST SYN "
+                    f"-m comment --comment '{tag}' -j TCPMSS --set-mss {v6_mss}"
+                )
+    return cmds
 # Proton-wg ipsets use a distinct prefix so vpn-client restart (which
 # flushes all src_mac_* ipsets) never touches proton-wg device assignments.
 PWG_IPSET_PREFIX = "pwg_mac_"
@@ -178,10 +268,13 @@ class RouterProtonWG:
         socket_type: str = "tcp",
         dns: str = "10.2.0.1",
         ipv6: bool = False,
+        mtu: int | None = None,
     ) -> dict:
         """Write a proton-wg config and env file to the router."""
         iface, mark, table_num = self._next_proton_wg_slot()
         tunnel_id = self._alloc_tunnel_id(self._ssh)
+        if mtu is None:
+            mtu = _default_mtu_for_socket_type(socket_type)
 
         self._ssh.exec(f"mkdir -p {PROTON_WG_DIR}")
         self.ensure_proton_wg_initd()
@@ -208,6 +301,7 @@ class RouterProtonWG:
             f"FVPN_MARK={mark}\n"
             f"FVPN_IPSET={PWG_IPSET_PREFIX}{tunnel_id}\n"
             f"FVPN_IPV6={ipv6_flag}\n"
+            f"FVPN_MTU={int(mtu)}\n"
         )
         self._ssh.write_file(f"{PROTON_WG_DIR}/{iface}.env", env)
 
@@ -259,6 +353,7 @@ class RouterProtonWG:
                 f"FVPN_MARK={mark}\n"
                 f"FVPN_IPSET={ipset_name}\n"
                 f"FVPN_IPV6=0\n"
+                f"FVPN_MTU={PROTO_DEFAULT_MTU[PROTO_WIREGUARD_TCP]}\n"
             )
             self._ssh.write_file(env_path, env)
 
@@ -281,16 +376,23 @@ class RouterProtonWG:
         # 3. Apply WG config
         self._ssh.exec(f"wg setconf {iface} {conf_path}")
 
-        # 4. Set up IP + bring interface up
+        # 4. Set up IP + bring interface up + apply tunnel MTU.
+        # MTU is read from the .env (FVPN_MTU). Falls back to the per-protocol
+        # default keyed off PROTON_WG_SOCKET_TYPE for envs written before this
+        # field existed. Without this, wg-tls tunnels keep the kernel default
+        # (1420) and full-MTU TCP segments black-hole inside the TLS-over-TCP
+        # outer connection — the Prime Video bug. See debugging-catalogue.md.
         self._iproute.addr_add("10.2.0.2/32", iface)
         self._iproute.link_set_up(iface)
 
-        # Check if IPv6 is enabled (read env from disk only if we didn't just write it)
-        if env_exists == "yes":
-            env_content = self._ssh.exec(f"cat {env_path} 2>/dev/null").strip()
-            _ipv6_enabled = "FVPN_IPV6=1" in env_content
-        else:
-            _ipv6_enabled = False  # Reconstructed env defaults to FVPN_IPV6=0
+        # Read both ipv6 + mtu hints from env in one go.
+        env_content = self._ssh.exec(f"cat {env_path} 2>/dev/null").strip() if env_exists == "yes" else ""
+        _ipv6_enabled = "FVPN_IPV6=1" in env_content
+        mtu = _read_env_mtu(env_content)
+        self._iproute.link_set_mtu(iface, mtu)
+
+        # Ensure router-wide sysctl tweaks are in place. Idempotent and cheap.
+        self.ensure_router_sysctl()
 
         if _ipv6_enabled:
             from consts import PROTON_WG_IPV6_ADDR
@@ -580,6 +682,22 @@ class RouterProtonWG:
             f"rm -rf {conf_dir} {resolv_file} {conf_path}; true"
         )
 
+    def ensure_router_sysctl(self) -> None:
+        """Persist router-wide sysctl tweaks needed by proton-wg tunnels.
+
+        Currently writes ``net.ipv4.tcp_mtu_probing=1`` to a drop-in under
+        ``/etc/sysctl.d/`` so the router's own TCP stack can recover from
+        PMTU black holes when ICMP is filtered (typical inside wg-tls).
+        Idempotent — re-writes the same file each call. Cheap.
+        """
+        # Heredoc keeps quoting simple and avoids an Edit tool through Edit.
+        self._ssh.exec(
+            f"cat > {FVPN_SYSCTL_PATH} <<'__FVPN_EOF__'\n"
+            f"{FVPN_SYSCTL_CONTENT}"
+            f"__FVPN_EOF__\n"
+            f"sysctl -p {FVPN_SYSCTL_PATH} >/dev/null 2>&1; true"
+        )
+
     def rebuild_mangle_rules(self) -> None:
         """Rebuild mangle MARK rules for ALL active proton-wg tunnels."""
         envs = self._ssh.exec(f"ls {PROTON_WG_DIR}/*.env 2>/dev/null || true").strip()
@@ -598,6 +716,15 @@ class RouterProtonWG:
                 if not chain or chain == "TUNNEL100_ROUTE_POLICY":
                     continue
                 self._iptables.delete_chain("mangle", "ROUTE_POLICY", chain)
+            # Remove any orphan fvpn-mss clamp rules left in FORWARD.
+            for bin_ in ("iptables", "ip6tables"):
+                self._ssh.exec(
+                    f"{bin_} -t mangle -S FORWARD 2>/dev/null | "
+                    f"grep -F '{_MSS_COMMENT}' | sed 's/^-A /-D /' | "
+                    f"while read -r line; do "
+                    f"{bin_} -t mangle $line 2>/dev/null; "
+                    f"done; true"
+                )
             return
 
         tunnels = []
@@ -616,6 +743,8 @@ class RouterProtonWG:
             tid = vals.get("FVPN_TUNNEL_ID", "")
             mark = vals.get("FVPN_MARK", "")
             ipset_name = vals.get("FVPN_IPSET", "")
+            mtu = _read_env_mtu(env_content)
+            ipv6_enabled = vals.get("FVPN_IPV6", "0") == "1"
             if not (iface and tid and mark and ipset_name):
                 continue
             # Only rebuild rules for tunnels whose interface is actually UP
@@ -627,7 +756,7 @@ class RouterProtonWG:
             if not link or "UP" not in link:
                 inactive.append((iface, mark, ipset_name, tid))
                 continue
-            tunnels.append((iface, mark, ipset_name, tid))
+            tunnels.append((iface, mark, ipset_name, tid, mtu, ipv6_enabled))
 
         # Clean up stale mangle chains and DNS rules from inactive tunnels
         for iface, mark, ipset_name, tid in inactive:
@@ -662,7 +791,7 @@ class RouterProtonWG:
             )
 
         cmds = []
-        for iface, mark, ipset_name, tid in tunnels:
+        for iface, mark, ipset_name, tid, _mtu, _v6 in tunnels:
             cmds.append(f"ipset create {ipset_name} hash:mac -exist")
             cmds.append(f"ipset flush {ipset_name}")
             # Populate ipset from persistent .macs file (survives any flush)
@@ -672,7 +801,7 @@ class RouterProtonWG:
                 f"[ -n \"$mac\" ] && ipset add {ipset_name} \"$mac\" -exist; "
                 f"done < {PROTON_WG_DIR}/{iface}.macs || true"
             )
-        for iface, mark, ipset_name, tid in tunnels:
+        for iface, mark, ipset_name, tid, _mtu, _v6 in tunnels:
             chain = f"TUNNEL{tid}_ROUTE_POLICY"
             cmds.append(f"iptables -t mangle -N {chain} 2>/dev/null")
             cmds.append(f"iptables -t mangle -F {chain}")
@@ -686,12 +815,24 @@ class RouterProtonWG:
                 f"iptables -t mangle -I ROUTE_POLICY 1 -j {chain}"
             )
 
+        # Fixed-MSS clamp per tunnel (both directions, IPv4 + IPv6 when enabled).
+        # fw3's ``mtu_fix=1`` already installs a ``--clamp-mss-to-pmtu`` rule on
+        # the zone, but that depends on PMTUD which is unreliable inside Proton's
+        # wg-tls outer connection (ICMP "Packet Too Big" gets eaten by the TLS
+        # framing). Without an explicit floor, full-MTU TCP segments black-hole
+        # mid-stream — the Prime Video bug. We compute MSS deterministically
+        # from each tunnel's MTU and pin it. Inserted at position 1 of FORWARD
+        # so they take precedence over fw3's PMTU clamp; tagged via a comment
+        # so the leading ``-D`` cleanup keeps re-runs idempotent. See
+        # debugging-catalogue.md "wg-tls PMTU black hole".
+        mss_cmds = _build_mss_clamp_cmds(tunnels)
+
         # DNS infrastructure: CT zone + REDIRECT for each tunnel's dnsmasq.
         # Also re-spawn the per-tunnel dnsmasq if it has died — the REDIRECT
         # rules point to a fixed port; without a live listener, all DNS for
         # devices in that group silently black-holes (no internet).
         dns_cmds = []
-        for iface, mark, ipset_name, tid in tunnels:
+        for iface, mark, ipset_name, tid, _mtu, _v6 in tunnels:
             conf_path = f"/var/etc/dnsmasq.conf.{iface}"
             dns_cmds.append(
                 f"if [ -f {conf_path} ] && "
@@ -717,11 +858,12 @@ class RouterProtonWG:
         # non-destructive alternative to clearing+recreating rule100.
         if tunnels:
             macs_files = [
-                f"{PROTON_WG_DIR}/{iface}.macs" for iface, _, _, _ in tunnels
+                f"{PROTON_WG_DIR}/{iface}.macs"
+                for iface, _, _, _, _, _ in tunnels
             ]
             dns_cmds.append(self._dns_mark_blacklist_default_cmd(macs_files))
 
-        all_cmds = cmds + dns_cmds
+        all_cmds = cmds + mss_cmds + dns_cmds
 
         if all_cmds:
             self._ssh.exec("; ".join(all_cmds))

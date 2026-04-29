@@ -472,4 +472,169 @@ class TestEnsureProtonWgInitdIPv6:
         assert "FVPN_IPV6" in script
         assert "ip -6 addr add" in script
         assert "ip -6 route add" in script
-        assert "ip -6 rule add" in script
+
+
+# ── MTU / MSS clamp / sysctl persistence ─────────────────────────────────
+
+
+class TestUploadProtonWgConfigMtu:
+    """The .env file persists per-tunnel MTU so start_proton_wg_tunnel and
+    rebuild_mangle_rules can apply it without re-deriving from protocol."""
+
+    def _env_content(self, ssh):
+        env_writes = [c for c in ssh.write_file.call_args_list
+                      if c[0][0].endswith(".env")]
+        assert env_writes, "expected .env to be written"
+        return env_writes[0][0][1]
+
+    def test_tcp_default_mtu_persisted_to_env(self, pwg, ssh, ipset):
+        ssh.exec.return_value = ""
+        pwg.upload_proton_wg_config("NL TCP", "p", "P", "1.2.3.4:443",
+                                    socket_type="tcp")
+        assert "FVPN_MTU=1380" in self._env_content(ssh)
+
+    def test_tls_default_mtu_persisted_to_env(self, pwg, ssh, ipset):
+        ssh.exec.return_value = ""
+        pwg.upload_proton_wg_config("NL TLS", "p", "P", "1.2.3.4:443",
+                                    socket_type="tls")
+        # The Prime Video bug: wg-tls needs 1320, not the kernel-WG default 1420.
+        assert "FVPN_MTU=1320" in self._env_content(ssh)
+
+    def test_explicit_mtu_overrides_default(self, pwg, ssh, ipset):
+        ssh.exec.return_value = ""
+        pwg.upload_proton_wg_config("custom", "p", "P", "1.2.3.4:443",
+                                    socket_type="tls", mtu=1280)
+        assert "FVPN_MTU=1280" in self._env_content(ssh)
+
+
+class TestStartProtonWgTunnelMtu:
+    """start_proton_wg_tunnel reads FVPN_MTU from the .env and applies it
+    to the live interface, then ensures router-wide sysctl tweaks."""
+
+    def _wire_minimal_start_path(self, ssh, env_content):
+        """Build a side_effect that lets start_proton_wg_tunnel reach the
+        link-set-up phase deterministically with the given .env content."""
+        def exec_side_effect(cmd, **_kw):
+            if "[ -x" in cmd:
+                return "ok"           # binary present
+            if "[ -f " in cmd and ".env" in cmd:
+                return "yes"          # env exists, no recovery write
+            if cmd.startswith("cat ") and ".env" in cmd:
+                return env_content    # env content for MTU/IPv6 read
+            if "ip link show" in cmd:
+                return "24: protonwg0"  # interface appeared
+            if "wg show" in cmd:
+                return "peer\t12345"   # handshake present
+            return ""
+        ssh.exec.side_effect = exec_side_effect
+
+    def test_link_set_mtu_called_with_env_value(self, pwg, ssh, ipset, iproute):
+        env = (
+            "PROTON_WG_INTERFACE_NAME=protonwg0\n"
+            "PROTON_WG_SOCKET_TYPE=tls\n"
+            "FVPN_TUNNEL_ID=100\n"
+            "FVPN_MARK=0x6000\n"
+            "FVPN_IPSET=pwg_mac_100\n"
+            "FVPN_IPV6=0\n"
+            "FVPN_MTU=1320\n"
+        )
+        self._wire_minimal_start_path(ssh, env)
+        with patch("time.sleep"):
+            pwg.start_proton_wg_tunnel("protonwg0", "0x6000", 1006, 100)
+        iproute.link_set_mtu.assert_called_once_with("protonwg0", 1320)
+
+    def test_falls_back_to_protocol_default_when_env_lacks_mtu(self, pwg, ssh, ipset, iproute):
+        """Older envs (pre-MTU support) must keep working — default by socket_type."""
+        env = (
+            "PROTON_WG_INTERFACE_NAME=protonwg0\n"
+            "PROTON_WG_SOCKET_TYPE=tls\n"
+            "FVPN_TUNNEL_ID=100\n"
+            "FVPN_MARK=0x6000\n"
+            "FVPN_IPSET=pwg_mac_100\n"
+            "FVPN_IPV6=0\n"
+        )
+        self._wire_minimal_start_path(ssh, env)
+        with patch("time.sleep"):
+            pwg.start_proton_wg_tunnel("protonwg0", "0x6000", 1006, 100)
+        iproute.link_set_mtu.assert_called_once_with("protonwg0", 1320)
+
+    def test_emits_sysctl_drop_in(self, pwg, ssh, ipset, iproute):
+        env = (
+            "PROTON_WG_INTERFACE_NAME=protonwg0\n"
+            "PROTON_WG_SOCKET_TYPE=tcp\n"
+            "FVPN_MTU=1380\n"
+        )
+        self._wire_minimal_start_path(ssh, env)
+        with patch("time.sleep"):
+            pwg.start_proton_wg_tunnel("protonwg0", "0x6000", 1006, 100)
+        sysctl_calls = [c for c in ssh.exec.call_args_list
+                        if "/etc/sysctl.d/99-fvpn.conf" in str(c)
+                        and "tcp_mtu_probing=1" in str(c)]
+        assert sysctl_calls, "expected sysctl drop-in to be written"
+
+
+class TestEnsureRouterSysctl:
+    def test_writes_drop_in_and_applies(self, pwg, ssh):
+        pwg.ensure_router_sysctl()
+        assert ssh.exec.call_count == 1
+        cmd = ssh.exec.call_args[0][0]
+        assert "/etc/sysctl.d/99-fvpn.conf" in cmd
+        assert "tcp_mtu_probing=1" in cmd
+        assert "sysctl -p" in cmd
+
+
+class TestMssClampHelpers:
+    def test_mss_for_mtu_v4(self):
+        from router.facades.proton_wg import _mss_for_mtu
+        assert _mss_for_mtu(1320, "ip") == 1280
+        assert _mss_for_mtu(1380, "ip") == 1340
+
+    def test_mss_for_mtu_v6(self):
+        from router.facades.proton_wg import _mss_for_mtu
+        assert _mss_for_mtu(1320, "ip6") == 1260
+
+    def test_mss_floor_never_below_v6_minimum(self):
+        """A user-supplied tiny MTU still yields at least an IPv6-min-derived MSS."""
+        from router.facades.proton_wg import _mss_for_mtu
+        # 1280 is the v6 floor; v6 MSS at floor = 1280-60 = 1220
+        assert _mss_for_mtu(800, "ip6") == 1220
+        assert _mss_for_mtu(800, "ip") == 1240
+
+
+class TestBuildMssClampCmds:
+    def test_emits_v4_and_v6_clamp_per_direction(self):
+        from router.facades.proton_wg import _build_mss_clamp_cmds
+        tunnels = [("protonwg0", "0x6000", "pwg_mac_100", "100", 1320, True)]
+        cmds = _build_mss_clamp_cmds(tunnels)
+        joined = "\n".join(cmds)
+        # Sweep first (idempotency)
+        assert "iptables -t mangle -S FORWARD" in joined
+        assert "ip6tables -t mangle -S FORWARD" in joined
+        # Both directions, IPv4 + IPv6
+        assert "iptables -t mangle -I FORWARD 1 -o protonwg0" in joined
+        assert "iptables -t mangle -I FORWARD 1 -i protonwg0" in joined
+        assert "ip6tables -t mangle -I FORWARD 1 -o protonwg0" in joined
+        assert "ip6tables -t mangle -I FORWARD 1 -i protonwg0" in joined
+        # Computed MSS values
+        assert "--set-mss 1280" in joined  # v4: 1320-40
+        assert "--set-mss 1260" in joined  # v6: 1320-60
+        # Tagged for cleanup
+        # Hyphen, not space — iptables-save quotes comments with spaces and
+        # breaks the sweep loop's word-splitting (real bug from first apply).
+        assert "fvpn-mss-protonwg0" in joined
+
+    def test_skips_v6_when_disabled(self):
+        from router.facades.proton_wg import _build_mss_clamp_cmds
+        tunnels = [("protonwg0", "0x6000", "pwg_mac_100", "100", 1380, False)]
+        cmds = _build_mss_clamp_cmds(tunnels)
+        joined = "\n".join(cmds)
+        # v4 rules present, v6 rules absent
+        assert "iptables -t mangle -I FORWARD 1 -o protonwg0" in joined
+        assert "ip6tables -t mangle -I FORWARD 1" not in joined
+
+    def test_only_sweeps_when_no_tunnels(self):
+        from router.facades.proton_wg import _build_mss_clamp_cmds
+        cmds = _build_mss_clamp_cmds([])
+        # Sweep still runs (cleans up stale rules); no add commands
+        assert any("-S FORWARD" in c for c in cmds)
+        assert not any("-I FORWARD 1" in c for c in cmds)

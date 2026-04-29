@@ -4,7 +4,7 @@ Extracted from router_api.py. Handles UCI-based peer creation, live
 peer hot-swap via ``wg set``, and deletion.
 """
 
-from consts import PROTO_WIREGUARD
+from consts import PROTO_DEFAULT_MTU, PROTO_WIREGUARD
 
 
 class RouterWireguard:
@@ -42,7 +42,7 @@ class RouterWireguard:
         address: str = "10.2.0.2/32",
         dns: str = "10.2.0.1",
         allowed_ips: str = "0.0.0.0/0",
-        mtu: int = 1420,
+        mtu: int | None = None,
         keepalive: int = 25,
         ipv6: bool = False,
     ) -> dict:
@@ -50,6 +50,8 @@ class RouterWireguard:
         peer_num = self._next_peer_id()
         peer_id = f"peer_{peer_num}"
         group_id = "1957"
+        if mtu is None:
+            mtu = PROTO_DEFAULT_MTU[PROTO_WIREGUARD]
 
         self._uci.batch_set(f"wireguard.{peer_id}", {
             "_type": "peers",

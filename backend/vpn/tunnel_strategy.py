@@ -482,6 +482,7 @@ class ProtonWGStrategy(TunnelStrategy):
             socket_type=self.transport,
             dns=wg["dns"],
             ipv6=ipv6,
+            mtu=options.get("mtu"),  # None → facade picks per-protocol default
         )
         return router_info, server_info, wg_key, cert_expiry
 

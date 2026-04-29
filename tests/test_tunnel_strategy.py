@@ -548,10 +548,20 @@ class TestProtonWGStrategy:
             socket_type="tcp",
             dns="10.2.0.1",
             ipv6=False,
+            mtu=None,  # No options.mtu → facade resolves protocol default
         )
 
         assert wg_key == SAMPLE_WG_KEY
         assert cert_expiry == SAMPLE_CERT_EXPIRY
+
+    def test_create_passes_options_mtu_through(self):
+        """profile.options['mtu'] override must reach the router facade."""
+        opts = dict(DEFAULT_OPTIONS, mtu=1280)
+        self.strategy_tcp.create(
+            self.router, self.proton, "OverrideMtu", self.server, opts,
+        )
+        upload_kwargs = self.router.proton_wg.upload_proton_wg_config.call_args[1]
+        assert upload_kwargs["mtu"] == 1280
 
     def test_create_tls(self):
         self.strategy_tls.create(

@@ -61,6 +61,18 @@ Related docs: [router-features-translation.md](router-features-translation.md), 
 
 ### Proton-wg
 
+#### wg-tls PMTU black hole — Prime Video stuck at "no internet" `ACTIVE`
+- **Symptom**: Amazon Prime Video on Chromecast (and any TCP flow with full-MTU segments through wg-tls) stalled mid-stream with `CURL error code: 18 / "end of response with N bytes missing"`. Netflix and Spotify (smaller chunks) worked. TLS handshakes completed; only large GETs failed.
+- **Root cause**: Proton's wg-tls re-encapsulates WireGuard inside TLS-over-TCP — overhead ~120B vs plain WG's ~60B. The `protonwg0` interface kept the kernel's default 1420 MTU, so full-size TCP segments black-holed inside the TLS outer connection. ICMP "Packet Too Big" doesn't survive Proton's TLS framing, so PMTUD never triggered. fw3's zone `mtu_fix='1'` rule (which uses `--clamp-mss-to-pmtu`) is useless here for the same reason.
+- **Debug**: From the Chromecast `adb shell ping -M do -s N 8.8.8.8`: passed at 1200, failed at 1400 — broken floor between. Logcat at Prime launch showed the Ignition bootloader (single-shot 11 MB GET) returning HTTP 200 then truncating mid-body.
+- **Fix**: Per-protocol MTU map in [backend/consts.py](backend/consts.py) (`PROTO_DEFAULT_MTU`: WG 1420 / wg-tcp 1380 / wg-tls 1320), persisted per-tunnel as `FVPN_MTU=N` in the `.env`. `start_proton_wg_tunnel` reads it and applies via `ip link set mtu` after bringing the link up; legacy envs fall back to the protocol default. `rebuild_mangle_rules` emits a deterministic fixed-MSS clamp (MTU − 40 v4 / − 60 v6, both directions, in/out) into `mangle_rules.sh` at `-I FORWARD 1` so it overrides fw3's PMTU clamp. Sysctl `net.ipv4.tcp_mtu_probing=1` persisted via `/etc/sysctl.d/99-fvpn.conf`. Override hook: `profile.options.mtu`. Don't go below 1280 — IPv6 minimum.
+
+#### Self-cleaning iptables sweep silently dups when `--comment` has spaces `ACTIVE`
+- **Symptom**: After implementing the wg-tls MSS clamp above, every disconnect/reconnect added 2 more clamp rules per direction instead of replacing them. After a few cycles FORWARD had 6+ identical fvpn-mss rules per direction.
+- **Root cause**: The script's idempotency depends on `iptables -S FORWARD | grep fvpn-mss | sed 's/-A /-D /' | while read line; do iptables $line; done`. But `iptables-save` quotes any comment containing whitespace: `--comment "fvpn-mss protonwg0"`. Word-splitting on the unquoted `$line` reads the literal `"` chars as part of the words → argv has `--comment` `"fvpn-mss` `protonwg0"` (3 broken args) → delete fails silently → next run adds a duplicate.
+- **Debug**: `hexdump -C` of `iptables -t mangle -S FORWARD | grep fvpn-mss` revealed the literal `0x22` quote bytes in the output.
+- **Fix**: Use a hyphenated, space-free tag: `fvpn-mss-{iface}` instead of `fvpn-mss {iface}`. Round-trips through `-S` without quotes, sweep works, idempotent across reconnects. **Invariant**: any iptables `--comment` value used by self-cleaning scripts must contain no whitespace.
+
 #### Killing one tunnel kills all proton-wg tunnels `ACTIVE` (hard invariant)
 - **Symptom**: Stopping one proton-wg tunnel drops all co-running proton-wg tunnels.
 - **Root cause**: `killall proton-wg` kills every `proton-wg` process. Multiple tunnels share the same binary.
@@ -424,6 +436,9 @@ Paste-ready reminders to skim before acting on the router.
 - **`.macs` files are the source of truth.** Kernel ipsets are rebuilt from them by the mangle_rules.sh firewall include.
 - **Don't rebuild mangle rules for tunnels whose iface is down.** DNS REDIRECT would point at a dead per-tunnel dnsmasq.
 - **`_next_tunnel_id` must scan route_policy AND ipsets AND `.env` files.** Missing one causes collisions.
+- **Tunnel MTU is per-protocol** (`PROTO_DEFAULT_MTU`: WG 1420 / wg-tcp 1380 / wg-tls 1320), persisted as `FVPN_MTU=N` in the `.env`, applied via `ip link set mtu` on `start_proton_wg_tunnel`. Override per-profile via `options.mtu`. Never go below 1280 (IPv6 floor).
+- **Fixed-MSS clamp is required for wg-tls**, not fw3's `--clamp-mss-to-pmtu`. ICMP "Packet Too Big" is unreliable inside Proton's TLS framing, so PMTUD breaks. We emit explicit `TCPMSS --set-mss (mtu-40 / mtu-60)` rules at `-I FORWARD 1` from `mangle_rules.sh`.
+- **Any iptables `--comment` used by self-cleaning sweeps must be space-free** (use `fvpn-foo-bar`, not `fvpn foo bar`). `iptables-save` quotes spaced comments and word-splitting on `-S` output then breaks the sweep silently → duplicates accumulate per reconnect.
 
 ### DNS
 - **Main dnsmasq uses `conf-dir=/tmp/dnsmasq.d`** on Flint 2 — `/etc/dnsmasq.d/` is ignored.
