@@ -181,28 +181,28 @@ def api_available_ports():
     return jsonify(ProtonAPI.AVAILABLE_PORTS)
 
 
-@profiles_bp.route("/api/location")
+@profiles_bp.route("/api/router-ip")
 @require_unlocked
-def api_get_location():
-    """Get the current physical location as seen by ProtonVPN.
+def api_get_router_ip():
+    """Get the router's public IPv4 and IPv6 as seen from the internet.
 
-    Cached for 30 seconds to avoid excessive Proton API calls.
-    Returns: {ip, country, isp, lat, lon}
+    Probes from the router itself via curl on the default route, so it
+    reflects the WAN egress (not the management host's egress). Cached
+    briefly to avoid hitting the echo service on every dashboard refresh.
+
+    Returns: {ipv4, ipv6} — either may be null on failure / no v6.
     """
     now = time.time()
     if location_cache["data"] and (now - location_cache["ts"]) < LOCATION_CACHE_TTL:
         return jsonify(location_cache["data"])
 
-    proton = get_service().proton
-    if not proton or not proton.is_logged_in:
-        return jsonify({"error": "Not logged into ProtonVPN"}), 400
     try:
-        location = proton.get_location()
-        location_cache["data"] = location
+        ips = get_router().firewall.get_wan_public_ips()
+        location_cache["data"] = ips
         location_cache["ts"] = now
-        return jsonify(location)
+        return jsonify(ips)
     except Exception as e:
-        log.warning(f"Location check failed: {e}")
+        log.warning(f"Router IP probe failed: {e}")
         return jsonify({"error": str(e)}), 500
 
 
@@ -323,7 +323,6 @@ def api_connect(profile_id):
     """
     try:
         result = get_service().connect_profile(profile_id)
-        location_cache["data"] = None  # IP may have changed
         return jsonify(result)
     except NotFoundError:
         return jsonify({"error": "VPN profile not found"}), 404
@@ -340,7 +339,6 @@ def api_disconnect(profile_id):
     """Bring a VPN profile's tunnel down."""
     try:
         result = get_service().disconnect_profile(profile_id)
-        location_cache["data"] = None  # IP may have changed
         return jsonify(result)
     except NotFoundError:
         return jsonify({"error": "VPN profile not found"}), 404

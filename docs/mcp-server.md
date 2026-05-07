@@ -22,7 +22,7 @@ The server exposes tools under the `flint_*` prefix, grouped by module:
 | **VPN bypass** | `flint_list_vpn_bypass`, `flint_add_vpn_bypass`, `flint_toggle_vpn_bypass` |
 | **Adblock** | `flint_get_adblock_settings`, `flint_update_blocklist_now`, `flint_search_blocked_domains` |
 | **Settings** | `flint_get_settings`, `flint_update_settings` |
-| **Status** | `flint_get_location`, `flint_get_vpn_status` |
+| **Status** | `flint_get_router_ip`, `flint_get_vpn_status` |
 | **Logs** | `flint_list_logs`, `flint_read_log`, `flint_clear_log` |
 
 Full catalog with descriptions and usage patterns: [skills/flint-vpn-manager/references/mcp-tools.md](../skills/flint-vpn-manager/references/mcp-tools.md).

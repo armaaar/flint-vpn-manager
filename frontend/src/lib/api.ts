@@ -79,8 +79,8 @@ export const api = {
   // Latency Probing
   probeLatency: (serverIds: string[]) => request<{ latencies: Record<string, number | null> }>('/api/probe-latency', { method: 'POST', body: { server_ids: serverIds } }),
 
-  // Location
-  getLocation: () => request<{ ip: string; country: string; isp: string }>('/api/location'),
+  // Router public IP
+  getRouterIp: () => request<{ ipv4: string | null; ipv6: string | null }>('/api/router-ip'),
 
   // Networks (LAN Access)
   getNetworks: () => request<LanNetwork[]>('/api/lan-access/networks'),

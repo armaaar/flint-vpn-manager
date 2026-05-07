@@ -10,7 +10,7 @@ PUT/DELETE /api/devices/:mac/reserved-ip → reserve or release a static IP
 POST /api/refresh                       → trigger device poll + score refresh
 POST /api/probe-latency                 → {server_ids:[]} → {latencies:{id:ms}}
 GET  /api/stream                        → SSE (10s): health, kill_switch, names, server_info, smart_protocol, devices
-GET  /api/location|available-ports|vpn-status|server-countries → IP check, port list, Proton account status, country browse
+GET  /api/router-ip|available-ports|vpn-status|server-countries → router WAN IPv4/IPv6, port list, Proton account status, country browse
 GET/PUT /api/settings[/server-preferences|credentials|master-password|adblock] → config CRUD
 GET  /api/settings/adblock/domains         → paginated blocklist search (?search=&page=&limit=)
 POST /api/settings/adblock/update-now      → immediate blocklist download + upload

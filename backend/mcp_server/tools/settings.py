@@ -37,13 +37,15 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
         return json.dumps(result, indent=2)
 
     @mcp.tool()
-    def flint_get_location() -> str:
-        """Get the current public IP and location as seen through the VPN.
+    def flint_get_router_ip() -> str:
+        """Get the router's public IPv4 and IPv6 as seen from the internet.
 
-        Returns JSON with: ip, country, isp, lat, lon.
-        Cached for 30 seconds to avoid excessive Proton API calls.
+        Probed from the router itself via curl, so this is the WAN egress
+        (what every WAN-routed device on the LAN shares), not the management
+        host's egress. Returns JSON with: ipv4, ipv6 (either may be null).
+        Cached for 30 seconds.
         """
-        result = api.get("/api/location")
+        result = api.get("/api/router-ip")
         return json.dumps(result, indent=2)
 
     @mcp.tool()

@@ -154,6 +154,35 @@ class RouterFirewall:
         self._uci.commit("firewall")
         self._ssh.exec(f"rm -f {IPV6_FWD_SCRIPT}")
 
+    # ── WAN Public IP Probe ──────────────────────────────────────────────
+
+    def get_wan_public_ips(self) -> dict:
+        """Probe the router's public IPv4 and IPv6 via the default route.
+
+        Runs ``curl -4 https://api.ipify.org`` and ``curl -6 https://api6.ipify.org``
+        from the router itself. Either field may be ``None`` (no v6 connectivity,
+        timeout, etc.).
+
+        Returns:
+            ``{"ipv4": "1.2.3.4" | None, "ipv6": "2a01:..." | None}``
+        """
+        cmd = (
+            "v4=$(curl -s4 --max-time 5 https://api.ipify.org 2>/dev/null); "
+            "v6=$(curl -s6 --max-time 5 https://api6.ipify.org 2>/dev/null); "
+            "printf '%s\\n%s\\n' \"$v4\" \"$v6\""
+        )
+        out = self._ssh.exec(cmd, timeout=15)
+        lines = (out + "\n").split("\n")
+        v4 = lines[0].strip() or None
+        v6 = lines[1].strip() if len(lines) > 1 else ""
+        v6 = v6 or None
+        # Sanity-check shape so a stray HTML error page doesn't end up on screen.
+        if v4 and not all(c.isdigit() or c == "." for c in v4):
+            v4 = None
+        if v6 and ":" not in v6:
+            v6 = None
+        return {"ipv4": v4, "ipv6": v6}
+
     # ── mDNS Reflection ──────────────────────────────────────────────────
 
     _AVAHI_CONF = "/etc/avahi/avahi-daemon.conf"

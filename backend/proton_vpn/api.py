@@ -614,26 +614,6 @@ aeb893d9a96d1f15519bb3c4dcb40ee3
                 continue
         return result
 
-    def get_location(self) -> dict:
-        """Get the current physical location as seen by ProtonVPN.
-
-        Calls ``GET /vpn/v1/location`` which returns the exit IP, country,
-        and ISP as seen from Proton's servers.
-
-        Returns:
-            Dict with keys: ip, country, isp, lat, lon.
-        """
-        session = self._api._session_holder.session
-        resp = session.api_request("/vpn/v1/location")
-        return {
-            "ip": resp.get("IP", ""),
-            "country": resp.get("Country", ""),
-            "isp": resp.get("ISP", ""),
-            "lat": resp.get("Lat"),
-            "lon": resp.get("Long"),
-        }
-
-
     def get_available_ports(self) -> dict:
         """Return the available ports per protocol for the port selection UI."""
         return dict(self.AVAILABLE_PORTS)

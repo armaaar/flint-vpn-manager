@@ -109,7 +109,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; filter: none; }
 .sidebar-nav a:hover, .sidebar-nav a.active { color: var(--fg); background: var(--bg3); border-left-color: var(--accent); }
 .sidebar-nav a .nav-icon { font-size: 1.1rem; width: 24px; text-align: center; }
 .sidebar-bottom { padding: 12px 20px; border-top: 1px solid var(--border); }
-.sidebar-bottom a { display: flex; align-items: center; gap: 10px; padding: 8px 0; color: var(--fg2); text-decoration: none; font-size: .85rem; }
+.sidebar-bottom a, .sidebar-bottom .sidebar-info { display: flex; align-items: center; gap: 10px; padding: 8px 0; color: var(--fg2); text-decoration: none; font-size: .85rem; }
 .content { flex: 1; padding: 28px 32px; overflow-x: auto; }
 .content-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
 .content-header h2 { font-size: 1.5rem; font-weight: 600; }

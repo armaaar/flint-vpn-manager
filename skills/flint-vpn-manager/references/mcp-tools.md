@@ -110,7 +110,7 @@ Unlock is session-scoped in the backend. If the backend restarts, you need to un
 
 | Tool | Purpose |
 |---|---|
-| `flint_get_location` | Current public IP / country / ISP as seen by ProtonVPN. 30s cache. |
+| `flint_get_router_ip` | Router's public IPv4 + IPv6 as seen from the internet (WAN egress). 30s cache. |
 | `flint_get_vpn_status` | Alias for `flint_list_groups` in some flows; live tunnel state. |
 
 ### Logs
