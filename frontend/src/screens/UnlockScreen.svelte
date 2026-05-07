@@ -4,9 +4,12 @@
 
   let password = '';
   let error = '';
+  let unlocking = false;
 
   async function doUnlock() {
+    if (unlocking) return;
     error = '';
+    unlocking = true;
     try {
       await api.unlock(password);
       appStatus.set('unlocked');
@@ -17,6 +20,7 @@
       startSSE();
     } catch (e: unknown) {
       error = e instanceof Error ? e.message : 'Unlock failed';
+      unlocking = false;
     }
   }
 
@@ -32,11 +36,18 @@
 
     <div class="form-group">
       <label for="u-pass" class="required">Master Password</label>
-      <input id="u-pass" type="password" bind:value={password} on:keydown={onKeydown}>
+      <input id="u-pass" type="password" bind:value={password} on:keydown={onKeydown} disabled={unlocking}>
     </div>
 
     {#if error}<div class="error-msg">{error}</div>{/if}
 
-    <button class="btn-primary btn-lg" on:click={doUnlock}>Unlock</button>
+    <button class="btn-primary btn-lg" on:click={doUnlock} disabled={unlocking}>
+      {#if unlocking}<span class="spinner-inline"></span>Unlocking…{:else}Unlock{/if}
+    </button>
   </div>
 </div>
+
+<style>
+  .spinner-inline { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .6s linear infinite; vertical-align: middle; margin-right: 8px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
