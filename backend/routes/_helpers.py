@@ -47,8 +47,8 @@ def invalidate_device_cache():
 
 
 # ── Location cache ──────────────────────────────────────────────────────────
-# Shared mutable state used by profiles blueprint (connect/disconnect clear
-# it) and the location endpoint (reads/writes it).
+# Shared mutable state for the /api/router-ip endpoint (reads/writes it).
+# Plain 30s TTL -- no other code path invalidates it.
 
 location_cache = {"data": None, "ts": 0.0}
 LOCATION_CACHE_TTL = 30  # seconds
