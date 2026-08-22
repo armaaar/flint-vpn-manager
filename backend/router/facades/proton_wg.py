@@ -1060,6 +1060,14 @@ start_service() {
          wg setconf "$iface" "$conffile" 2>/dev/null && \
          ip addr add 10.2.0.2/32 dev "$iface" 2>/dev/null && \
          ip link set "$iface" up 2>/dev/null && \
+         # Per-tunnel MTU. Without this the link keeps the kernel default
+         # (1420) and full-MTU TCP segments black-hole inside wg-tls's
+         # TLS-over-TCP framing. Mirrors _read_env_mtu(): prefer FVPN_MTU,
+         # else fall back to the per-protocol default by socket type.
+         mtu="$FVPN_MTU" && \
+         if [ -z "$mtu" ]; then case "$PROTON_WG_SOCKET_TYPE" in \
+            tls) mtu=1320 ;; tcp) mtu=1380 ;; *) mtu=1420 ;; esac; fi && \
+         ip link set dev "$iface" mtu "$mtu" 2>/dev/null && \
          # Routing table + ip rule (from env metadata)
          tid="$FVPN_TUNNEL_ID" && \
          mark="$FVPN_MARK" && \
@@ -1077,12 +1085,15 @@ start_service() {
          # Per-tunnel dnsmasq for DNS isolation
          dns_port=$((2000 + (0x$(echo "$mark" | sed 's/0x//') / 4096) * 100 + 53)) && \
          conf_dir="/tmp/dnsmasq.d.$iface" && \
-         resolv="/tmp/resolv.conf.d/resolv.conf.$iface" && \
          dnsmasq_conf="/var/etc/dnsmasq.conf.$iface" && \
-         mkdir -p "$conf_dir" /tmp/resolv.conf.d && \
-         echo "nameserver 10.2.0.1" > "$resolv" && \
-         printf "port=%s\nbind-dynamic\nno-dhcp-interface=\nno-hosts\ncache-size=1000\nresolv-file=%s\nconf-dir=%s\nlog-facility=/dev/null\n" \
-           "$dns_port" "$resolv" "$conf_dir" > "$dnsmasq_conf" && \
+         mkdir -p "$conf_dir" && \
+         # ``server=10.2.0.1@$iface`` -- NOT a resolv-file. Proton's peer DNS
+         # is only reachable through the tunnel; an unbound query follows the
+         # main table and egresses via WAN, where 10.2.0.1 is unroutable, so
+         # every lookup times out while the tunnel itself looks healthy.
+         # Must stay in sync with _start_proton_wg_dnsmasq().
+         printf "port=%s\nbind-dynamic\nno-dhcp-interface=\nno-hosts\ncache-size=1000\nserver=10.2.0.1@%s\nconf-dir=%s\nlog-facility=/dev/null\n" \
+           "$dns_port" "$iface" "$conf_dir" > "$dnsmasq_conf" && \
          /usr/sbin/dnsmasq -C "$dnsmasq_conf" \
         ) &
     done
