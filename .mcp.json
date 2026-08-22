@@ -4,6 +4,11 @@
       "type": "stdio",
       "command": "bash",
       "args": ["-c", "source venv/bin/activate && cd backend && python -m mcp_server"]
+    },
+    "playwright": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest"]
     }
   }
 }
