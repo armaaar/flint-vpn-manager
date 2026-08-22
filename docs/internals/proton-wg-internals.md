@@ -100,4 +100,4 @@ The MSS clamp's idempotency depends on its self-cleaning sweep matching the rule
 
 ## Device registration names
 
-Proton cert registrations use `"Flint VPN Manager-{profile_name}"` as the device name. Since persistent certs cannot be deleted via the VPN API (requires `password` scope, returns 403 with VPN token), meaningful names matter. Cleanup is only possible through the Proton web dashboard at account.protonvpn.com → Downloads → WireGuard configurations.
+Proton cert registrations use `"FlintVPN-{profile_name}"` as the device name (see `_register_persistent_cert`; a name already starting with `FlintVPN` is passed through unprefixed). Since persistent certs cannot be deleted via the VPN API (requires `password` scope, returns 403 with VPN token), meaningful names matter. Cleanup is only possible through the Proton web dashboard at account.protonvpn.com → Downloads → WireGuard configurations.

@@ -1,6 +1,6 @@
 # MCP Server
 
-Flint VPN Manager ships with an optional [Model Context Protocol](https://modelcontextprotocol.io/) server that exposes 40+ tools to any MCP-compatible client — Claude Desktop, Claude Code, Cursor, or a custom client over stdio. It lets an AI agent operate every feature of the app without the human needing to click through the UI.
+Flint VPN Manager ships with an optional [Model Context Protocol](https://modelcontextprotocol.io/) server that exposes 52 tools to any MCP-compatible client — Claude Desktop, Claude Code, Cursor, or a custom client over stdio. It lets an AI agent operate every feature of the app without the human needing to click through the UI.
 
 The paired [flint-vpn-manager skill](../skills/flint-vpn-manager/) documents each tool, explains when to use MCP vs. raw SSH, and gives operational best practices. If you're setting up MCP to use with Claude, install the skill too:
 

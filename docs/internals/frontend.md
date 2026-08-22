@@ -53,7 +53,6 @@ src/
 │       │   ├── GeneralTab.svelte        # Router IP, alternative routing
 │       │   ├── ServersTab.svelte        # Auto-optimize, server preferences
 │       │   ├── AdblockTab.svelte        # Blocklist presets, custom URLs/domains, domain viewer
-│       │   ├── SessionsTab.svelte       # Active VPN sessions list
 │       │   └── SecurityTab.svelte       # Update credentials, change master password
 │       │
 │       ├── lan/

@@ -83,22 +83,22 @@ Notes:
 
 ## Sync Mechanisms
 
-### `build_profile_list(router, store_data, proton)` — `vpn_service.py`
+### `build_profile_list(router, proton, healer, store_data)` — `services/profile_list_builder.py`
 Single function that produces the canonical profile list. Iterates `router.get_flint_vpn_rules()` first, merges in local UI metadata by stable `(vpn_protocol, peer_id|client_id)` key (so renamed sections still match), resolves server info live via `_resolve_server_live(proton, ...)`. Final output is sorted by `display_order`. Detects:
 - **Ghost profiles**: local profile whose router rule was deleted → `_ghost: true`, `health: red`
 - **Orphan profiles**: router rule with no matching local metadata → `_orphan: true`
 - **Anonymous-section healing**: GL.iNet UI replaces `fvpn_rule_9001` with `@rule[N]` → self-healed via `uci rename`
 
-### `_build_devices_live(router)` — `app.py`
-Live device list. 5-second TTL cache. Hostname fallback: DHCP → gl-clients `name` → MAC.
+### `DeviceService.build_devices_live()` — `services/device_service.py`
+Live device list. 5-second TTL cache (`get_devices_cached`). Hostname fallback: DHCP → gl-clients `name` → MAC.
 
-### `_resolve_device_assignments(router, store_data)` — `app.py`
+### `DeviceService.resolve_assignments(store_data)` — `services/device_service.py`
 Merges router VPN assignments (from `from_mac`) with local non-VPN assignments.
 
-### `_sync_noint_to_router()` — `app.py`
-Delegates to `noint_sync.sync_noint_to_router`. Manages the `fvpn_noint_ips` ipset + `fvpn_noint_block` firewall rule for NoInternet groups.
+### `VPNService.sync_noint_to_router()` — `services/vpn_service.py`
+Delegates to `router/noint_sync.py`'s `sync_noint_to_router`. Manages the `fvpn_noint_ips` ipset + `fvpn_noint_block` firewall rule for NoInternet groups.
 
-### SSE stream — `api_stream()` in `app.py`
+### SSE stream — `api_stream()` in `routes/stream.py`
 Every 10 seconds pushes: `tunnel_health`, `kill_switch`, `profile_names`, `server_info`, `smart_protocol_status`, `devices`. Requires unlock (401 when locked).
 
 ### Auto-optimizer — `auto_optimizer.py`

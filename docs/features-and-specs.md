@@ -80,10 +80,9 @@ The frontend never persists transient state. Loading spinners come from `health:
 
 ---
 
-## Location & Sessions
+## Router WAN IP
 
-- **Location/IP check** — sidebar widget showing the current public IP, country, and ISP as seen by ProtonVPN's `/vpn/v1/location` endpoint. Click to refresh. Cached for 30 seconds; cache invalidated on tunnel connect/disconnect. Shows error state with retry link on failure.
-- **Active sessions** — Settings modal section showing all currently connected VPN sessions on the Proton account with exit IP and protocol. Shows `N/M slots used` (M derived from account tier: 10 for Plus, 1 for Free).
+- **Router IP widget** — sidebar widget showing the router's public IPv4 and IPv6, probed from the router itself (`GET /api/router-ip` → `RouterFirewall.get_wan_public_ips()`, which runs `curl -s4/-s6 https://api.ipify.org` over SSH). This reflects the router's WAN egress, not any tunnel exit and not the management host's egress. Cached for 30 seconds (plain TTL — nothing else invalidates it, so a tunnel change can take up to 30s to show).
 
 ---
 
@@ -214,8 +213,8 @@ POST   /api/refresh                     → trigger device tracker poll + server
 POST   /api/probe-latency              → TCP latency probe from router {server_ids:[]} → {latencies:{id:ms}}
 GET    /api/stream                      → SSE: live state push (10s tick)
 
-GET    /api/location                    → current public IP/country/ISP via Proton (30s cache)
-GET    /api/sessions                    → active VPN sessions {sessions:[], max_connections: int}
+GET    /api/router-ip                   → router WAN {ipv4, ipv6} probed from the router (30s cache)
+GET    /api/vpn-status                  → Proton account/session status (login state, tier, list freshness)
 GET    /api/available-ports             → available VPN ports per protocol
 
 GET    /api/logs                        → list log files

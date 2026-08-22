@@ -155,7 +155,7 @@ See [router-layer-internals.md](router-layer-internals.md) for the full design, 
 
 ### `routes/` — Flask Blueprints
 
-Seven blueprints, one per route domain. Each imports shared helpers from `routes/_helpers.py` (the `require_unlocked` decorator, service getters, location cache). No business logic — routes parse requests, delegate to services, and format responses.
+Eight blueprints, one per route domain. Each imports shared helpers from `routes/_helpers.py` (the `require_unlocked` decorator, service getters, location cache). No business logic — routes parse requests, delegate to services, and format responses.
 
 | Blueprint | Routes | Purpose |
 |-----------|--------|---------|
@@ -166,6 +166,7 @@ Seven blueprints, one per route domain. Each imports shared helpers from `routes
 | `settings.py` | 12 | App settings, server prefs, adblock, credentials |
 | `stream.py` | 1 | SSE live updates (10s tick: health, devices, smart protocol) |
 | `logs.py` | 3 | Log file listing, reading, clearing |
+| `vpn_bypass.py` | 8 | VPN bypass exception CRUD, custom presets, dnsmasq-full install |
 
 ### `services/` — Business Logic
 

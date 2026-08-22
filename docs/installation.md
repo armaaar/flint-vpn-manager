@@ -24,7 +24,9 @@ Full setup for Flint VPN Manager. If you're just skimming, the [README quick-sta
 This project does **not** re-implement the ProtonVPN authentication stack. Instead it reuses the official `proton-vpn-api-core` library plus the system keyring (D-Bus secret service) that the ProtonVPN Linux desktop app sets up. In practice this means:
 
 1. **Install the official ProtonVPN Linux desktop app** on the host before installing this project. See the [ProtonVPN Linux download page](https://protonvpn.com/support/official-linux-vpn-ubuntu/) for your distribution. It installs `proton-vpn-api-core` system-wide and wires up the secret service.
-2. **You do not need to log in via the GTK app** — Flint VPN Manager does its own login flow. But the libraries and D-Bus services the GTK app installs are what let `proton-vpn-api-core` work.
+2. **You must log in once via the ProtonVPN app** (or another client using the same libraries). Flint VPN Manager has **no login endpoint of its own** — `ProtonAPI.login()` exists in the code but no route calls it. The app reads whatever session `proton-vpn-api-core` finds in the keyring. The credentials stored in `secrets.enc` are *not* used to authenticate to Proton.
+
+   Without a valid keyring session the app still runs and every router-side feature works (tunnels keep running on their persistent certs, device routing, LAN access, adblock, VPN bypass). What you lose is anything needing the Proton API: server names in the UI, server switching, creating VPN groups, the auto-optimizer, and certificate renewal.
 3. **The Python venv must be created with `--system-site-packages`** so that `import proton_vpn_api_core` picks up the system-wide install. A normal isolated venv will not work.
 4. **A ProtonVPN account** (free or paid). 2FA is supported.
 

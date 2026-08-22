@@ -24,8 +24,7 @@ A local web dashboard for managing ProtonVPN WireGuard and OpenVPN profiles on a
 - **DNS Ad Blocker**: per-group DNS-level ad/tracker/malware blocking via second dnsmasq instance with community blocklists (OISD). Stacks with NetShield.
 - **LAN access control**: create/delete networks, per-network isolation, cross-network access rules with device exceptions, enforced via separate subnets and fw3 zone forwarding
 - **NetShield status**: prominent protection-level display on group cards (active indicator when connected)
-- **Location/IP check**: sidebar widget showing current public IP, country, and ISP as seen by ProtonVPN
-- **Active sessions**: view all connected VPN sessions on the Proton account with exit IP and protocol
+- **Router WAN IP**: sidebar widget showing the router's public IPv4/IPv6, probed from the router itself
 - **Live dashboard**: SSE-powered real-time tunnel health, device status, speeds
 - **Disaster recovery**: local state backed up to router, auto-restored on unlock
 - **GL.iNet compatible**: configs visible in the router's native dashboard as fallback
