@@ -8,6 +8,15 @@ The raw ``ssh`` handle is kept only for ubus, cat, and iwinfo commands.
 import json
 
 
+def _is_wifi_iface(iface: str) -> bool:
+    """True for a gl-clients / iwinfo wireless band label.
+
+    Covers "2.4G", "5G" and their guest variants ("5G_Guest"). Wired clients
+    report "cable"; ARP-derived values are bridge names ("guest", "fvpn_iot").
+    """
+    return "2.4G" in iface or "5G" in iface
+
+
 class RouterDevices:
     """Facade for device management on the GL.iNet Flint 2."""
 
@@ -184,11 +193,16 @@ class RouterDevices:
                         state = parts[idx + 2] if idx + 2 < len(parts) else ""
                     except (ValueError, IndexError):
                         continue
+                    ip = parts[0]
+                    # Skip IPv6 rows. A departed device leaves its link-local
+                    # fe80:: entry sitting in STALE long after the IPv4 entry has
+                    # gone FAILED, which would otherwise resurrect it as "online".
+                    if ":" in ip and ip.count(":") > 1:
+                        continue
                     if mac not in result:
                         result[mac] = {}
-                    ip = parts[0]
                     # Store IP from ARP for devices without a DHCP lease
-                    if ip and ":" not in ip and not result[mac].get("ip"):
+                    if ip and not result[mac].get("ip"):
                         result[mac]["ip"] = ip
                     if state in ("REACHABLE", "STALE", "DELAY", "PROBE"):
                         result[mac]["online"] = True
@@ -197,7 +211,11 @@ class RouterDevices:
         except Exception:
             pass
 
-        # WiFi signal strength + band detection from iwinfo
+        # WiFi association (iwinfo assoclist) — signal strength, band, and the
+        # authoritative presence check for wireless clients. `associated` stays
+        # None if the query fails, so a failed probe never mass-marks devices
+        # offline; it only becomes a set once we have a real answer.
+        associated = None
         try:
             raw = self._ssh.exec(
                 "for iface in $(iwinfo 2>&1 | grep ESSID | awk '{print $1}'); do "
@@ -205,16 +223,21 @@ class RouterDevices:
             )
             current_mac = None
             current_iface = ""
+            seen_iface_marker = False
+            found = set()
             for line in raw.strip().splitlines():
                 line = line.strip()
                 if line.startswith("IFACE:"):
                     current_iface = line.split(":", 1)[1]
+                    seen_iface_marker = True
                     continue
                 if "dBm" in line and len(line) > 17 and line[2] == ":":
                     parts = line.split()
                     current_mac = parts[0].lower()
+                    found.add(current_mac)
                     if current_mac not in result:
                         result[current_mac] = {}
+                    result[current_mac]["online"] = True
                     try:
                         result[current_mac]["signal_dbm"] = int(parts[1])
                     except (ValueError, IndexError):
@@ -230,8 +253,22 @@ class RouterDevices:
                         result[current_mac]["link_speed_mbps"] = speed
                     except (ValueError, IndexError):
                         pass
+            # Only trust the result if the loop actually ran over real output.
+            if seen_iface_marker:
+                associated = found
         except Exception:
             pass
+
+        # A wireless client that is not in any assoclist is not on the network,
+        # whatever gl-clients or a lingering ARP entry still claims. gl-clients
+        # keeps departed clients in its list indefinitely, so without this a
+        # device that left months ago can still render as connected.
+        if associated is not None:
+            for mac, info in result.items():
+                if mac in associated:
+                    continue
+                if _is_wifi_iface(info.get("iface", "")):
+                    info["online"] = False
 
         return result
 

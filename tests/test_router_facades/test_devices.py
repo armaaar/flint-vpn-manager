@@ -68,6 +68,56 @@ class TestGetClientDetails:
         assert "aa:bb:cc:dd:ee:ff" in result
         assert "02:10:18:7a:fe:7c" not in result
 
+    def test_stale_wifi_client_is_offline(self, devices, ssh, iproute):
+        """A departed WiFi client lingers in gl-clients and in the IPv6 neighbor
+        table; neither may resurrect it as online once it has left the AP."""
+        ssh.exec.side_effect = [
+            '{"clients": {"02:31:3E:2E:52:27": {"name": "iPhone", "online": false,'
+            ' "iface": "5G_Guest", "ip": "192.168.9.244"}}}',
+            "",  # gl-client config
+            "IFACE:rax1\n",  # guest radio: no station connected
+        ]
+        iproute.neigh_show.return_value = (
+            "192.168.9.244 dev br-guest FAILED\n"
+            "fe80::c8b:979c:2c2d:cab6 dev br-guest lladdr 02:31:3e:2e:52:27 STALE\n"
+        )
+        result = devices.get_client_details()
+        assert result["02:31:3e:2e:52:27"]["online"] is False
+
+    def test_assoclist_overrides_stale_gl_clients_offline_flag(self, devices, ssh, iproute):
+        """gl-clients can lag behind; assoclist is authoritative for WiFi."""
+        ssh.exec.side_effect = [
+            '{"clients": {"AA:BB:CC:DD:EE:FF": {"name": "Phone", "online": false, "iface": "5G"}}}',
+            "",
+            "IFACE:rax0\nAA:BB:CC:DD:EE:FF  -42 dBm / unknown (SNR -42)  0 ms ago\n",
+        ]
+        iproute.neigh_show.return_value = ""
+        result = devices.get_client_details()
+        assert result["aa:bb:cc:dd:ee:ff"]["online"] is True
+        assert result["aa:bb:cc:dd:ee:ff"]["signal_dbm"] == -42
+
+    def test_wired_client_unaffected_by_assoclist(self, devices, ssh, iproute):
+        """Cable clients never appear in an assoclist — they must not be culled."""
+        ssh.exec.side_effect = [
+            '{"clients": {"04:7C:16:BB:8B:D4": {"name": "PC", "online": true, "iface": "cable"}}}',
+            "",
+            "IFACE:rax0\n",  # no stations
+        ]
+        iproute.neigh_show.return_value = ""
+        result = devices.get_client_details()
+        assert result["04:7c:16:bb:8b:d4"]["online"] is True
+
+    def test_iwinfo_failure_does_not_mark_wifi_offline(self, devices, ssh, iproute):
+        """If the assoclist probe fails we have no answer — keep prior state."""
+        ssh.exec.side_effect = [
+            '{"clients": {"AA:BB:CC:DD:EE:FF": {"name": "Phone", "online": true, "iface": "5G"}}}',
+            "",
+            Exception("iwinfo failed"),
+        ]
+        iproute.neigh_show.return_value = ""
+        result = devices.get_client_details()
+        assert result["aa:bb:cc:dd:ee:ff"]["online"] is True
+
     def test_handles_gl_clients_error(self, devices, ssh, iproute):
         ssh.exec.side_effect = Exception("ubus failed")
         iproute.neigh_show.side_effect = Exception("neigh failed")

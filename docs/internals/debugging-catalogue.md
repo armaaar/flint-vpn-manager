@@ -285,6 +285,13 @@ Related docs: [router-features-translation.md](router-features-translation.md), 
 - **Debug**: `ip neigh show` revealed the WAN-side entry.
 - **Fix**: `if not dev.startswith("br-"): continue` filter in both the IPv4 ARP parser and IPv6 NDP parser.
 
+#### Departed WiFi client stuck "online" forever `ACTIVE`
+- **Symptom**: An iPhone last seen on the guest network in April 2026 still rendered as connected in September — no DHCP lease, no association.
+- **Root cause**: two caches conspiring. `ubus call gl-clients list` **never evicts** departed clients (it keeps them with `online: false` indefinitely), and the ARP block in `get_client_details()` did not skip IPv6 rows. A departed device's IPv4 neighbour entry goes `FAILED` (no `lladdr`, so it parsed as a skip), but its **link-local `fe80::` entry sits in `STALE` for months** — that row has an `lladdr`, is on a `br-*` bridge, and `STALE` was in the online-state list, so it flipped `online = True`.
+- **Debug**: `iwinfo ra1 assoclist` / `iwinfo rax1 assoclist` → "No station connected", while the dashboard said otherwise. `ip neigh show | grep <mac>` showed the `FAILED` v4 entry beside the `STALE` v6 one.
+- **Fix**: (1) skip IPv6 rows in the ARP block, matching `get_arp_neighbors`; (2) **`iwinfo assoclist` is now authoritative for wireless clients** — any MAC on a WiFi band iface (`_is_wifi_iface`) that is absent from every assoclist is forced `online = False`. Guarded by an `associated is not None` sentinel so a failed `iwinfo` probe never mass-marks devices offline.
+- **Invariant**: **`gl-clients` and ARP are hints; the AP association table is ground truth for WiFi presence.** Wired clients never appear in an assoclist, so the cull only applies to `2.4G`/`5G` ifaces.
+
 #### "Offline (never)" for all offline devices `ACTIVE`
 - **Symptom**: Every offline device showed "Offline (never)" in the dashboard.
 - **Root cause**: `DeviceService.build_devices_live()` hardcoded `d["last_seen"] = None` — legacy field, not tracked.
@@ -439,6 +446,10 @@ Paste-ready reminders to skim before acting on the router.
 - **Tunnel MTU is per-protocol** (`PROTO_DEFAULT_MTU`: WG 1420 / wg-tcp 1380 / wg-tls 1320), persisted as `FVPN_MTU=N` in the `.env`, applied via `ip link set mtu` on `start_proton_wg_tunnel`. Override per-profile via `options.mtu`. Never go below 1280 (IPv6 floor).
 - **Fixed-MSS clamp is required for wg-tls**, not fw3's `--clamp-mss-to-pmtu`. ICMP "Packet Too Big" is unreliable inside Proton's TLS framing, so PMTUD breaks. We emit explicit `TCPMSS --set-mss (mtu-40 / mtu-60)` rules at `-I FORWARD 1` from `mangle_rules.sh`.
 - **Any iptables `--comment` used by self-cleaning sweeps must be space-free** (use `fvpn-foo-bar`, not `fvpn foo bar`). `iptables-save` quotes spaced comments and word-splitting on `-S` output then breaks the sweep silently → duplicates accumulate per reconnect.
+
+### Devices
+- **`iwinfo <iface> assoclist` is the only authority on WiFi presence.** `gl-clients` retains departed clients forever; ARP/NDP entries linger in `STALE`.
+- **A departed device's `fe80::` neighbour entry outlives its IPv4 one by months.** Never infer liveness from an IPv6 row.
 
 ### DNS
 - **Main dnsmasq uses `conf-dir=/tmp/dnsmasq.d`** on Flint 2 — `/etc/dnsmasq.d/` is ignored.
