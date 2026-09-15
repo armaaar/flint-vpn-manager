@@ -13,6 +13,10 @@ export function isOnline(d: Device): boolean {
 }
 
 export function isStale(d: Device): boolean {
+  // `last_seen` comes from the router's `online_time`, which for a connected
+  // device is when its *current* session started — not when it was last seen.
+  // A long-lived session would otherwise render an online device as stale.
+  if (isOnline(d)) return false;
   const t = parseUTC(d.last_seen);
   if (!t) return false;
   return (Date.now() - t.getTime()) / 1000 > 86400 * 30;
