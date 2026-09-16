@@ -738,7 +738,7 @@ Each exception contains rule_blocks. Rules **within** a block are ANDed (one ipt
 7. **Domain rules** — write `/tmp/dnsmasq.d/fvpn_bypass.conf` with `ipset=/riotgames.com/pvp.net/.../fvpn_byp_<id>_bN`. **Requires `dnsmasq-full`** (installable via UI). Changes to `ipset=` need a full `/etc/init.d/dnsmasq restart` (SIGHUP isn't enough).
 
 ### Presets
-Built-in: `lol` (League of Legends) and `valorant`, both bundling Riot AS6507+AS62830 CIDRs + domains + ports. Users can create custom presets stored in `config.json.vpn_bypass.custom_presets`.
+Built-in: `lol` (League of Legends) and `valorant`, both bundling Riot AS6507+AS62830 CIDRs + domains + ports; `milesandmore` (Lufthansa Miles & More), domain-only — each Cloudflare zone has its own anycast pair, so a domain rule stays narrow while a CIDR over `104.18.0.0/16` would sweep in unrelated zones. Users can create custom presets stored in `config.json.vpn_bypass.custom_presets`.
 
 ### Inspect
 ```sh

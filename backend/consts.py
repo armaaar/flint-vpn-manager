@@ -155,6 +155,38 @@ VPN_BYPASS_PRESETS: dict[str, dict] = {
             },
         ],
     },
+    # Miles & More / Lufthansa is fronted by Cloudflare Bot Management. The OAuth
+    # login host (account.miles-and-more.com) serves a managed challenge that never
+    # clears from a ProtonVPN exit IP, so the login page 403s with "Just a moment...".
+    #
+    # Domain rules only. Each zone gets its own Cloudflare anycast pair (account ->
+    # 104.18.4.123/5.123, www -> 104.18.24.236/25.236, ...), so a domain rule puts
+    # only that zone's IPs in the bypass ipset. A CIDR rule over 104.18.0.0/16 would
+    # sweep in every unrelated zone in the same block.
+    #
+    # Deliberately NOT included: challenges.cloudflare.com. The cf_clearance cookie
+    # that actually unblocks the site is issued same-origin, by
+    # account.miles-and-more.com/cdn-cgi/challenge-platform/, which the domain rule
+    # below already covers. challenges.cloudflare.com only serves the widget and its
+    # own telemetry. Bypassing it would route Turnstile traffic for *every* site on
+    # the network out the WAN while those sites stay on the tunnel.
+    "milesandmore": {
+        "name": "Lufthansa Miles & More",
+        "rule_blocks": [
+            {
+                "label": "Miles & More (login, API, account, consent)",
+                "rules": [
+                    {"type": "domain", "value": "miles-and-more.com"},
+                ],
+            },
+            {
+                "label": "Lufthansa (design system assets, booking)",
+                "rules": [
+                    {"type": "domain", "value": "lufthansa.com"},
+                ],
+            },
+        ],
+    },
     "valorant": {
         "name": "Valorant",
         "rule_blocks": [

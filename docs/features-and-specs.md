@@ -102,7 +102,7 @@ Route specific traffic directly via WAN, bypassing VPN tunnels. Useful for apps 
 Multiple exceptions can be stacked on the same targets (e.g., LoL preset + Valorant preset + custom rules on one device).
 
 ### Presets
-Built-in presets (League of Legends, Valorant) bundle IP ranges, domains, and ports for common apps. Users can also create custom presets. Rules are copied from presets into exceptions (not referenced), so editing a preset doesn't affect existing exceptions.
+Built-in presets bundle IP ranges, domains, and ports for common apps: League of Legends and Valorant (games broken by VPN routing), and Lufthansa Miles & More (Cloudflare bot protection 403s the login page from VPN exit IPs). Users can also create custom presets. Rules are copied from presets into exceptions (not referenced), so editing a preset doesn't affect existing exceptions.
 
 ### Routing Mechanism
 Pre-marks matching packets with fwmark `0x8000/0xf000` in a `FVPN_BYPASS` mangle chain that evaluates before tunnel chains in `ROUTE_POLICY`. Tunnel chains see the non-zero mark and skip. Bypass traffic routes via dedicated routing table 1008 with the WAN gateway. Kill switch is unaffected (blackhole routes live in per-tunnel tables, not table 1008).
