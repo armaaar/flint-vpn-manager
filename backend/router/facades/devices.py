@@ -174,7 +174,12 @@ class RouterDevices:
         except Exception:
             pass
 
-        # ARP neighbor table — online fallback for devices on non-lan bridges
+        # ARP neighbor table — online fallback for devices on non-lan bridges.
+        # ``lan_reachable`` collects MACs the kernel has just confirmed on
+        # br-lan; combined with the assoclist below it is how we spot a wired
+        # client (br-lan is the only bridge with physical ports — every
+        # app-created network is bridge_empty with SSID interfaces only).
+        lan_reachable = set()
         try:
             raw = self._iproute.neigh_show()
             for line in raw.strip().splitlines():
@@ -206,6 +211,8 @@ class RouterDevices:
                         result[mac]["ip"] = ip
                     if state in ("REACHABLE", "STALE", "DELAY", "PROBE"):
                         result[mac]["online"] = True
+                    if dev == "br-lan" and state == "REACHABLE":
+                        lan_reachable.add(mac)
                     if "iface" not in result[mac] and dev != "br-lan":
                         result[mac]["iface"] = dev.replace("br-", "")
         except Exception:
@@ -263,9 +270,21 @@ class RouterDevices:
         # whatever gl-clients or a lingering ARP entry still claims. gl-clients
         # keeps departed clients in its list indefinitely, so without this a
         # device that left months ago can still render as connected.
+        #
+        # The exception is a wired client: absent from every assoclist yet
+        # confirmed REACHABLE on br-lan, so it can only be reaching us over a
+        # LAN port. gl-clients caches the last band it ever saw and never
+        # revises it, so a machine that moved from WiFi to Ethernet still
+        # reports "5G" and would otherwise be culled as a ghost. Relabel it
+        # "cable" instead — that is also the only way a wired client gets an
+        # iface at all when gl-clients has no entry for it.
         if associated is not None:
             for mac, info in result.items():
                 if mac in associated:
+                    continue
+                if mac in lan_reachable:
+                    info["iface"] = "cable"
+                    info["online"] = True
                     continue
                 if _is_wifi_iface(info.get("iface", "")):
                     info["online"] = False

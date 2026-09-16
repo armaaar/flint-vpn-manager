@@ -107,6 +107,47 @@ class TestGetClientDetails:
         result = devices.get_client_details()
         assert result["04:7c:16:bb:8b:d4"]["online"] is True
 
+    def test_wired_client_with_stale_wifi_label_is_relabelled(self, devices, ssh, iproute):
+        """gl-clients never revises a cached band: WiFi -> Ethernet still says 5G."""
+        ssh.exec.side_effect = [
+            '{"clients": {"04:7C:16:BB:8B:D4": {"name": "PC", "online": false, "iface": "5G"}}}',
+            "",
+            "IFACE:rax0\n",  # no stations
+        ]
+        iproute.neigh_show.return_value = (
+            "192.168.8.50 dev br-lan lladdr 04:7c:16:bb:8b:d4 REACHABLE\n"
+        )
+        result = devices.get_client_details()
+        assert result["04:7c:16:bb:8b:d4"]["online"] is True
+        assert result["04:7c:16:bb:8b:d4"]["iface"] == "cable"
+
+    def test_wired_client_unknown_to_gl_clients_gets_cable_iface(self, devices, ssh, iproute):
+        """A wired client absent from gl-clients would otherwise have no iface."""
+        ssh.exec.side_effect = [
+            '{"clients": {}}',
+            "",
+            "IFACE:rax0\n",
+        ]
+        iproute.neigh_show.return_value = (
+            "192.168.8.50 dev br-lan lladdr 04:7c:16:bb:8b:d4 REACHABLE\n"
+        )
+        result = devices.get_client_details()
+        assert result["04:7c:16:bb:8b:d4"]["iface"] == "cable"
+
+    def test_stale_arp_does_not_rescue_departed_wifi_client(self, devices, ssh, iproute):
+        """Only REACHABLE counts as wired proof — STALE is what ghosts leave behind."""
+        ssh.exec.side_effect = [
+            '{"clients": {"AA:BB:CC:DD:EE:FF": {"name": "Phone", "online": true, "iface": "5G"}}}',
+            "",
+            "IFACE:rax0\n",
+        ]
+        iproute.neigh_show.return_value = (
+            "192.168.8.50 dev br-lan lladdr aa:bb:cc:dd:ee:ff STALE\n"
+        )
+        result = devices.get_client_details()
+        assert result["aa:bb:cc:dd:ee:ff"]["online"] is False
+        assert result["aa:bb:cc:dd:ee:ff"]["iface"] == "5G"
+
     def test_iwinfo_failure_does_not_mark_wifi_offline(self, devices, ssh, iproute):
         """If the assoclist probe fails we have no answer — keep prior state."""
         ssh.exec.side_effect = [

@@ -143,6 +143,15 @@ Related docs: [router-features-translation.md](router-features-translation.md), 
 
 ### VPN bypass
 
+#### Miles & More login 403s over VPN — Cloudflare Turnstile `ACTIVE`
+- **Symptom**: Lufthansa Miles & More login unusable over VPN. `account.miles-and-more.com/web/de/en/login.html` returned **403** with the Cloudflare interstitial ("Just a moment..." / "Performing security verification"). The homepage `www.miles-and-more.com` usually passed; the OAuth login host was the one that stuck.
+- **Root cause**: Cloudflare Bot Management. The login host runs a Turnstile managed challenge that fails from ProtonVPN exit IPs. Browser trace showed the Private Access Token endpoint `challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/pat/...` returning **401**, then the interactive challenge looping. Intermittent — it cleared on retry, which is why it reads as "sometimes works".
+- **Debug**: `curl` is useless here — Cloudflare 403s curl's TLS fingerprint even from direct WAN, so it can't distinguish an IP block from a bot block. Diagnose with a real browser (Playwright MCP) and read the network log.
+- **Non-causes ruled out**: adblock (`flint_search_blocked_domains miles-and-more` → 0 hits); `brunhild.challenges.cloudflare.com` → `ERR_NAME_NOT_RESOLVED` is benign — that host is deliberately **AAAA-only** (Cloudflare's IPv6 reachability probe) and always fails on IPv4-only paths.
+- **Fix**: `milesandmore` bypass preset ([backend/consts.py](backend/consts.py) `VPN_BYPASS_PRESETS["milesandmore"]`). **Domain rules only** — every host resolves to shared Cloudflare anycast (`104.18.x.x`), so a CIDR rule would drag unrelated sites out of the tunnel.
+- **Why `challenges.cloudflare.com` is in the preset**: the Turnstile widget must egress from the same IP as the page it protects, or Cloudflare rejects the clearance. It is its own rule block because bypassing it is network-wide: *other* Turnstile-protected sites then solve their challenge from the WAN IP while the site itself is on VPN — the same mismatch, inverted. Drop that block if other sites start failing.
+- **Login flow hosts** (from the browser trace): `account.miles-and-more.com` (OAuth login + MFA), `www.miles-and-more.com` (`redirect_uri`), `api.miles-and-more.com`, `consent.msp.miles-and-more.com` (`target_url`), `www.lufthansa.com` (design-system CSS/JS), `challenges.cloudflare.com`. A single `ipset=/miles-and-more.com/` covers the domain and all subdomains.
+
 #### LoL chat still broken despite CIDR + domain rules `ACTIVE`
 - **Symptom**: League of Legends game worked but chat didn't. `chat.euw1.lol.riotgames.com` resolved to a Cloudflare IP (`172.65.223.136`) not on Riot's AS6507. ProtonVPN DNS returned NXDOMAIN for some Riot chat subdomains.
 - **Fix**: LoL preset ([backend/consts.py](backend/consts.py) `VPN_BYPASS_PRESETS["lol"]`) got a third OR-block: `port 5222:5223 TCP` (XMPP chat). This bypasses the standard XMPP ports without tying to unstable Cloudflare ranges.
@@ -291,6 +300,14 @@ Related docs: [router-features-translation.md](router-features-translation.md), 
 - **Debug**: `iwinfo ra1 assoclist` / `iwinfo rax1 assoclist` → "No station connected", while the dashboard said otherwise. `ip neigh show | grep <mac>` showed the `FAILED` v4 entry beside the `STALE` v6 one.
 - **Fix**: (1) skip IPv6 rows in the ARP block, matching `get_arp_neighbors`; (2) **`iwinfo assoclist` is now authoritative for wireless clients** — any MAC on a WiFi band iface (`_is_wifi_iface`) that is absent from every assoclist is forced `online = False`. Guarded by an `associated is not None` sentinel so a failed `iwinfo` probe never mass-marks devices offline.
 - **Invariant**: **`gl-clients` and ARP are hints; the AP association table is ground truth for WiFi presence.** Wired clients never appear in an assoclist, so the cull only applies to `2.4G`/`5G` ifaces.
+
+#### Ethernet clients never labelled — and culled as ghosts `ACTIVE`
+- **Symptom**: no device ever appeared under "Ethernet" on the LAN Access page, and a machine moved from WiFi to a LAN port went `online: false` on the dashboard while it was demonstrably reachable.
+- **Root cause**: `iface` came only from `gl-clients`, which **caches the last band it ever saw and never revises it** — a client that moves from WiFi to Ethernet keeps reporting `5G`. The assoclist cull added above then saw a WiFi iface with no association and forced it offline. Separately, the ARP block deliberately skips `dev == "br-lan"` when assigning `iface`, so a wired client `gl-clients` has no entry for ends up with `iface = ""` and falls into the page's "Other" bucket.
+- **Debug**: `ethtool -S lan2 | grep Rx` (**not** `/sys/class/net/lan2/statistics/rx_packets`, which reads 0 on every LAN port — the driver only fills the switch MIB counters) plus `ip neigh show dev br-lan` and `iwinfo <iface> assoclist`.
+- **Fix**: a MAC confirmed `REACHABLE` on `br-lan` that is in no assoclist can only be reaching us over a LAN port — relabel it `cable` and keep it online instead of culling it. `br-lan` is the only bridge with physical ports; every app-created network is `bridge_empty` with SSID interfaces only.
+- **Invariant**: **only `REACHABLE` is wired proof.** `STALE`/`DELAY`/`PROBE` are exactly what a departed WiFi client leaves behind, so widening the state list re-opens the ghost bug above.
+- **Invariant**: **the Linux bridge FDB cannot see wired clients on this router.** `brctl showmacs br-lan` lists MACs on the `ra*`/`rax*` WiFi ports only — MAC learning for `lan1`–`lan5` happens in the MT7531 ASIC and never reaches the kernel. Don't reach for `brctl`/`bridge fdb` to detect wired presence.
 
 #### "Offline (never)" for all offline devices `ACTIVE`
 - **Symptom**: Every offline device showed "Offline (never)" in the dashboard.
@@ -450,6 +467,8 @@ Paste-ready reminders to skim before acting on the router.
 ### Devices
 - **`iwinfo <iface> assoclist` is the only authority on WiFi presence.** `gl-clients` retains departed clients forever; ARP/NDP entries linger in `STALE`.
 - **A departed device's `fe80::` neighbour entry outlives its IPv4 one by months.** Never infer liveness from an IPv6 row.
+- **`gl-clients` never revises a client's `iface`.** It is the last band ever seen, so it stays `5G` after the device moves to Ethernet. Wired clients are identified by a `REACHABLE` br-lan ARP entry with no assoclist match.
+- **Per-port `rx_packets` under `/sys/class/net/lanN/statistics/` is always 0** on the Flint 2. Use `ethtool -S lanN` (`RxUnicast`/`RxMulticast`/`RxBroadcast`) for real switch counters.
 
 ### DNS
 - **Main dnsmasq uses `conf-dir=/tmp/dnsmasq.d`** on Flint 2 — `/etc/dnsmasq.d/` is ignored.
