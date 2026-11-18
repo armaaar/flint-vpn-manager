@@ -439,6 +439,74 @@ def build_dnsmasq_snippet(entries: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
+_MAC_RE = re.compile(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$")
+
+
+def build_presence_command(gateway_ips: list[str]) -> str:
+    """One SSH round trip: WiFi associations, live wired neighbours, DHCP
+    leases and conntrack flows towards the VPN gateway(s)."""
+    gws = [g for g in gateway_ips if _is_ipv4(g)]
+    ct = (
+        "grep -E ' dst=(" + "|".join(re.escape(g) for g in gws) + ") ' /proc/net/nf_conntrack 2>/dev/null"
+        if gws else "true"
+    )
+    return (
+        "echo @@ASSOC; for i in $(iwinfo 2>/dev/null | awk '/ESSID/{print $1}'); do "
+        "iwinfo $i assoclist 2>/dev/null; done; "
+        "echo @@NEIGH; ip -4 neigh show 2>/dev/null; "
+        "echo @@LEASES; cat /tmp/dhcp.leases 2>/dev/null; "
+        f"echo @@CT; {ct}; true"
+    )
+
+
+def parse_presence(raw: str, macs: list[str], gateway_ips: list[str]) -> dict:
+    """→ {mac: {"online": bool, "ip": str|None, "own_tunnel": bool}}.
+
+    online: associated to any of the router's WiFi interfaces, or a wired
+    neighbour in a live ARP state (REACHABLE/DELAY/PROBE — STALE lingers
+    for minutes after a device leaves). own_tunnel: a conntrack flow from
+    the device's IP to the VPN gateway, i.e. the device runs its own client
+    (the router's own client connects from 10.250.N.2, never a LAN IP).
+    """
+    want = [m.lower() for m in macs if _MAC_RE.match(m.lower())]
+    section = None
+    assoc: set[str] = set()
+    live_neigh: dict[str, str] = {}
+    leases: dict[str, str] = {}
+    ct_srcs: set[str] = set()
+    for line in (raw or "").splitlines():
+        line = line.strip()
+        if line.startswith("@@"):
+            section = line[2:]
+            continue
+        if not line:
+            continue
+        if section == "ASSOC":
+            m = re.match(r"^((?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})\b", line)
+            if m:
+                assoc.add(m.group(1).lower())
+        elif section == "NEIGH":
+            m = re.match(r"^(\S+) dev \S+ lladdr (\S+) (\S+)", line)
+            if m and m.group(3) in ("REACHABLE", "DELAY", "PROBE"):
+                live_neigh[m.group(2).lower()] = m.group(1)
+            elif m:
+                leases.setdefault(m.group(2).lower(), m.group(1))
+        elif section == "LEASES":
+            parts = line.split()
+            if len(parts) >= 3:
+                leases[parts[1].lower()] = parts[2]
+        elif section == "CT":
+            m = re.search(r"src=(\S+) dst=(\S+) ", line)
+            if m and m.group(2) in gateway_ips:
+                ct_srcs.add(m.group(1))
+    result = {}
+    for mac in want:
+        ip = live_neigh.get(mac) or leases.get(mac)
+        online = mac in assoc or mac in live_neigh
+        result[mac] = {"online": online, "ip": ip, "own_tunnel": bool(ip and ip in ct_srcs)}
+    return result
+
+
 class RouterSplitVpn:
     """Router-side lifecycle for split VPNs (runtime, tunnels, routing, DNS)."""
 
@@ -527,6 +595,11 @@ class RouterSplitVpn:
     def connect_log(self, slot: int, lines: int = 60) -> str:
         d = slot_names(_check_slot(slot))["dir"]
         return self._ssh.exec(f"tail -n {int(lines)} {d}/connect.log 2>/dev/null; true")
+
+    def presence(self, macs: list[str], gateway_ips: list[str]) -> dict:
+        """Presence + own-tunnel state of the given devices (read-only)."""
+        raw = self._ssh.exec(build_presence_command(gateway_ips), timeout=30)
+        return parse_presence(raw, macs, gateway_ips)
 
     # ── Host routing / firewall / DNS ─────────────────────────────────────
 

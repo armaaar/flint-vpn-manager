@@ -28,6 +28,7 @@ import uuid
 from typing import TYPE_CHECKING
 
 import re
+import socket
 
 import persistence.secrets_manager as sm
 import persistence.sops_store as sops
@@ -52,7 +53,10 @@ log = logging.getLogger("flintvpn")
 
 _CONNECTED_STATES = {"CONNECTED", "ESTABLISHED", "UP", "ONLINE"}
 _EDITABLE = ("name", "server", "port", "tunnel_mode", "username", "group_ids",
-             "domains", "cidrs", "use_pushed_routes", "enabled", "auto_connect", "secret_ref")
+             "domains", "cidrs", "use_pushed_routes", "enabled", "auto_connect", "secret_ref",
+             "connect_mode", "presence_macs", "presence_grace_min", "yield_to_device_tunnel")
+_MAC_RE = re.compile(r"^([0-9a-f]{2}:){5}[0-9a-f]{2}$")
+_CONNECT_MODES = ("always", "presence")
 _SECRET_REF_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 # Don't submit a code that expires mid-handshake (emulated client + AD auth)
 _MIN_CODE_LIFETIME = 10
@@ -70,6 +74,9 @@ class SplitVpnService:
         self._monitor: threading.Thread | None = None
         self._stop = threading.Event()
         self._backoff: dict[str, tuple[float, float]] = {}  # id -> (next_try, delay)
+        # presence mode: id -> {"last_present": ts, "state", "code", "devices", "since", "release_at"}
+        self._auto: dict[str, dict] = {}
+        self._gw_cache: dict[str, tuple[float, list[str]]] = {}
 
     # ── Secrets ───────────────────────────────────────────────────────────
 
@@ -154,6 +161,7 @@ class SplitVpnService:
             out["credentials_error"] = str(e)
         out["has_password"] = bool(creds.get("password"))
         out["has_totp"] = bool(creds.get("totp"))
+        out["auto_state"] = self._auto_state_public(vpn)
         if live is not None:
             out["status"] = live
         return out
@@ -209,6 +217,10 @@ class SplitVpnService:
             "enabled": True,
             "auto_connect": True,
             "secret_ref": None,
+            "connect_mode": "always",
+            "presence_macs": [],
+            "presence_grace_min": 5,
+            "yield_to_device_tunnel": True,
             "pushed_routes": [],
             "pushed_dns": [],
         }
@@ -308,6 +320,25 @@ class SplitVpnService:
         vpn["use_pushed_routes"] = bool(vpn.get("use_pushed_routes", True))
         vpn["enabled"] = bool(vpn.get("enabled", True))
         vpn["auto_connect"] = bool(vpn.get("auto_connect", True))
+        mode = str(vpn.get("connect_mode") or "always").lower()
+        if mode not in _CONNECT_MODES:
+            raise ValueError(f"Invalid connect mode: {mode}")
+        vpn["connect_mode"] = mode
+        macs = []
+        for m in vpn.get("presence_macs") or []:
+            m = str(m).strip().lower().replace("-", ":")
+            if not _MAC_RE.match(m):
+                raise ValueError(f"Invalid MAC address: {m}")
+            if m not in macs:
+                macs.append(m)
+        vpn["presence_macs"] = macs
+        if mode == "presence" and not macs:
+            raise ValueError("Pick at least one device for 'only while these devices are home'")
+        grace = int(vpn.get("presence_grace_min") or 5)
+        if not 1 <= grace <= 120:
+            raise ValueError("Grace period must be 1-120 minutes")
+        vpn["presence_grace_min"] = grace
+        vpn["yield_to_device_tunnel"] = bool(vpn.get("yield_to_device_tunnel", True))
 
     @staticmethod
     def _validate_groups(group_ids: list) -> list[str]:
@@ -482,7 +513,15 @@ class SplitVpnService:
         tried = []
         for v in self._vpns():
             vid = v["id"]
-            if not (v.get("enabled") and v.get("auto_connect", True)):
+            if not v.get("enabled"):
+                self._set_auto(vid, "off", "disabled", now=now)
+                continue
+            if not v.get("auto_connect", True):
+                self._set_auto(vid, "off", "disabled", now=now)
+                continue
+            next_try, delay = self._backoff.get(vid, (0.0, _BACKOFF_START))
+            if next_try == float("inf"):
+                self._set_auto(vid, "paused", "manual", now=now)
                 continue
             try:
                 creds = self._credentials(v)
@@ -491,27 +530,108 @@ class SplitVpnService:
                 continue
             if not (creds.get("password") and creds.get("totp")):
                 continue
-            next_try, delay = self._backoff.get(vid, (0.0, _BACKOFF_START))
-            if now < next_try:
-                continue
             try:
                 st = self.router.split_vpn.status(v["slot"])
             except Exception as e:
                 log.warning(f"Split VPN '{v['name']}' status check failed: {e}")
                 continue
-            if _is_connected(st):
-                continue
-            tried.append(vid)
-            log.info(f"Split VPN '{v['name']}' is down — auto-connecting")
-            try:
-                ok = self.connect(vid).get("connected")
-            except Exception as e:
-                log.warning(f"Split VPN '{v['name']}' auto-connect error: {e}")
-                ok = False
-            if not ok:
-                # exponential backoff so a wrong password/secret can't lock the account
-                self._backoff[vid] = (time.time() + delay, min(delay * 2, _BACKOFF_MAX))
+            up = _is_connected(st)
+            want, devices = self._decide(v, up, now)
+            if want and not up:
+                if now < next_try:
+                    continue
+                tried.append(vid)
+                self._set_auto(vid, "connecting", self._auto.get(vid, {}).get("code", "always"),
+                               devices, now=now)
+                log.info(f"Split VPN '{v['name']}' is down — auto-connecting")
+                try:
+                    ok = self.connect(vid).get("connected")
+                except Exception as e:
+                    log.warning(f"Split VPN '{v['name']}' auto-connect error: {e}")
+                    ok = False
+                if not ok:
+                    # exponential backoff so a wrong password/secret can't lock the account
+                    self._backoff[vid] = (time.time() + delay, min(delay * 2, _BACKOFF_MAX))
+                else:
+                    code = "home" if v.get("connect_mode") == "presence" else "always"
+                    self._set_auto(vid, "connected", code, devices, now=time.time())
+            elif not want and up:
+                code = self._auto.get(vid, {}).get("code", "away")
+                why = "is using its own VPN" if code == "own_tunnel" else "left"
+                log.info(f"Split VPN '{v['name']}': presence device {why} — releasing the session")
+                try:
+                    with self._lock:
+                        self.router.split_vpn.disconnect(v["slot"], teardown=True)
+                except Exception as e:
+                    log.warning(f"Split VPN '{v['name']}' release failed: {e}")
         return tried
+
+    # ── Presence mode ("the router steps aside") ─────────────────────────
+
+    def _decide(self, v: dict, up: bool, now: float) -> tuple[bool, list[str]]:
+        """Should the router hold the session right now? Updates auto_state.
+
+        The work account allows one session, so in presence mode the router
+        only holds it while a presence device is home and *not* running its
+        own client; after the devices leave it keeps the session for the
+        grace period (WiFi blips) and then releases it, so the laptop can
+        connect from anywhere without being kicked.
+        """
+        vid = v["id"]
+        if v.get("connect_mode") != "presence":
+            self._set_auto(vid, "connected" if up else "connecting", "always", now=now)
+            return True, []
+        macs = v.get("presence_macs") or []
+        if not macs:
+            self._set_auto(vid, "standby", "no_devices", now=now)
+            return False, []
+        try:
+            snap = self.router.split_vpn.presence(macs, self._gateway_ips(v["server"]))
+        except Exception as e:
+            log.warning(f"Split VPN '{v['name']}' presence check failed: {e}")
+            return up, []   # keep whatever we have; never flap on a probe error
+        present = [m for m, d in snap.items() if d["online"]]
+        own = [m for m, d in snap.items() if d["own_tunnel"]]
+        st = self._auto.setdefault(vid, {"last_present": now})
+        if present:
+            st["last_present"] = now
+        if own and v.get("yield_to_device_tunnel", True):
+            self._set_auto(vid, "standby", "own_tunnel", own, now=now)
+            return False, own
+        if present:
+            self._set_auto(vid, "connected" if up else "connecting", "home", present, now=now)
+            return True, present
+        release_at = st.get("last_present", now) + v.get("presence_grace_min", 5) * 60
+        if up and now < release_at:
+            self._set_auto(vid, "releasing", "away", macs, now=now, release_at=release_at)
+            return True, macs
+        self._set_auto(vid, "standby", "away", macs, now=now)
+        return False, macs
+
+    def _set_auto(self, vid: str, state: str, code: str, devices: list[str] | None = None,
+                  now: float | None = None, release_at: float | None = None) -> None:
+        st = self._auto.setdefault(vid, {"last_present": now or time.time()})
+        if st.get("state") != state or st.get("code") != code:
+            st["since"] = int(now or time.time())
+        st.update(state=state, code=code, devices=list(devices or []),
+                  release_at=int(release_at) if release_at else None)
+
+    def _auto_state_public(self, vpn: dict) -> dict | None:
+        st = self._auto.get(vpn["id"])
+        if not st or "state" not in st:
+            return None
+        return {k: st.get(k) for k in ("state", "code", "devices", "since", "release_at")}
+
+    def _gateway_ips(self, server: str) -> list[str]:
+        cached = self._gw_cache.get(server)
+        if cached and time.time() - cached[0] < 600:
+            return cached[1]
+        try:
+            ips = sorted(set(socket.gethostbyname_ex(server)[2]))
+        except OSError:
+            ips = cached[1] if cached else []
+        self._gw_cache[server] = (time.time(), ips)
+        return ips
 
     # ── Runtime install ───────────────────────────────────────────────────
 

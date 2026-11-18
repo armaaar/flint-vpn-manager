@@ -216,3 +216,32 @@ def test_ctl_script_disables_rp_filter_on_veth():
     script = build_ctl_script()
     assert "echo 0 > /proc/sys/net/ipv4/conf/$H/rp_filter" in script
     assert "echo 2 > /proc/sys/net/ipv4/conf/$H/rp_filter" not in script
+
+
+class TestPresence:
+    RAW = """@@ASSOC
+aa:bb:cc:00:00:01  -45 dBm / -95 dBm (SNR 50)  0 ms ago
+@@NEIGH
+192.168.11.231 dev br-fvpn_work lladdr aa:bb:cc:00:00:01 REACHABLE
+192.168.8.50 dev br-lan lladdr aa:aa:aa:aa:aa:01 STALE
+192.168.8.51 dev br-lan lladdr aa:aa:aa:aa:aa:02 REACHABLE
+@@LEASES
+43200 aa:bb:cc:00:00:01 192.168.11.231 WORK-LAPTOP *
+@@CT
+ipv4 2 tcp 6 300 ESTABLISHED src=192.168.8.51 dst=203.0.113.10 sport=5 dport=691 src=203.0.113.10 dst=192.168.0.2 sport=691 dport=5 [ASSURED] mark=0
+ipv4 2 tcp 6 300 ESTABLISHED src=10.250.0.2 dst=203.0.113.10 sport=6 dport=691 src=203.0.113.10 dst=192.168.0.2 sport=691 dport=6 [ASSURED] mark=0
+"""
+
+    def test_parse(self):
+        from router.facades.split_vpn import parse_presence
+        r = parse_presence(self.RAW, ["aa:bb:cc:00:00:01", "aa:aa:aa:aa:aa:01", "aa:aa:aa:aa:aa:02", "bb:bb:bb:bb:bb:bb"],
+                           ["203.0.113.10"])
+        assert r["aa:bb:cc:00:00:01"] == {"online": True, "ip": "192.168.11.231", "own_tunnel": False}
+        assert r["aa:aa:aa:aa:aa:01"]["online"] is False          # STALE != present
+        assert r["aa:aa:aa:aa:aa:02"] == {"online": True, "ip": "192.168.8.51", "own_tunnel": True}
+        assert r["bb:bb:bb:bb:bb:bb"]["online"] is False
+
+    def test_command_only_greps_gateway(self):
+        from router.facades.split_vpn import build_presence_command
+        cmd = build_presence_command(["203.0.113.10", "not-an-ip"])
+        assert "dst=(203\\.0\\.113\\.10) " in cmd and "not-an-ip" not in cmd

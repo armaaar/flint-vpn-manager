@@ -64,6 +64,10 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
         use_pushed_routes: bool = True,
         enabled: bool = True,
         auto_connect: bool = True,
+        connect_mode: str = "always",
+        presence_macs: list[str] | None = None,
+        presence_grace_min: int = 5,
+        yield_to_device_tunnel: bool = True,
     ) -> str:
         """Create a Split VPN (Barracuda CloudGen). Does not connect it.
 
@@ -98,6 +102,14 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
             enabled: Whether routing rules are active
             auto_connect: Connect automatically after unlock and reconnect
                           when the tunnel drops (needs totp_secret)
+            connect_mode: "always", or "presence" = hold the session only while
+                          one of presence_macs is home (the account allows one
+                          session; the router releases it when the laptop leaves
+                          so the laptop's own client can connect elsewhere)
+            presence_macs: device MACs whose presence decides (presence mode)
+            presence_grace_min: minutes to keep the session after they leave
+            yield_to_device_tunnel: stand by while a presence device runs its
+                                    own VPN client
         """
         body: dict = {
             "name": name,
@@ -110,6 +122,10 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
             "use_pushed_routes": use_pushed_routes,
             "enabled": enabled,
             "auto_connect": auto_connect,
+            "connect_mode": connect_mode,
+            "presence_macs": presence_macs or [],
+            "presence_grace_min": presence_grace_min,
+            "yield_to_device_tunnel": yield_to_device_tunnel,
         }
         for key, val in (("username", username), ("password", password),
                          ("master_password", master_password), ("secret_ref", secret_ref),
@@ -133,6 +149,10 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
         use_pushed_routes: bool | None = None,
         enabled: bool | None = None,
         auto_connect: bool | None = None,
+        connect_mode: str | None = None,
+        presence_macs: list[str] | None = None,
+        presence_grace_min: int | None = None,
+        yield_to_device_tunnel: bool | None = None,
         secret_ref: str | None = None,
         password: str | None = None,
         totp_secret: str | None = None,
@@ -160,6 +180,10 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
             use_pushed_routes: Also route networks the server pushes on connect
             enabled: Whether routing rules are active
             auto_connect: Connect automatically / reconnect when it drops
+            connect_mode: "always" or "presence" (see flint_create_split_vpn)
+            presence_macs: device MACs whose presence decides (full list)
+            presence_grace_min: minutes to keep the session after they leave
+            yield_to_device_tunnel: stand by while a device runs its own client
             secret_ref: SOPS entry name for credentials ("" to switch back to
                         app-stored credentials)
             password: New VPN account password (requires master_password)
@@ -178,6 +202,10 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
             "use_pushed_routes": use_pushed_routes,
             "enabled": enabled,
             "auto_connect": auto_connect,
+            "connect_mode": connect_mode,
+            "presence_macs": presence_macs,
+            "presence_grace_min": presence_grace_min,
+            "yield_to_device_tunnel": yield_to_device_tunnel,
             "secret_ref": secret_ref,
         }
         body: dict = {k: v for k, v in fields.items() if v is not None}

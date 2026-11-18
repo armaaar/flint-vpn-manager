@@ -318,3 +318,21 @@ class TestValidation:
         bypass.apply_all([exc], {})
         cmd = _all_exec_calls(ssh)
         assert "multiport" not in cmd
+
+
+def test_unchanged_domain_config_does_not_restart_dnsmasq():
+    """apply_all runs on every unlock; restarting dnsmasq blips DNS for everyone."""
+    from unittest.mock import MagicMock
+    from router.facades.vpn_bypass import RouterVpnBypass
+    ssh = MagicMock()
+    ssh.exec.return_value = ""
+    exc = [{"id": "byp_1", "enabled": True, "scope": "global",
+            "rule_blocks": [{"rules": [{"type": "domain", "value": "example.com"}]}]}]
+    ssh.read_file.return_value = ("# Flint VPN Manager bypass — auto-generated dnsmasq ipset config\n"
+                                  "ipset=/example.com/fvpn_byp_1_b0\n")
+    RouterVpnBypass(MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), ssh).apply_all(exc, {})
+    assert not any("dnsmasq restart" in c.args[0] for c in ssh.exec.call_args_list)
+    ssh.read_file.return_value = None          # first time → must restart
+    ssh.exec.reset_mock()
+    RouterVpnBypass(MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), ssh).apply_all(exc, {})
+    assert any("dnsmasq restart" in c.args[0] for c in ssh.exec.call_args_list)

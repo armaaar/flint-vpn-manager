@@ -274,3 +274,76 @@ class TestRuntime:
         st = env["svc"].runtime_status()
         assert st["installed"] is False
         assert st["files"]["barracudavpn-daemon"] is False
+
+
+class TestPresenceMode:
+    LAPTOP = "aa:bb:cc:00:00:01"
+
+    def _vpn(self, env):
+        vpn = _create(env, connect_mode="presence", presence_macs=[self.LAPTOP.upper()], presence_grace_min=5)
+        env["svc"]._gw_cache["vpn.example.com"] = (10**12, ["1.2.3.4"])
+        return vpn
+
+    def _snap(self, env, online, own=False):
+        env["router"].split_vpn.presence.return_value = {
+            self.LAPTOP: {"online": online, "ip": "192.168.11.231" if online else None, "own_tunnel": own}}
+
+    def test_validates_presence_settings(self, env):
+        with pytest.raises(ValueError, match="at least one device"):
+            _create(env, connect_mode="presence", presence_macs=[])
+        with pytest.raises(ValueError, match="MAC"):
+            _create(env, connect_mode="presence", presence_macs=["nope"])
+
+    def test_connects_when_laptop_home(self, env):
+        vpn = self._vpn(env)
+        self._snap(env, online=True)
+        env["router"].split_vpn.status.return_value = {"state": "DOWN"}
+        env["router"].split_vpn.connect.return_value = {"state": "CONNECTED"}
+        assert env["svc"].check_and_reconnect(now=1000) == [vpn["id"]]
+        assert env["svc"]._auto[vpn["id"]]["state"] == "connected"
+
+    def test_stands_aside_while_laptop_runs_own_client(self, env):
+        vpn = self._vpn(env)
+        self._snap(env, online=True, own=True)
+        env["router"].split_vpn.status.return_value = {"state": "CONNECTED"}
+        assert env["svc"].check_and_reconnect(now=1000) == []
+        env["router"].split_vpn.disconnect.assert_called_once_with(0, teardown=True)
+        st = env["svc"]._auto[vpn["id"]]
+        assert (st["state"], st["code"], st["devices"]) == ("standby", "own_tunnel", [self.LAPTOP])
+
+    def test_keeps_session_during_grace_then_releases(self, env):
+        vpn = self._vpn(env)
+        env["router"].split_vpn.status.return_value = {"state": "CONNECTED"}
+        self._snap(env, online=True)
+        env["svc"].check_and_reconnect(now=1000)            # laptop home
+        self._snap(env, online=False)
+        env["svc"].check_and_reconnect(now=1000 + 120)      # left 2 min ago
+        env["router"].split_vpn.disconnect.assert_not_called()
+        st = env["svc"]._auto[vpn["id"]]
+        assert st["state"] == "releasing" and st["release_at"] == 1000 + 300
+        env["svc"].check_and_reconnect(now=1000 + 301)      # grace over
+        env["router"].split_vpn.disconnect.assert_called_once_with(0, teardown=True)
+
+    def test_never_reconnects_while_away(self, env):
+        vpn = self._vpn(env)
+        self._snap(env, online=False)
+        env["router"].split_vpn.status.return_value = {"state": "DOWN"}
+        assert env["svc"].check_and_reconnect(now=10**6) == []
+        env["router"].split_vpn.connect.assert_not_called()
+        assert env["svc"]._auto[vpn["id"]]["code"] == "away"
+
+    def test_probe_error_keeps_current_state(self, env):
+        vpn = self._vpn(env)
+        env["router"].split_vpn.presence.side_effect = RuntimeError("ssh")
+        env["router"].split_vpn.status.return_value = {"state": "CONNECTED"}
+        env["svc"].check_and_reconnect(now=1000)
+        env["router"].split_vpn.disconnect.assert_not_called()
+
+    def test_auto_state_in_overview(self, env):
+        vpn = self._vpn(env)
+        self._snap(env, online=False)
+        env["router"].split_vpn.status.return_value = {"state": "DOWN"}
+        env["svc"].check_and_reconnect(now=10**6)
+        pub = env["svc"].get_overview(live=False)["vpns"][0]
+        assert pub["auto_state"]["state"] == "standby"
+        assert pub["connect_mode"] == "presence" and pub["presence_macs"] == [self.LAPTOP]

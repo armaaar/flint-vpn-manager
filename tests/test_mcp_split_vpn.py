@@ -78,6 +78,10 @@ def test_create_sends_full_body(setup):
         "use_pushed_routes": True,
         "enabled": True,
         "auto_connect": True,
+        "connect_mode": "always",
+        "presence_macs": [],
+        "presence_grace_min": 5,
+        "yield_to_device_tunnel": True,
     })
 
 

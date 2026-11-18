@@ -105,8 +105,10 @@ class RouterVpnBypass:
         # Write dnsmasq config for domain rules.
         # ipset= directives require a full dnsmasq restart (HUP is not enough).
         # Run in background to avoid blocking unlock (~12-15s on Flint 2).
-        has_domains = self._write_dnsmasq_config(enabled)
-        if has_domains:
+        # Only when the file actually changed: a restart blips DNS for every
+        # device, and this runs on every unlock.
+        changed = self._write_dnsmasq_config(enabled)
+        if changed:
             self._ssh.exec(
                 "/etc/init.d/dnsmasq restart >/dev/null 2>&1 &"
             )
@@ -331,6 +333,7 @@ class RouterVpnBypass:
         """Write dnsmasq ipset config for domain-based bypass rules.
 
         Each block with domain rules gets its own ipset→dnsmasq mapping.
+        Returns True if the file changed (i.e. dnsmasq must be restarted).
         """
         lines = ["# Flint VPN Manager bypass — auto-generated dnsmasq ipset config"]
         has_domains = False
@@ -349,13 +352,18 @@ class RouterVpnBypass:
                 domain_path = "/".join(domains)
                 lines.append(f"ipset=/{domain_path}/{ipset_name}")
 
+        current = self._ssh.read_file(BYPASS_DNSMASQ_CONF)
         if has_domains:
+            content = "\n".join(lines) + "\n"
+            if current is not None and current.strip() == content.strip():
+                return False
             self._ssh.exec("mkdir -p /tmp/dnsmasq.d")
-            self._ssh.write_file(BYPASS_DNSMASQ_CONF, "\n".join(lines) + "\n")
-        else:
-            self._ssh.exec(f"rm -f {BYPASS_DNSMASQ_CONF}")
-
-        return has_domains
+            self._ssh.write_file(BYPASS_DNSMASQ_CONF, content)
+            return True
+        if current is None:
+            return False
+        self._ssh.exec(f"rm -f {BYPASS_DNSMASQ_CONF}")
+        return True
 
     # ── Helpers ─────────────────────────────────────────────────────────
 
