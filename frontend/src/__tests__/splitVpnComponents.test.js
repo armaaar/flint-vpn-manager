@@ -114,3 +114,38 @@ describe('SplitVpnModal', () => {
     expect(onSaved).not.toHaveBeenCalled();
   });
 });
+
+describe('SplitVpnModal presence settings', () => {
+  const DEVICES = [
+    { mac: 'aa:bb:cc:dd:ee:ff', label: 'Work laptop', hostname: 'wl' },
+    { mac: '11:22:33:44:55:66', label: '', hostname: 'pixel' },
+  ];
+
+  it('hides presence fields in always mode and sends connect_mode', async () => {
+    api.updateSplitVpn.mockResolvedValue(VPN);
+    render(SplitVpnModal, { props: { vpn: VPN, profiles: PROFILES, devices: DEVICES } });
+    expect(screen.getByLabelText('Always').checked).toBe(true);
+    expect(screen.queryByLabelText('Release after')).toBeNull();
+    await fireEvent.click(screen.getByText('Save Changes'));
+    await waitFor(() => expect(api.updateSplitVpn).toHaveBeenCalled());
+    const body = api.updateSplitVpn.mock.calls[0][1];
+    expect(body.connect_mode).toBe('always');
+    expect(body).not.toHaveProperty('presence_macs');
+  });
+
+  it('picks presence devices and sends them', async () => {
+    api.updateSplitVpn.mockResolvedValue(VPN);
+    render(SplitVpnModal, { props: { vpn: VPN, profiles: PROFILES, devices: DEVICES } });
+    await fireEvent.click(screen.getByLabelText('Only while these devices are home'));
+    const save = screen.getByText('Save Changes');
+    expect(save.disabled).toBe(true); // no device picked yet
+    await fireEvent.click(screen.getByText('Work laptop'));
+    expect(save.disabled).toBe(false);
+    await fireEvent.input(screen.getByLabelText('Release after'), { target: { value: '10' } });
+    await fireEvent.click(save);
+    await waitFor(() => expect(api.updateSplitVpn).toHaveBeenCalled());
+    expect(api.updateSplitVpn.mock.calls[0][1]).toMatchObject({
+      connect_mode: 'presence', presence_macs: ['aa:bb:cc:dd:ee:ff'], presence_grace_min: 10, yield_to_device_tunnel: true,
+    });
+  });
+});

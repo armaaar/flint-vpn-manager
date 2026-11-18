@@ -1,10 +1,10 @@
 <script lang="ts">
   import { api } from '../../api';
-  import { profiles, showToast } from '../../stores/app';
-  import { createEventDispatcher, onMount } from 'svelte';
+  import { profiles, devices, showToast } from '../../stores/app';
+  import { createEventDispatcher, onDestroy, onMount } from 'svelte';
   import type { SplitVpn, SplitVpnOverview, SplitVpnConnectResult, Profile } from '../../types';
   import { timeAgo } from '../../utils/format';
-  import { unixToIso } from '../../utils/splitVpn';
+  import { unixToIso, splitVpnAutoStatus } from '../../utils/splitVpn';
   import SplitVpnModal from './SplitVpnModal.svelte';
   import SplitVpnConnectModal from './SplitVpnConnectModal.svelte';
   import SplitVpnLogModal from './SplitVpnLogModal.svelte';
@@ -34,7 +34,18 @@
       ]
     : [];
 
+  // Clock for the "Releasing in N min" countdown.
+  let nowSec = Date.now() / 1000;
+  const ticker = setInterval(tick, 30_000);
   onMount(loadData);
+  onDestroy(() => clearInterval(ticker));
+
+  function tick() {
+    nowSec = Date.now() / 1000;
+    // Once a release deadline passes, pick up the new state from the backend.
+    const due = vpns.some(v => v.auto_state?.state === 'releasing' && v.auto_state.release_at && v.auto_state.release_at <= nowSec);
+    if (due && !refreshing) loadData();
+  }
 
   async function loadData() {
     try {
@@ -198,6 +209,7 @@
         {#each vpns as vpn (vpn.id)}
           {@const connected = !!vpn.status?.connected}
           {@const blocked = connectBlockedReason(vpn)}
+          {@const auto = splitVpnAutoStatus(vpn, $devices, nowSec)}
           <div class="vpn-card" class:disabled={!vpn.enabled} class:connected>
             <div class="vpn-main">
               <div class="vpn-title">
@@ -216,6 +228,9 @@
                 {#if vpn.credentials_error}<span class="tag tag-warn" title={vpn.credentials_error}>Credentials unavailable</span>
                 {:else if !vpn.has_totp}<span class="tag tag-warn" title="No TOTP secret stored — a code must be entered on each connect">No TOTP secret</span>{/if}
               </div>
+              {#if auto}
+                <div class="auto-line auto-{auto.tone}" title={vpn.auto_state?.since ? `Since ${new Date(vpn.auto_state.since * 1000).toLocaleString()}` : ''}>{auto.text}</div>
+              {/if}
               <div class="vpn-meta">
                 <span class="mono">{vpn.server}{vpn.port && vpn.port !== 691 ? `:${vpn.port}` : ''}</span>
                 <span class="sep">·</span>
@@ -266,7 +281,7 @@
 </div>
 
 {#if showForm}
-  <SplitVpnModal vpn={editingVpn} profiles={$profiles}
+  <SplitVpnModal vpn={editingVpn} profiles={$profiles} devices={$devices}
     on:saved={handleSaved} on:close={() => { showForm = false; editingVpn = null; }} />
 {/if}
 
@@ -327,6 +342,11 @@
   .status-unknown { background: var(--amber-bg); color: var(--amber); }
   .tag { font-size: .7rem; color: var(--fg3); background: var(--bg3); padding: 1px 6px; border-radius: var(--radius-xs); text-transform: uppercase; letter-spacing: 0.2px; }
   .tag-warn { color: var(--amber); background: var(--amber-bg); }
+
+  .auto-line { align-self: flex-start; max-width: 100%; font-size: .78rem; padding: 1px 8px; border-radius: var(--radius-xs); background: var(--bg3); color: var(--fg2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .auto-on { background: var(--green-bg); color: var(--green); }
+  .auto-pending { background: var(--amber-bg); color: var(--amber); }
+  .auto-standby, .auto-off { color: var(--fg3); }
 
   .group-chips { display: flex; flex-wrap: wrap; gap: 6px; }
   .group-chip {

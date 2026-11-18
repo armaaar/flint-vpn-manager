@@ -1,14 +1,16 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import { api } from '../../api';
-  import type { Profile, SplitVpn } from '../../types';
+  import type { Device, Profile, SplitVpn } from '../../types';
   import {
-    SPLIT_VPN_DEFAULT_PORT, SPLIT_VPN_TUNNEL_MODES,
+    SPLIT_VPN_DEFAULT_PORT, SPLIT_VPN_TUNNEL_MODES, SPLIT_VPN_MIN_GRACE_MIN, SPLIT_VPN_MAX_GRACE_MIN,
     initialSplitVpnForm, buildSplitVpnPayload, splitVpnEligibleGroups, settingSecret,
+    parseGraceMinutes, deviceName,
   } from '../../utils/splitVpn';
 
   export let vpn: SplitVpn | null = null;
   export let profiles: Profile[] = [];
+  export let devices: Device[] = [];
 
   const dispatch = createEventDispatcher<{ saved: SplitVpn; close: void }>();
 
@@ -20,8 +22,19 @@
   $: groups = splitVpnEligibleGroups(profiles);
   $: needsMaster = settingSecret(form);
   $: useSops = form.cred_source === 'sops';
+  $: presence = form.auto_connect && form.connect_mode === 'presence';
+  $: presenceOk = !presence || (form.presence_macs.length > 0 && parseGraceMinutes(form.presence_grace_min) !== null);
+  // Known devices by name, plus any saved presence MAC the router no longer reports.
+  $: presenceDevices = [
+    ...[...devices]
+      .map(d => ({ mac: d.mac.toLowerCase(), name: deviceName(d.mac, devices) }))
+      .sort((a, b) => a.name.localeCompare(b.name)),
+    ...form.presence_macs
+      .filter(m => !devices.some(d => d.mac.toLowerCase() === m))
+      .map(m => ({ mac: m, name: m })),
+  ];
   $: canSave =
-    !!form.name.trim() && !!form.server.trim() &&
+    !!form.name.trim() && !!form.server.trim() && presenceOk &&
     (useSops
       ? !!form.secret_ref.trim()
       : !!form.username.trim() &&
@@ -32,6 +45,17 @@
     form.group_ids = form.group_ids.includes(id)
       ? form.group_ids.filter(g => g !== id)
       : [...form.group_ids, id];
+  }
+
+  function togglePresence(mac: string) {
+    form.presence_macs = form.presence_macs.includes(mac)
+      ? form.presence_macs.filter(m => m !== mac)
+      : [...form.presence_macs, mac];
+  }
+
+  /** Last two MAC octets, to tell same-named devices apart. */
+  function macTail(mac: string): string {
+    return mac.split(':').slice(-2).join(':');
   }
 
   async function save() {
@@ -203,6 +227,59 @@
           <span>Connect automatically and reconnect when the tunnel drops</span>
         </label>
 
+        {#if form.auto_connect}
+          <div class="presence-block">
+            <div class="form-group">
+              <span class="field-label">Connect mode</span>
+              <div class="source-choice" role="radiogroup" aria-label="Connect mode">
+                <label class="source-option">
+                  <input type="radio" name="sv-connect-mode" value="always" bind:group={form.connect_mode} />
+                  <span>Always</span>
+                </label>
+                <label class="source-option">
+                  <input type="radio" name="sv-connect-mode" value="presence" bind:group={form.connect_mode} />
+                  <span>Only while these devices are home</span>
+                </label>
+              </div>
+            </div>
+
+            {#if presence}
+              <span class="hint hint-top">The work account allows one session — the router releases it when the laptop leaves so you can connect from outside.</span>
+              <div class="form-group">
+                <span class="field-label required">Devices</span>
+                <div class="group-chips" role="group" aria-label="Presence devices">
+                  {#each presenceDevices as d (d.mac)}
+                    <button type="button" class="group-chip" class:selected={form.presence_macs.includes(d.mac)}
+                      aria-pressed={form.presence_macs.includes(d.mac)} title={d.mac}
+                      on:click={() => togglePresence(d.mac)}>
+                      <span>{d.name}</span>
+                      {#if d.name !== d.mac}<span class="chip-mac">{macTail(d.mac)}</span>{/if}
+                    </button>
+                  {/each}
+                  {#if presenceDevices.length === 0}
+                    <span class="hint">No devices known yet.</span>
+                  {/if}
+                </div>
+              </div>
+
+              <div class="form-group grace-row">
+                <label for="sv-grace">Release after</label>
+                <input id="sv-grace" class="grace-input" type="number" min={SPLIT_VPN_MIN_GRACE_MIN} max={SPLIT_VPN_MAX_GRACE_MIN}
+                  step="1" bind:value={form.presence_grace_min} />
+                <span>minutes away</span>
+              </div>
+
+              <label class="toggle-row">
+                <span class="toggle">
+                  <input type="checkbox" bind:checked={form.yield_to_device_tunnel} />
+                  <span class="toggle-slider"></span>
+                </span>
+                <span>Step aside while a device runs its own VPN client</span>
+              </label>
+            {/if}
+          </div>
+        {/if}
+
         <label class="toggle-row">
           <span class="toggle">
             <input type="checkbox" bind:checked={form.enabled} />
@@ -295,6 +372,14 @@
   .group-chip:hover { border-color: var(--accent); border-left-color: var(--chip-color, var(--accent)); }
   .group-chip.selected { background: var(--accent-bg); color: var(--fg); border-color: var(--accent); border-left-color: var(--chip-color, var(--accent)); font-weight: 600; }
   .chip-icon { font-size: .95rem; line-height: 1; }
+  .field-label.required::after { content: ' *'; color: var(--red); }
+  .chip-mac { font-family: var(--font-mono); font-size: .7rem; color: var(--fg3); }
+
+  .presence-block { margin: -4px 0 12px 48px; }
+  .presence-block .hint-top { display: block; margin-bottom: 10px; }
+  .grace-row { display: flex; align-items: center; gap: 8px; font-size: .825rem; color: var(--fg2); }
+  .grace-row label { margin: 0; }
+  .grace-input { width: 80px; padding: 6px 10px; }
 
   .toggle-row { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; color: var(--fg); font-size: .875rem; cursor: pointer; }
   .toggle { position: relative; display: inline-block; width: 36px; height: 20px; flex-shrink: 0; }

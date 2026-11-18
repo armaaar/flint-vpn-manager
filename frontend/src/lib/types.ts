@@ -250,6 +250,21 @@ export interface SplitVpnStatus {
   error?: string;
 }
 
+export type SplitVpnConnectMode = 'always' | 'presence';
+
+export type SplitVpnAutoStateName = 'connected' | 'standby' | 'releasing' | 'connecting' | 'paused' | 'off';
+export type SplitVpnAutoStateCode = 'home' | 'away' | 'own_tunnel' | 'always' | 'manual' | 'disabled' | 'no_devices';
+
+/** Read-only auto-connect state computed by the backend (why the session is held or released). */
+export interface SplitVpnAutoState {
+  state: SplitVpnAutoStateName;
+  code: SplitVpnAutoStateCode;
+  /** MACs relevant to the reason (e.g. the present laptop, or the device running its own client). */
+  devices: string[];
+  since: number | null;        // unix seconds of the last state change
+  release_at: number | null;   // unix seconds when the session will be released (state "releasing")
+}
+
 export interface SplitVpn {
   id: string;
   type: 'barracuda';
@@ -273,6 +288,12 @@ export interface SplitVpn {
   secret_ref?: string | null;
   credentials_source?: 'app' | 'sops';
   credentials_error?: string | null;
+  /** "always" holds the session; "presence" holds it only while presence_macs are home. */
+  connect_mode?: SplitVpnConnectMode;
+  presence_macs?: string[];        // lowercase MACs
+  presence_grace_min?: number;     // minutes to keep the session after the devices leave
+  yield_to_device_tunnel?: boolean; // stand by while a presence device runs its own client
+  auto_state?: SplitVpnAutoState | null;
   status?: SplitVpnStatus;
 }
 
