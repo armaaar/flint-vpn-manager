@@ -304,7 +304,8 @@ case "$ACT" in
     chown -R root:root $DIR; chmod 700 $DIR
     : > $DIR/daemon.log
     (nsx $BIN/qemu-x86_64 $BIN/barracudavpn-daemon -f -c $DIR -x $DIR/daemon.log </dev/null >/dev/null 2>&1 &)
-    n=0; until daemon_up; do n=$((n+1)); [ $n -gt 40 ] && { echo "ERR: daemon did not start"; exit 7; }; sleep 0.5; done
+    # busybox sleep has no fractions
+    n=0; until daemon_up; do n=$((n+1)); [ $n -gt 20 ] && { echo "ERR: daemon did not start"; exit 7; }; sleep 1; done
     # 'Y' answers the first-contact "Accept Server Cert (Y/N)?" (trust on
     # first use; afterwards the pinned cert must match). Without a TTY the
     # CLI doesn't prompt for secrets, so they are passed as arguments here
