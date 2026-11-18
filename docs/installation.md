@@ -8,7 +8,7 @@ Full setup for Flint VPN Manager. If you're just skimming, the [README quick-sta
 
 ### Router
 
-- **GL.iNet Flint 2 (GL-MT6000)** on firmware **4.8.4**
+- **GL.iNet Flint 2 (GL-MT6000)** on firmware **4.11.0**
 - SSH access enabled with public-key authentication to `root` — see [router-setup.md](router-setup.md)
 - **proton-wg binary installed** (optional — only needed for WireGuard TCP/TLS tunnels on restrictive networks; see [router-setup.md](router-setup.md#install-proton-wg))
 

@@ -49,7 +49,7 @@ Host machine (this repo)             GL.iNet Flint 2 Router
 
 - **Python**: 3.14 with `--system-site-packages` venv (for Proton libs from GTK app)
 - **Node**: v24 via nvm (`export NVM_DIR="$HOME/.nvm" && . "$NVM_DIR/nvm.sh"`)
-- **Router**: GL.iNet Flint 2 (GL-MT6000), firmware 4.8.4, OpenWrt
+- **Router**: GL.iNet Flint 2 (GL-MT6000), firmware 4.11.0, OpenWrt 21.02
 - **SSH**: Key auth (`~/.ssh/id_ed25519` → router root)
 - **ProtonVPN**: Session from GTK app via system keyring. User has 2FA enabled.
 

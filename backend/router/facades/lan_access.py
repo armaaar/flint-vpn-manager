@@ -657,9 +657,11 @@ class RouterLanAccess:
 
     # ── Network CRUD ───────────────────────────────────────────────
 
-    _DAT_PATHS = (
-        "/etc/wireless/mediatek/mt7986-ax6000.dbdc.b0.dat",
-        "/etc/wireless/mediatek/mt7986-ax6000.dbdc.b1.dat",
+    # (radio device, ifname prefix, driver .dat file). mt_wifi reads BssidNum
+    # from the .dat only at module load, hence _reload_wifi_driver().
+    _RADIOS = (
+        ("mt798611", "ra", "/etc/wireless/mediatek/mt7986-ax6000.dbdc.b0.dat"),
+        ("mt798612", "rax", "/etc/wireless/mediatek/mt7986-ax6000.dbdc.b1.dat"),
     )
 
     def enable_network(self, wifi_sections: list[str], net_section: str, enabled: bool) -> None:
@@ -702,16 +704,21 @@ class RouterLanAccess:
         if not _SAFE_IP_RE.match(subnet_ip):
             raise ValueError(f"Invalid subnet IP: {subnet_ip!r}")
 
-        # Increase BssidNum in .dat files
-        bssid_num = self._get_bssid_num()
-        new_num = bssid_num + 1
-        for path in self._DAT_PATHS:
-            self._ssh.exec(
-                f"sed -i 's/^BssidNum={bssid_num}/BssidNum={new_num}/' {path}"
-            )
+        # Pick a free ifname per radio and grow each radio's BssidNum to fit.
+        # Radios are independent: firmware 4.11 added a mesh backhaul AP
+        # (bbss5g on rax3) to 5G only, so the two .dat files diverge.
+        ap_ifaces = self._ap_ifnames_by_radio()
+        new_ifnames = {}
+        bssid_cmds = []
+        for device, prefix, dat_path in self._RADIOS:
+            ifname = f"{prefix}{_next_free_index(prefix, ap_ifaces[device])}"
+            new_ifnames[device] = ifname
+            needed = _required_bssid_num(prefix, ap_ifaces[device] + [ifname])
+            bssid_cmds.append(_set_bssid_num_cmd(dat_path, needed))
+        self._ssh.exec(" ; ".join(bssid_cmds))
 
-        iface_2g = f"ra{bssid_num}"
-        iface_5g = f"rax{bssid_num}"
+        iface_2g = new_ifnames["mt798611"]
+        iface_5g = new_ifnames["mt798612"]
         iso = "1" if isolation else "0"
         zn = f"fvpn_{zone_id}"
 
@@ -787,7 +794,14 @@ class RouterLanAccess:
         if not _SAFE_NAME_RE.match(zone_id):
             raise ValueError(f"Invalid zone ID: {zone_id!r}")
 
-        prefix = zone_id if zone_id.startswith("fvpn_") else f"fvpn_{zone_id}"
+        # Only app-created networks (fvpn_*) can be deleted. Mapping a bare id
+        # like "iot" to "fvpn_iot" would delete a *different* network (GL's
+        # built-in IoT network vs the app's fvpn_iot) — refuse instead.
+        if not zone_id.startswith("fvpn_"):
+            raise ValueError(
+                f"Only networks created by Flint VPN Manager can be deleted (got {zone_id!r})"
+            )
+        prefix = zone_id
         configs = ["wireless", "network", "firewall", "dhcp"]
         cmds = []
         for config in configs:
@@ -799,12 +813,11 @@ class RouterLanAccess:
         if not cmds:
             return
 
-        # Decrement BssidNum in .dat files
-        bssid_num = self._get_bssid_num()
-        if bssid_num > 2:
-            new_num = bssid_num - 1
-            for path in self._DAT_PATHS:
-                cmds.append(f"sed -i 's/^BssidNum={bssid_num}/BssidNum={new_num}/' {path}")
+        # Shrink each radio's BssidNum to what the remaining AP ifaces need
+        ap_ifaces = self._ap_ifnames_by_radio(exclude_prefix=prefix)
+        for device, ifname_prefix, dat_path in self._RADIOS:
+            needed = _required_bssid_num(ifname_prefix, ap_ifaces[device])
+            cmds.append(_set_bssid_num_cmd(dat_path, needed))
 
         cmds.extend([
             "uci commit wireless", "uci commit network",
@@ -834,13 +847,48 @@ class RouterLanAccess:
         except Exception:
             pass  # expected — WiFi drop kills SSH before command returns
 
-    def _get_bssid_num(self) -> int:
-        """Read current BssidNum from the 5G .dat file."""
-        raw = self._ssh.exec(f"grep BssidNum {self._DAT_PATHS[1]} 2>/dev/null || echo 'BssidNum=2'")
-        for line in raw.strip().splitlines():
-            if line.startswith("BssidNum="):
-                return int(line.split("=")[1])
-        return 2
+    def _ap_ifnames_by_radio(self, exclude_prefix: str | None = None) -> dict[str, list[str]]:
+        """AP-mode wifi-iface ifnames per radio, enabled or not.
+
+        Disabled APs still occupy a BSS slot (the firmware's boot-time
+        mtk-wifi-configurator counts them too), and STA ifaces (apcli*)
+        never do.
+        """
+        raw = self._ssh.exec("uci show wireless 2>/dev/null || true")
+        result: dict[str, list[str]] = {device: [] for device, _, _ in self._RADIOS}
+        for name, opts in Uci.parse_show(raw, "wireless").items():
+            if opts.get("_type") != "wifi-iface" or opts.get("mode", "ap") != "ap":
+                continue
+            if exclude_prefix and name.startswith(exclude_prefix):
+                continue
+            device = opts.get("device")
+            if device in result:
+                result[device].append(opts.get("ifname", ""))
+        return result
+
+
+def _ifname_indexes(prefix: str, ifnames: list[str]) -> set[int]:
+    pattern = re.compile(rf"^{re.escape(prefix)}(\d+)$")
+    return {int(m.group(1)) for name in ifnames if (m := pattern.match(name))}
+
+
+def _next_free_index(prefix: str, ifnames: list[str]) -> int:
+    """Lowest ``<prefix>N`` index not already used by an AP iface on the radio."""
+    used = _ifname_indexes(prefix, ifnames)
+    index = 0
+    while index in used:
+        index += 1
+    return index
+
+
+def _required_bssid_num(prefix: str, ifnames: list[str]) -> int:
+    """BssidNum must cover every AP iface and the highest ifname index."""
+    highest = max(_ifname_indexes(prefix, ifnames), default=-1)
+    return max(len(ifnames), highest + 1, 1)
+
+
+def _set_bssid_num_cmd(dat_path: str, num: int) -> str:
+    return f"sed -i 's/^BssidNum=.*/BssidNum={int(num)}/' {dat_path}"
 
 
 def _band_from_device(device_name: str, wireless: dict) -> str:

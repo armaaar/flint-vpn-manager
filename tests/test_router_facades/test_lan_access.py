@@ -385,15 +385,86 @@ class TestSubnetBroadcastForwarding:
         remove_bc.assert_called_once()
 
 
+# Live wireless layout on firmware 4.11.0: the radios diverge. 5G gained a
+# mesh backhaul AP (bbss5g, rax3, disabled) and a STA iface (bsta5g), and
+# the legacy GL "iot" network still holds slots while disabled.
+_WIRELESS_4_11 = """\
+wireless.mt798611=wifi-device
+wireless.mt798612=wifi-device
+wireless.wifi2g=wifi-iface
+wireless.wifi2g.device='mt798611'
+wireless.wifi2g.mode='ap'
+wireless.wifi2g.ifname='ra0'
+wireless.wifi5g=wifi-iface
+wireless.wifi5g.device='mt798612'
+wireless.wifi5g.mode='ap'
+wireless.wifi5g.ifname='rax0'
+wireless.guest2g=wifi-iface
+wireless.guest2g.device='mt798611'
+wireless.guest2g.mode='ap'
+wireless.guest2g.ifname='ra1'
+wireless.guest5g=wifi-iface
+wireless.guest5g.device='mt798612'
+wireless.guest5g.mode='ap'
+wireless.guest5g.ifname='rax1'
+wireless.fvpn_iot_2g=wifi-iface
+wireless.fvpn_iot_2g.device='mt798611'
+wireless.fvpn_iot_2g.mode='ap'
+wireless.fvpn_iot_2g.ifname='ra2'
+wireless.fvpn_iot_5g=wifi-iface
+wireless.fvpn_iot_5g.device='mt798612'
+wireless.fvpn_iot_5g.mode='ap'
+wireless.fvpn_iot_5g.ifname='rax2'
+wireless.iot2g=wifi-iface
+wireless.iot2g.device='mt798611'
+wireless.iot2g.mode='ap'
+wireless.iot2g.ifname='ra2'
+wireless.iot2g.disabled='1'
+wireless.iot5g=wifi-iface
+wireless.iot5g.device='mt798612'
+wireless.iot5g.mode='ap'
+wireless.iot5g.ifname='rax2'
+wireless.iot5g.disabled='1'
+wireless.bbss5g=wifi-iface
+wireless.bbss5g.device='mt798612'
+wireless.bbss5g.mode='ap'
+wireless.bbss5g.ifname='rax3'
+wireless.bbss5g.disabled='1'
+wireless.bsta5g=wifi-iface
+wireless.bsta5g.device='mt798612'
+wireless.bsta5g.mode='sta'
+wireless.bsta5g.ifname='apclix0'
+wireless.bsta5g.disabled='1'
+"""
+
+_DAT_2G = "/etc/wireless/mediatek/mt7986-ax6000.dbdc.b0.dat"
+_DAT_5G = "/etc/wireless/mediatek/mt7986-ax6000.dbdc.b1.dat"
+
+
+def _fake_router(wireless: str, other_sections: dict | None = None):
+    """ssh.exec side effect answering by command instead of call order."""
+    other_sections = other_sections or {}
+    sent: list[str] = []
+
+    def exec_(cmd, *args, **kwargs):
+        sent.append(cmd)
+        if cmd.startswith("uci show wireless"):
+            return wireless
+        for config, raw in other_sections.items():
+            if cmd.startswith(f"uci show {config}"):
+                return raw
+        return ""
+
+    return exec_, sent
+
+
+def _bssid_cmd(sent: list[str]) -> str:
+    return next(c for c in sent if "BssidNum" in c)
+
+
 class TestCreateNetwork:
     def test_creates_full_infrastructure(self, lan, uci, ssh, service_ctl):
-        ssh.exec.side_effect = [
-            "",             # _next_ip6hint (uci show network | grep ip6hint)
-            "BssidNum=2",  # _get_bssid_num
-            "",             # sed (update BssidNum)
-            "",             # sed (update BssidNum)
-            "",             # ifup
-        ]
+        ssh.exec.side_effect, _ = _fake_router(_WIRELESS_4_11)
         with patch.object(lan, "_reload_wifi_driver"):
             lan.create_network("testnet", "TestSSID", "password123", "192.168.10.1")
 
@@ -401,6 +472,27 @@ class TestCreateNetwork:
         sections = uci.batch_sections.call_args[0][0]
         # Should create: 2x wireless, 1x network, 1x zone, 3x rules (dhcp+dns+mdns), 1x forwarding, 1x dhcp
         assert len(sections) == 9
+
+    def test_picks_free_ifname_per_radio(self, lan, uci, ssh):
+        """rax3 belongs to the 4.11 mesh backhaul AP, so 5G must use rax4
+        while 2.4G uses ra3 (regression: both radios used the 5G count)."""
+        ssh.exec.side_effect, _ = _fake_router(_WIRELESS_4_11)
+        with patch.object(lan, "_reload_wifi_driver"):
+            lan.create_network("work", "ArmW", "password123", "192.168.11.1")
+
+        sections = dict(uci.batch_sections.call_args[0][0])
+        assert sections["wireless.fvpn_work_2g"]["ifname"] == "ra3"
+        assert sections["wireless.fvpn_work_5g"]["ifname"] == "rax4"
+
+    def test_sets_bssid_num_independently_per_radio(self, lan, ssh):
+        ssh.exec.side_effect, sent = _fake_router(_WIRELESS_4_11)
+        with patch.object(lan, "_reload_wifi_driver"):
+            lan.create_network("work", "ArmW", "password123", "192.168.11.1")
+
+        cmd = _bssid_cmd(sent)
+        # 2.4G: 4 existing APs + new = 5; 5G: 5 existing APs (STA excluded) + new = 6
+        assert f"s/^BssidNum=.*/BssidNum=5/' {_DAT_2G}" in cmd
+        assert f"s/^BssidNum=.*/BssidNum=6/' {_DAT_5G}" in cmd
 
     def test_rejects_invalid_zone_id(self, lan):
         with pytest.raises(ValueError, match="Invalid zone ID"):
@@ -419,27 +511,33 @@ class TestDeleteNetwork:
             lan.delete_network("guest")
 
     def test_deletes_matching_sections(self, lan, ssh):
-        ssh.exec.side_effect = [
-            "wireless.fvpn_testnet_2g=wifi-iface\n",  # wireless
-            "network.fvpn_testnet=interface\n",         # network
-            "firewall.fvpn_testnet_zone=zone\n",        # firewall
-            "dhcp.fvpn_testnet=dhcp\n",                 # dhcp
-            "BssidNum=3",                                # bssid num
-            "",                                          # combined delete+sed command
-        ]
+        ssh.exec.side_effect, sent = _fake_router(_WIRELESS_4_11, {
+            "network": "network.fvpn_iot=interface\n",
+            "firewall": "firewall.fvpn_iot_zone=zone\n",
+            "dhcp": "dhcp.fvpn_iot=dhcp\n",
+        })
         with patch.object(lan, "_reload_wifi_driver"):
-            lan.delete_network("testnet")
+            lan.delete_network("fvpn_iot")
+
+        final = sent[-1]
+        assert "uci -q delete wireless.fvpn_iot_2g" in final
+        assert "uci -q delete network.fvpn_iot" in final
+        # BssidNum shrinks to what the remaining APs need, per radio:
+        # 2.4G keeps ra0, ra1, ra2(iot2g) = 3; 5G keeps rax0-rax3 = 4
+        assert f"s/^BssidNum=.*/BssidNum=3/' {_DAT_2G}" in final
+        assert f"s/^BssidNum=.*/BssidNum=4/' {_DAT_5G}" in final
 
     def test_noop_when_no_matching_sections(self, lan, ssh):
-        ssh.exec.side_effect = [
-            "",  # wireless (empty)
-            "",  # network (empty)
-            "",  # firewall (empty)
-            "",  # dhcp (empty)
-        ]
+        ssh.exec.side_effect, _ = _fake_router("")
         with patch.object(lan, "_reload_wifi_driver") as mock_reload:
-            lan.delete_network("nonexistent")
+            lan.delete_network("fvpn_nonexistent")
         mock_reload.assert_not_called()
+
+    def test_refuses_non_app_network_instead_of_guessing_prefix(self, lan, ssh):
+        """'iot' (GL's built-in network) must not be mapped to 'fvpn_iot'."""
+        with pytest.raises(ValueError, match="Only networks created"):
+            lan.delete_network("iot")
+        ssh.exec.assert_not_called()
 
 
 class TestBandFromDevice:

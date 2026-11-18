@@ -91,7 +91,10 @@ See [proton-wg-internals.md](proton-wg-internals.md) for process targeting, mang
 - `/etc/wireless/mediatek/mt7986-ax6000.dbdc.b0.dat` (2.4G radio)
 - `/etc/wireless/mediatek/mt7986-ax6000.dbdc.b1.dat` (5G radio)
 - Referenced by `/etc/wireless/l1profile.dat`. Other `.dat` files in that directory are for different models and are NOT used.
-- Max `BssidNum` is typically 4 per radio (`ra0`–`ra3`, `rax0`–`rax3`) on MT7986.
+- **Radios are independent** — compute `BssidNum` and the next `ra<N>`/`rax<N>` per radio from UCI (`lan_access._RADIOS`, `_required_bssid_num`, `_next_free_index`). `BssidNum` must be ≥ max(number of AP-mode wifi-ifaces on that radio — **disabled ones included** —, highest ifname index + 1). STA ifaces (`apcli*`) don't take a slot.
+- Firmware 4.11.0 added a mesh backhaul AP `bbss5g` (`rax3`, disabled) and a STA `bsta5g` (`apclix0`) on 5G only, so the two `.dat` files diverge (2.4G=4, 5G=5 on a stock+ArmI setup). The old code reused the 5G count for both radios and would have given a new network `ra5` on a 4-slot 2.4G radio.
+- GL's boot-time `/etc/init.d/mtk-wifi-configurator` (Lua, START=15) rewrites `BssidNum` from UCI, so the `.dat` files self-heal after a sysupgrade (they are not in the keep-list).
+- `BssidNum=5` on 5G works on 4.11.0 (`rax4` exists). The old "max 4 per radio" note was never verified; treat >5 as unverified until tested.
 
 ## fw3 Zone Name Limit (11 characters)
 

@@ -882,7 +882,7 @@ firewall.fvpn_iot_wan  (forwarding, src=fvpn_iot, dest=wan)
 dhcp.fvpn_iot          (dhcp, interface=fvpn_iot, start=100, limit=150, leasetime=12h, dhcpv6=server, ra=server, ra_default=1)
 ```
 
-Then: increment `BssidNum` in both `.dat` files, `ifup fvpn_iot`, and **full WiFi driver reload** (see below).
+Then: per radio, pick the lowest free `ra<N>`/`rax<N>` and set that radio's `BssidNum` to what its AP ifaces need (radios differ since firmware 4.11 — see router-reference.md), `ifup fvpn_iot`, and **full WiFi driver reload** (see below).
 
 ### Subnet picker
 `_pick_subnet()` iterates `192.168.10.1` … `192.168.254.1` and returns the first third-octet not in use by an existing network.
@@ -909,7 +909,7 @@ Consequence: **~15 s WiFi outage for all clients on all bands**. Unavoidable. Mu
 - `/etc/wireless/mediatek/mt7986-ax6000.dbdc.b0.dat` (2.4G, `BssidNum=`)
 - `/etc/wireless/mediatek/mt7986-ax6000.dbdc.b1.dat` (5G, `BssidNum=`)
 
-Max BSSIDs per radio: 4 (`ra0`..`ra3`, `rax0`..`rax3`).
+`BssidNum` per radio = max(#AP wifi-ifaces incl. disabled, highest ifname index + 1). 5 verified working on 5G (4.11.0); higher is unverified.
 
 ### Radio UCI device names (Flint 2)
 - `mt798611` — 2.4 GHz radio

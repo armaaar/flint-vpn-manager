@@ -395,19 +395,18 @@ class TestFacadeDeleteNetwork:
         delete_cmd = next(c for c in all_calls if "uci -q delete" in c)
         assert "fvpn_iot" in delete_cmd
 
-    def test_bare_zone_id_also_works(self):
-        """Passing bare 'iot' should still add the prefix."""
+    def test_bare_zone_id_is_refused(self):
+        """A bare 'iot' must not be expanded to 'fvpn_iot': on GL firmware
+        'iot' is a different (built-in) network than the app's fvpn_iot."""
         facade = _make_facade({
             "wireless": ["fvpn_iot_ra1"],
             "network": [],
             "firewall": [],
             "dhcp": [],
         })
-        facade.delete_network("iot")
-
-        all_calls = [c[0][0] for c in facade._ssh.exec.call_args_list]
-        delete_cmd = next(c for c in all_calls if "uci -q delete" in c)
-        assert "uci -q delete wireless.fvpn_iot_ra1" in delete_cmd
+        with pytest.raises(ValueError, match="Only networks created"):
+            facade.delete_network("iot")
+        assert not any("uci -q delete" in c[0][0] for c in facade._ssh.exec.call_args_list)
 
     def test_rejects_builtin_zones(self):
         facade = _make_facade()
