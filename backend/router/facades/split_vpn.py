@@ -310,7 +310,9 @@ case "$ACT" in
     # first use; afterwards the pinned cert must match). Without a TTY the
     # CLI doesn't prompt for secrets, so they are passed as arguments here
     # (visible only to root on the router, for the few seconds the CLI runs).
-    printf 'Y\n' | timeout 150 nsx $BIN/qemu-x86_64 $BIN/barracudavpn -c $DIR \
+    # (timeout can't run the nsx shell function, so the same command inline)
+    printf 'Y\n' | timeout 150 ip netns exec $NS sh -c 'mount --bind "$0" /run && exec "$@"' "$RUN" \
+      $BIN/qemu-x86_64 $BIN/barracudavpn -c $DIR \
       --start --login "$LOGIN" --serverpwd "$PW" --onetimepwd "$OTP" > $DIR/connect.log 2>&1
     echo "RC: $?"
     unset PW OTP

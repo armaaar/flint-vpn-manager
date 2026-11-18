@@ -198,3 +198,13 @@ class TestClientToml:
         from router.facades.split_vpn import build_client_toml
         with pytest.raises(ValueError):
             build_client_toml({"server": 'x"\n[evil]'})
+
+
+def test_ctl_script_never_passes_shell_functions_to_timeout():
+    """`timeout nsx ...` fails: timeout execs a binary, not a shell function."""
+    import re
+    from router.facades.split_vpn import build_ctl_script
+    for line in build_ctl_script().splitlines():
+        m = re.search(r"\btimeout\s+\d+\s+(\S+)", line)
+        if m:
+            assert m.group(1) not in ("nsx", "client", "ns_up", "kill_ns", "daemon_up"), line
