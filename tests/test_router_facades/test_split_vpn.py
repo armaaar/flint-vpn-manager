@@ -208,3 +208,11 @@ def test_ctl_script_never_passes_shell_functions_to_timeout():
         m = re.search(r"\btimeout\s+\d+\s+(\S+)", line)
         if m:
             assert m.group(1) not in ("nsx", "client", "ns_up", "kill_ns", "daemon_up"), line
+
+
+def test_ctl_script_disables_rp_filter_on_veth():
+    """Loose rp_filter (2) dropped work replies (EXDEV via GL's iif-lo rules)."""
+    from router.facades.split_vpn import build_ctl_script
+    script = build_ctl_script()
+    assert "echo 0 > /proc/sys/net/ipv4/conf/$H/rp_filter" in script
+    assert "echo 2 > /proc/sys/net/ipv4/conf/$H/rp_filter" not in script

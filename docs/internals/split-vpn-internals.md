@@ -52,7 +52,7 @@ Packet path: LAN device → `ROUTE_POLICY` → `FVPN_SPLITVPN` marks if
 `src ∈ group MAC ipset` **and** `dst ∈ fvpn_svN_dst` → tunnel chains skip
 marked packets → `ip rule fwmark … lookup 1010+N` → `default via 10.250.N.2
 dev fvsvNh` → namespace → `tap0` (MASQUERADE) → work network. Replies come
-back the same way; `fvsvNh` has `rp_filter=2` (loose) because the reply
+back the same way; `fvsvNh` has `rp_filter=0` because the reply
 source (a work IP) is otherwise routed via WAN.
 
 The client's own outer connection leaves the namespace via `10.250.N.1`
@@ -172,3 +172,7 @@ Python (no `ar`/`tar` binaries needed) and uploads with
 sha256-checked; qemu against the local `.sha256` when present) and
 `local_files: {barracuda_archive, qemu}` (which install sources exist
 locally; the UI names the missing ones).
+
+## rp_filter on the host veth must be 0
+
+Replies from work hosts arrive on `fvsvNh` while the router's own route to them points at the WAN. Even loose reverse-path filtering (`2`) drops them: the kernel validates the source with `iif lo`, and GL's `iif lo` policy rules (table 16800, rtp2 local policy) don't return a unicast route for work ranges, so validation fails with `EXDEV` (`ip route get <client> from <work-ip> iif fvsvNh` → "Cross-device link"). Symptom: ICMP/TCP replies are counted in conntrack (TCP stuck in `SYN_RECV`) but never forwarded to the client. `svctl.sh` sets `rp_filter=0` on the veth; the namespace firewall only admits tunnel replies, so this doesn't open anything.

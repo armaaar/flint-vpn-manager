@@ -240,8 +240,13 @@ ns_up() {
   fi
   ip addr replace $HIP/30 dev $H
   ip link set $H up
-  # loose reverse-path check: replies from work hosts arrive on the veth
-  echo 2 > /proc/sys/net/ipv4/conf/$H/rp_filter
+  # No reverse-path check on the veth: replies from work hosts arrive here
+  # while the router's own route to them points at the WAN. Even loose mode
+  # (2) fails: the kernel validates the source as if it came from lo, and GL's
+  # "iif lo" policy rules (table 16800) don't yield a unicast route for work
+  # ranges -> EXDEV, replies dropped (TCP stuck in SYN_RECV). The namespace
+  # side only admits tunnel replies, so 0 is safe here.
+  echo 0 > /proc/sys/net/ipv4/conf/$H/rp_filter
   ip netns exec $NS sh -s <<EOF
 ip link set lo up
 ip addr replace $NIP/30 dev $N
