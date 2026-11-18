@@ -16,7 +16,7 @@ from mcp_server.api_client import FlintAPI
 # Connecting performs the full VPN handshake on the router (incl. OTP
 # verification) and can take up to ~2.5 minutes.
 CONNECT_TIMEOUT = 210.0
-# Installing the runtime downloads ~70MB and uploads it to the router.
+# Installing the runtime verifies the local runtime/ files and uploads them to the router.
 INSTALL_TIMEOUT = 660.0
 
 
@@ -38,8 +38,10 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
           group_ids, domains, cidrs, use_pushed_routes, enabled,
           pushed_routes, pushed_dns, last_connected_at, has_password, and
           status {state, ip, gateway, dns, routes, connected, error?}
-        - runtime: {installed, files?, error?} — whether the VPN client
-          binaries are on the router (see flint_install_split_vpn_runtime)
+        - runtime: {installed, files?, local_files?, error?} — whether the
+          VPN client binaries are on the router, and which install sources
+          ({barracuda_archive, qemu}) exist in the app's local runtime/ folder
+          (see flint_install_split_vpn_runtime)
         - max: maximum number of Split VPNs supported
         """
         result = api.get("/api/split-vpns", live="1" if live else "0")
@@ -249,10 +251,12 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
     def flint_install_split_vpn_runtime() -> str:
         """Install the Split VPN client runtime on the router.
 
-        Downloads the VPN client (~70MB, checksum-verified) and uploads the
-        binaries to the router. Needed once before any Split VPN can connect
-        (check runtime.installed in flint_list_split_vpns). Can take several
-        minutes.
+        Nothing is downloaded: verifies the files in the app's local
+        runtime/ folder (Barracuda 5.3.10 archive from the vendor portal,
+        pinned checksum; qemu built by tools/qemu/build.sh) and uploads them
+        to the router. Fails naming the file if one is missing. Needed once
+        before any Split VPN can connect (check runtime.installed in
+        flint_list_split_vpns). Can take several minutes.
         """
         result = api.post("/api/split-vpns/runtime/install", timeout=INSTALL_TIMEOUT)
         return json.dumps(result, indent=2)

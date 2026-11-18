@@ -114,7 +114,7 @@ Proton-wg table numbers are computed as `1000 + (mark >> 12)` — i.e. `1000 + 0
 ├── adblock_rules.sh             # firewall include that re-injects adblock snippets
 ├── adblock_ifaces.txt           # interfaces with adblock active
 ├── vpn_bypass.sh                # firewall include: rebuilds bypass ipsets/rules
-├── lan_access_rules.sh          # firewall include: device forwarding exceptions + global VPN accept
+├── lan_access_rules.sh          # firewall include: device forwarding exceptions + VPN-egress fwmark accepts
 ├── noint_rules.sh               # firewall include: rebuilds NoInternet chain
 ├── noint.macs                   # MACs assigned to NoInternet groups
 ├── ipv6_forward.sh              # firewall include: IPv6 FORWARD rules (leak prevention/forwarding)
@@ -428,13 +428,20 @@ When the GL.iNet UI edits a `route_policy` rule it may replace `fvpn_rule_9001` 
 
 `route_policy` section order = VPN display order. `reorder_vpn_rules` calls `uci reorder route_policy.<rule>=<index>`. Proton-wg is not in route_policy → has no section order; display order is local-only.
 
-### Global `forwarding_rule` iptables ACCEPT
+### Which networks GL VPN-routes — `append_source_if`
 
-Because zones other than `lan` don't have forwarding entries to the VPN tunnel zones (`wgclient*`, `ovpnclient*`, `protonwgN`), a global catch-all in `forwarding_rule` allows all fwmark-marked traffic through:
+GL's `VPN_PREROUTING_HOOK` only jumps to `ROUTE_POLICY` for `-i br-lan` and `-i br-guest` (plus GL's own VPN servers), and `rtp2.sh` only creates fw3 forwardings from those zones to the VPN zones. Any other network must be listed in `route_policy.global.append_source_if` (space-separated interface names; GL validates each with `ubus call network.interface.<if> status` and skips unknown ones). Changes take effect on `/etc/init.d/vpn-client restart`. App-created networks (`fvpn_*`) are kept in that list — see §17.
+
+### VPN-egress `forwarding_rule` ACCEPTs
+
+`/etc/fvpn/lan_access_rules.sh` (§20) inserts one accept per VPN egress interface family into the `forwarding_rule` filter chain:
 ```
--m mark ! --mark 0x0/0xf000 -j ACCEPT
+-m mark ! --mark 0x0/0xf000 -o wgclient+   -j ACCEPT
+-m mark ! --mark 0x0/0xf000 -o ovpnclient+ -j ACCEPT
+-m mark ! --mark 0x0/0xf000 -o protonwg+   -j ACCEPT
+-m mark ! --mark 0x0/0xf000 -o fvsv+       -j ACCEPT     # split VPN veths
 ```
-Written by `/etc/fvpn/lan_access_rules.sh` (§20) and inserted into the `forwarding_rule` filter chain.
+Built by `vpn_egress_accept_rules()` in `backend/router/facades/lan_access.py`. **Never drop the `-o`**: the old global `-m mark ! --mark 0x0/0xf000 -j ACCEPT` also accepted marked traffic going to *other LAN bridges*, so every device in a VPN group bypassed zone isolation (see debugging-catalogue.md → "Global mark ACCEPT bypassed zone isolation"). The include deletes that legacy rule (`while iptables -D … ; do :; done`) on every run.
 
 ---
 
@@ -883,7 +890,9 @@ firewall.fvpn_iot_wan  (forwarding, src=fvpn_iot, dest=wan)
 dhcp.fvpn_iot          (dhcp, interface=fvpn_iot, start=100, limit=150, leasetime=12h, dhcpv6=server, ra=server, ra_default=1)
 ```
 
-Then: per radio, pick the lowest free `ra<N>`/`rax<N>` and set that radio's `BssidNum` to what its AP ifaces need (radios differ since firmware 4.11 — see router-reference.md), `ifup fvpn_iot`, and **full WiFi driver reload** (see below).
+After the batch, the service adds `fvpn_iot` to `route_policy.global.append_source_if` and restarts vpn-client (see "VPN routing across bridges" below). Without it the network's devices are never VPN-routed. Delete removes the entry the same way.
+
+Then: per radio, pick the lowest free `ra<N>`/`rax<N>` and set that radio's `BssidNum` to what its AP ifaces need (radios differ since firmware 4.11 — see router-reference.md), `ifup fvpn_iot`, and **full WiFi driver reload** (see below; on firmware ≥ 4.11 a `sync` + clean reboot instead).
 
 ### Subnet picker
 `_pick_subnet()` iterates `192.168.10.1` … `192.168.254.1` and returns the first third-octet not in use by an existing network.
@@ -906,6 +915,8 @@ wifi up
 ```
 Consequence: **~15 s WiFi outage for all clients on all bands**. Unavoidable. Must run detached (`&`) over SSH — WiFi drop kills the SSH session.
 
+**Firmware ≥ 4.11: never `rmmod mt_wifi`.** It panicked the router, and the unflushed UCI commit was lost. `_reload_wifi_driver` runs `sync` and then a clean `reboot` there instead. At boot, `mtk-wifi-configurator` sizes `BssidNum` from UCI. Older firmware keeps the module cycle above, preceded by `sync`. See debugging-catalogue.md → "`rmmod mt_wifi` panics the router on firmware 4.11".
+
 **.dat paths** (MT7986, active):
 - `/etc/wireless/mediatek/mt7986-ax6000.dbdc.b0.dat` (2.4G, `BssidNum=`)
 - `/etc/wireless/mediatek/mt7986-ax6000.dbdc.b1.dat` (5G, `BssidNum=`)
@@ -916,8 +927,16 @@ Consequence: **~15 s WiFi outage for all clients on all bands**. Unavoidable. Mu
 - `mt798611` — 2.4 GHz radio
 - `mt798612` — 5 GHz radio
 
-### VPN routing across bridges
-The VPN mangle chain matches `br-+` (bridge wildcard), so MAC-based ipset matching works on **any** bridge — no per-network change needed for VPN.
+### VPN routing across bridges — `route_policy.global.append_source_if`
+GL does **not** VPN-route every bridge. Its mangle `VPN_PREROUTING_HOOK` jumps to `ROUTE_POLICY` only for `-i br-lan` / `-i br-guest`, and `rtp2.sh` only creates zone forwardings from `lan`/`guest` to the VPN zones. Devices on any other network were never marked, so their traffic left via WAN unmarked even in a VPN group with kill switch (seen live on ArmI: IoT Online devices with `mark=0`, NATed to the WAN IP).
+
+Fix: every app network is listed in `route_policy.global.append_source_if` (space-separated; GL validates each name via `ubus call network.interface.<if> status`):
+```sh
+uci set route_policy.global.append_source_if='fvpn_iot fvpn_work'
+uci commit route_policy; sync
+/etc/init.d/vpn-client restart     # how GL applies source-if changes (flushes src_mac_* ipsets, rebuilt from UCI)
+```
+`RouterLanAccess.sync_vpn_source_ifs(app_networks)` adds missing `fvpn_*` networks, drops entries whose interface no longer exists (`ubus list 'network.interface.*'`), and only commits + restarts vpn-client when the list changed. `LanAccessService._sync_vpn_source_ifs` calls it on network create, delete, and every unlock (`reapply_all`). Never fatal (logged as a warning).
 
 ### Inspect
 ```sh
@@ -986,7 +1005,10 @@ When cross-network traffic is blocked at the zone level, specific device IP pair
 - Jump into `forwarding_rule` filter chain:
   ```sh
   iptables -I forwarding_rule 1 -j fvpn_lan_exc
-  iptables -I forwarding_rule -m mark ! --mark 0x0/0xf000 -j ACCEPT     # Global VPN pass-through
+  # VPN pass-through, scoped to VPN egress (one per wgclient+/ovpnclient+/protonwg+/fvsv+), §4
+  iptables -I forwarding_rule -m mark ! --mark 0x0/0xf000 -o wgclient+ -j ACCEPT
+  # legacy unscoped accept (defeated zone isolation) is removed on every run:
+  while iptables -D forwarding_rule -m mark ! --mark 0x0/0xf000 -j ACCEPT 2>/dev/null; do :; done
   ```
 
 ### Per-exception rule
@@ -1101,7 +1123,7 @@ All Flint VPN Manager includes use `option reload '1'` — they re-run on `firew
 | `firewall.fvpn_vpn_bypass` | `/etc/fvpn/vpn_bypass.sh` | Rebuild bypass chain + ipsets + routing (§14) |
 | `firewall.fvpn_adblock` | `/etc/fvpn/adblock_rules.sh` | Re-inject adblock snippets + SIGHUP dnsmasq (§15) |
 | `firewall.fvpn_noint_include` | `/etc/fvpn/noint_rules.sh` | Rebuild NoInternet chain (§9) |
-| `firewall.fvpn_lan_access` | `/etc/fvpn/lan_access_rules.sh` | LAN access exceptions + global fwmark ACCEPT (§20) |
+| `firewall.fvpn_lan_access` | `/etc/fvpn/lan_access_rules.sh` | LAN access exceptions + VPN-egress-scoped fwmark ACCEPTs (§4, §20) |
 | `firewall.fvpn_ipv6_fwd` | `/etc/fvpn/ipv6_forward.sh` | IPv6 FORWARD rules (§22) |
 | `firewall.fvpn_ipv6_mangle` | `/etc/fvpn/ipv6_mangle_rules.sh` | IPv6 mangle MARK rules (§22) |
 | `firewall.fvpn_splitvpn` | `/etc/fvpn/splitvpn_rules.sh` | Split VPN marks/tables/forward rules (see split-vpn-internals.md) |
@@ -1234,6 +1256,7 @@ Reverse lookup: given an artifact you found on the router, which feature owns it
 | `/etc/config/firewall` | `fvpn_*_mdns` | mDNS reflection firewall rule (§21) |
 | `/etc/config/firewall` | `fvpn_noint_include`, `fvpn_vpn_bypass`, `fvpn_adblock`, `fvpn_pwg_mangle`, `fvpn_lan_access`, `fvpn_ipv6_fwd`, `fvpn_ipv6_mangle`, `fvpn_splitvpn` | Firewall include registrations (§24) |
 | `/etc/config/network` | `fvpn_<zid>` | User-created LAN interface (§17) |
+| `/etc/config/route_policy` | `global.append_source_if` (contains `fvpn_<zid>`) | Makes GL VPN-route app networks (mangle hook + zone forwardings); synced by `sync_vpn_source_ifs` (§4, §17) |
 | `/etc/config/network` | `protonwg<N>` (`proto=none`, `disabled=1`, `gl_vpn_instance=1`) | Proton-wg marker for GL 4.11's VPN IP conflict check; never managed by netifd, no network reload (§3.3, proton-wg-internals.md) |
 | `/etc/config/network` | `wan6` (managed) | IPv6 WAN (§22) |
 | `/etc/config/wireless` | `fvpn_<zid>_2g`, `fvpn_<zid>_5g` | User-created SSIDs (§17) |
@@ -1249,13 +1272,13 @@ See §1 for the full tree. Each file section cross-referenced above in §9, §14
 
 | Chain | Table | Feature | Source |
 |---|---|---|---|
-| `ROUTE_POLICY` | mangle | VPN routing master chain (GL.iNet) | — |
+| `ROUTE_POLICY` | mangle | VPN routing master chain (GL.iNet); entered from `VPN_PREROUTING_HOOK` only for br-lan, br-guest and `append_source_if` networks | — |
 | `FVPN_BYPASS` | mangle | VPN bypass pre-mark (§14) | `/etc/fvpn/vpn_bypass.sh` |
 | `TUNNEL<tid>_ROUTE_POLICY` | mangle | Per-proton-wg-tunnel MARK (§3.3) | `/etc/fvpn/protonwg/mangle_rules.sh` |
 | `FVPN_NOINT` | filter | NoInternet WAN block (§9) | `/etc/fvpn/noint_rules.sh` |
 | `fvpn_lan_exc` | filter | LAN device exceptions (§20) | `/etc/fvpn/lan_access_rules.sh` |
 | `FVPN_V6_<tid>` | mangle (ip6tables) | IPv6 per-tunnel MARK (§22) | `/etc/fvpn/ipv6_mangle_rules.sh` |
-| `forwarding_rule` | filter | VPN fwmark accept + lan_exc jump | `/etc/fvpn/lan_access_rules.sh` |
+| `forwarding_rule` | filter | VPN fwmark accepts (`-o wgclient+/ovpnclient+/protonwg+/fvsv+` only) + lan_exc jump | `/etc/fvpn/lan_access_rules.sh` |
 | `policy_redirect` | nat | Per-tunnel DNS REDIRECT (GL.iNet chain, we append to it, §16) | `/etc/fvpn/protonwg/mangle_rules.sh` |
 | `pre_dns_deal_conn_zone` / `out_dns_deal_conn_zone` | raw | DNS conntrack zones per tunnel (GL.iNet chains, we append, §16) | `/etc/fvpn/protonwg/mangle_rules.sh` |
 
@@ -1431,6 +1454,7 @@ grep BssidNum /etc/wireless/mediatek/mt7986-ax6000.dbdc.b*.dat
 iwinfo | grep ESSID              # count of interfaces
 # If BssidNum was bumped but no new ra<N>/rax<N> appeared, full driver reload is needed:
 # wifi down; rmmod mtk_warp_proxy; rmmod mt_wifi; sleep 1; insmod mt_wifi; insmod mtk_warp_proxy; sleep 1; wifi up
+# (firmware < 4.11 only — on 4.11+ rmmod mt_wifi panics the router; sync + reboot instead)
 # (cause ~15s outage — user-visible)
 ```
 

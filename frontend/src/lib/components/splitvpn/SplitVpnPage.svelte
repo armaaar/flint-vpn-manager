@@ -26,6 +26,13 @@
   $: max = overview?.max ?? 4;
   $: atLimit = vpns.length >= max;
   $: runtimeInstalled = !!overview?.runtime?.installed;
+  $: localFiles = overview?.runtime?.local_files;
+  $: missingLocal = localFiles
+    ? [
+        ...(localFiles.barracuda_archive ? [] : ['VPNClient_5.3.10_Linux.tar.gz (Barracuda download portal)']),
+        ...(localFiles.qemu ? [] : ['qemu-x86_64-flint (build it with tools/qemu/build.sh)']),
+      ]
+    : [];
 
   onMount(loadData);
 
@@ -151,16 +158,22 @@
   {#if overview && !runtimeInstalled}
     <div class="warning-banner">
       <span>
-        The router needs the <strong>VPN client runtime</strong>: the x86 Barracuda client run under emulation
-        (about 70&nbsp;MB downloaded and uploaded to the router).
+        The router needs the <strong>VPN client runtime</strong>: the x86 Barracuda 5.3.10 client, run under a patched
+        qemu emulator. Nothing is downloaded: the files are uploaded from the app's local <code>runtime/</code> folder,
+        which needs the Barracuda 5.3.10 archive (from the vendor's download portal, account required) and the qemu
+        binary built by <code>tools/qemu/build.sh</code>.
+        {#if missingLocal.length}
+          <span class="banner-detail">Missing in runtime/: {missingLocal.join('; ')}</span>
+        {/if}
         {#if overview.runtime.error}<span class="banner-detail">{overview.runtime.error}</span>{/if}
       </span>
-      <button class="btn-primary btn-sm" on:click={installRuntime} disabled={installing}>
+      <button class="btn-primary btn-sm" on:click={installRuntime} disabled={installing || missingLocal.length > 0}
+        title={missingLocal.length ? 'Put the missing files in runtime/ first' : ''}>
         {#if installing}<span class="spinner-inline"></span> Installing…{:else}Install runtime{/if}
       </button>
     </div>
     {#if installing}
-      <p class="install-note">Downloading and uploading the runtime. This can take a few minutes, so keep this page open.</p>
+      <p class="install-note">Verifying the local files and uploading them to the router. This can take a few minutes, so keep this page open.</p>
     {/if}
   {/if}
 
@@ -280,6 +293,7 @@
     padding: 12px 16px; margin-bottom: 12px; color: var(--fg); font-size: 0.9rem;
   }
   .warning-banner button { flex-shrink: 0; }
+  .warning-banner code { font-family: var(--font-mono); font-size: .85em; background: var(--surface2); border-radius: var(--radius-xs); padding: 1px 4px; }
   .banner-detail { display: block; margin-top: 4px; color: var(--fg3); font-size: .8rem; font-family: var(--font-mono); }
   .install-note { color: var(--fg2); font-size: .85rem; margin-bottom: 24px; }
 

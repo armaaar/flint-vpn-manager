@@ -42,6 +42,6 @@ DELETE /api/split-vpns/:id             → tear down tunnel/namespace and delete
 POST /api/split-vpns/:id/connect       → {otp?} (default: generated from stored TOTP secret) → start the client in its namespace (≤ ~150s); returns status + client log tail
 POST /api/split-vpns/:id/disconnect    → stop the client and remove its namespace
 GET  /api/split-vpns/:id/log           → client connect log tail
-GET  /api/split-vpns/runtime           → emulator + client binaries present on the router (sha256-checked)
-POST /api/split-vpns/runtime/install   → download pinned qemu-x86_64 + barracudavpn, verify, upload to router
+GET  /api/split-vpns/runtime           → {installed, files, local_files: {barracuda_archive, qemu}}: qemu + Barracuda 5.3.10 CLI/daemon on the router (sha256-checked) and which install sources exist in the local runtime/ folder
+POST /api/split-vpns/runtime/install   → no download: verify the local runtime/ files (Barracuda 5.3.10 archive, pinned sha256; qemu-x86_64-flint from tools/qemu/build.sh) and upload them to the router; 400 {error} names a missing file or checksum mismatch
 ```

@@ -5,7 +5,7 @@ the next upgrade faster.
 
 ---
 
-## 4.9.0 → 4.11.0 (stable) — started 2026-11-18 — STATUS: flashed + router verified; waiting for app unlock + app-level checks
+## 4.9.0 → 4.11.0 (stable) — started 2026-11-18 — STATUS: done — router verified, app verified (66/0/0 verify.sh)
 
 ### Post-upgrade (flashed by user ~11:33, Keep Settings on)
 - **The app kept running during the flash** (it's a systemd unit `flint-vpn-manager.service` that
@@ -47,6 +47,22 @@ the next upgrade faster.
   Option: delete the disabled legacy GL `iot` network (iot2g/iot5g, duplicate ra2/rax2 ifnames) to
   free a slot on each radio.
 
+### Follow-ups found while building the Work network
+These are **not** caused by 4.11. The 4.9 snapshot has the same `VPN_PREROUTING_HOOK`, so both bugs
+predate the upgrade. Fixed in 8b5bb38.
+- **App networks were never VPN-routed**: GL hooks only `-i br-lan` / `-i br-guest` into mangle
+  `ROUTE_POLICY` and only creates forwardings from lan/guest to the VPN zones. ArmI IoT traffic left
+  via WAN with `mark=0` despite the IoT Online group and its kill switch. The app now keeps every
+  `fvpn_*` network in `route_policy.global.append_source_if` (on network create/delete and on unlock).
+- **`vpn-client restart` is how GL applies source-if changes**: the sync restarts it only when the
+  list changed. That flushes `src_mac_*` (rebuilt from UCI); proton-wg and split VPN are unaffected.
+- **The global `forwarding_rule` mark ACCEPT defeated zone isolation** for every VPN-grouped device.
+  It's replaced by accepts scoped to `-o wgclient+/ovpnclient+/protonwg+/fvsv+`, and the legacy rule
+  is deleted on apply.
+- For the runbook: after an upgrade, also check `uci -q get route_policy.global.append_source_if`
+  still lists every `fvpn_*` network, and check `iptables -S forwarding_rule` has no unscoped
+  `mark ! 0x0/0xf000 -j ACCEPT`.
+
 ### Facts established
 - Router was on **4.9.0** (CLAUDE.md said 4.8.4 — stale; fix at close-out).
 - 4.11.0 stable (released 2026-09-28) stays on **OpenWrt 21.02-SNAPSHOT, kernel 5.4.238**, fw3/iptables.
@@ -85,7 +101,7 @@ the next upgrade faster.
   router reboot until the app unlocks.
 - Docs drift: router-features-translation.md §1/§16/§27 (see agent inventory).
 
-### Next
+### Next (all done 2026-11-18)
 1. User: GL UI → Upgrade → 4.11.0 stable, **Keep Settings ON**. Stop the app first.
 2. Post: `verify.sh`, post snapshot + diff, app-level checks (references/verification.md §3).
 3. Close-out: CLAUDE.md firmware version → 4.11.0; update this log's STATUS.

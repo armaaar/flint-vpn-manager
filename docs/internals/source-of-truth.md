@@ -17,6 +17,7 @@ The hardest design constraint in this project. Every piece of state lives at exa
 | Device label / device class | `gl-client.{section}.alias` / `.class` |
 | Device online / speeds / signal | `ubus call gl-clients list` |
 | NoInternet firewall rules | `fvpn_noint_ips` ipset + `fvpn_noint_block` rule (single global pair, managed by `noint_sync.py`) |
+| Networks GL VPN-routes (beyond `lan`/`guest`) | `route_policy.global.append_source_if`, derived from the router's own `fvpn_*` network list (no local copy). Synced on network create/delete and unlock by `RouterLanAccess.sync_vpn_source_ifs`. |
 
 ## Proton-canonical (resolved on demand by `server_id`)
 

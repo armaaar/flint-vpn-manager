@@ -106,9 +106,9 @@ Flint VPN Manager zone name format: `fvpn_` (5 chars) + `zone_id` → `zone_id` 
 
 ## VPN Routing Across Bridges
 
-VPN `route_policy` mangle chain matches `br-+` (bridge wildcard), so MAC-based ipset routing works for devices on ANY network bridge (`br-lan`, `br-guest`, `br-fvpn_*`). No special handling needed when creating new networks.
+GL does **not** VPN-route every bridge. Its mangle `VPN_PREROUTING_HOOK` jumps to `ROUTE_POLICY` only for `-i br-lan` / `-i br-guest`, and `rtp2.sh` only creates zone forwardings from `lan`/`guest` to the VPN zones. Any other network must be in `route_policy.global.append_source_if` (space-separated; GL validates each via `ubus call network.interface.<if> status`; applied by `/etc/init.d/vpn-client restart`). The app keeps every `fvpn_*` network there (`RouterLanAccess.sync_vpn_source_ifs`, on network create/delete and on unlock). Before that fix, devices on app networks were never VPN-routed even in VPN groups with kill switch.
 
-**Zone forwarding for VPN traffic**: Custom network zones (`fvpn_*`) only forward to `wan` by default, not to VPN tunnel zones. A global `iptables -I forwarding_rule -m mark ! --mark 0x0/0xf000 -j ACCEPT` rule allows all fwmark-marked traffic from any zone to reach VPN tunnels. Covers all protocols (WG UDP `0x1000`-`0x5000`, WG TCP/TLS `0x6000`/`0x7000`/`0x9000`/`0xf000`, OVPN `0xa000`-`0xe000`, WAN `0x8000`). Written in `lan_access_rules.sh` for reboot persistence.
+**FORWARD accept for marked traffic**: `lan_access_rules.sh` inserts `iptables -I forwarding_rule -m mark ! --mark 0x0/0xf000 -o <if> -j ACCEPT` for `wgclient+`, `ovpnclient+`, `protonwg+` and `fvsv+` (split VPN veths) only. Never use an unscoped mark accept: it also let VPN-grouped devices into other LAN zones, defeating isolation. The legacy unscoped rule is deleted on every run.
 
 ## Device Type Mapping (GL.iNet ↔ Dashboard)
 

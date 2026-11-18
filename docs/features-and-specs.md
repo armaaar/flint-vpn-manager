@@ -127,7 +127,8 @@ Run a third-party VPN **on the router** for selected groups, carrying only selec
 - **Two-factor**: store the account's **TOTP secret** (base32 or `otpauth://` URI) and the app generates the one-time codes itself. Password and secret are stored encrypted; saving them requires the master password. A manual one-time code can still be given for a single connect.
 - **Auto-connect** (default on): connects after unlock and reconnects within a minute when the tunnel drops, with exponential backoff on failures. A manual Disconnect pauses it until you connect again.
 - **Fail closed**: while the VPN is down, traffic to its destinations is dropped — it never falls back to Proton or the WAN.
-- **Runtime**: Barracuda's client is x86-only, so the router runs it under emulation inside its own network namespace. The UI offers a one-click "Install runtime" (pinned, checksum-verified downloads).
+- **Runtime**: Barracuda's client is x86-only, so the router runs the **Barracuda VPN Client 5.3.10** (daemon + CLI) under a patched qemu emulator inside its own network namespace. 5.1.4, the last public build, is refused by current gateways. Nothing is downloaded: put the 5.3.10 archive (`VPNClient_5.3.10_Linux.tar.gz`, from the Barracuda download portal, account required) and the qemu binary built by `tools/qemu/build.sh` in the local, gitignored `runtime/` folder, then click **Install runtime**: the app checks the pinned checksums and uploads the files to the router. The banner names any file that's missing locally. See [tools/qemu/README.md](../tools/qemu/README.md).
+- **One at a time**: up to 4 split VPNs can be configured, but only one connected Barracuda VPN at a time is guaranteed to work (the router can't fully isolate the client instances from each other).
 - **After a router reboot** the tunnel comes back automatically once the app is unlocked (auto-connect).
 
 See [internals/split-vpn-internals.md](internals/split-vpn-internals.md).

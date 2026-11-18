@@ -279,6 +279,8 @@ export interface SplitVpn {
 export interface SplitVpnRuntime {
   installed: boolean;
   files?: Record<string, boolean>;
+  /** Install sources present on the app host, in the local runtime/ folder. */
+  local_files?: { barracuda_archive: boolean; qemu: boolean };
   error?: string;
 }
 

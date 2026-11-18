@@ -111,6 +111,12 @@ Related docs: [router-features-translation.md](router-features-translation.md), 
 - **Root cause**: Early `_next_tunnel_id()` only scanned `route_policy` UCI sections. Proton-wg tunnels have no route_policy entry — they were invisible to the scan.
 - **Fix**: [backend/router/tunnel_id_alloc.py](backend/router/tunnel_id_alloc.py) now scans three sources: (1) `route_policy` UCI, (2) `ipset -n` matching `pwg_mac_|src_mac_`, (3) `FVPN_TUNNEL_ID=` in all `*.env` files.
 
+#### 4.11 IP conflict check vs `protonwg0` — kernel WG stuck "connecting" `ACTIVE` (hard invariant)
+- **Symptom**: After the 4.9 → 4.11.0 upgrade, any kernel WG tunnel (`wgclientN`) (re)connected while a proton-wg tunnel was up stayed "connecting" forever and got no address.
+- **Root cause**: 4.11 added VPN IP conflict detection. `/etc/hotplug.d/wireguard/ifup.sh` → `client_check_ip_validity` (`/lib/functions/vpn_client_func.sh`) lists every local IPv4 address and treats one matching the tunnel's own address as a conflict unless `network.<ifname>.gl_vpn_instance=1`. Every Proton WG client uses `10.2.0.2/32`, and our userspace `protonwgN` holds it with no `network.*` section.
+- **Debug**: `cat /tmp/run/vpn_tmp_dir/vpn_if_info/wgclientN/conflict_info` named `protonwg0`.
+- **Fix**: A marker-only `network.protonwgN` section (`proto=none`, `disabled=1`, no device, `gl_vpn_instance=1`; UCI only, no network reload). Written on create/connect, removed on delete, reconciled on unlock (`build_gl_vpn_instance_marker_cmds`, `RouterProtonWG.reconcile_gl_vpn_instance_markers`). verify.sh checks it. Details: [proton-wg-internals.md](proton-wg-internals.md) → "GL 4.11 IP conflict check".
+
 #### Test patching `parse_handshake_age` at wrong module `ACTIVE`
 - **Symptom**: `AttributeError: module 'router.facades.proton_wg' does not have the attribute 'parse_handshake_age'`.
 - **Root cause**: `parse_handshake_age` is imported lazily inside `get_proton_wg_health()` — never a module-level attribute.
@@ -238,10 +244,29 @@ Related docs: [router-features-translation.md](router-features-translation.md), 
   - With `bc_forwarding=1`, ANY directed broadcast that satisfies a fw3 zone forwarding entry can cross bridges. In practice this is only relevant where you've already explicitly allowed cross-zone forwarding (e.g. `lan→fvpn_iot`) — for those zones the broader broadcast surface is intentional. WAN→LAN broadcast is not a concern: there's no fw3 forwarding from `wan` to any LAN zone.
   - Pre-existing vidaa_tv quirk: the integration raises `ConfigEntryNotReady` in `async_setup_entry` if it can't connect to the TV's MQTT at startup. So if HA restarts while TV is off, the entity stays in `restored:true` state with no `async_turn_on` handler wired up, and `media_player.turn_on` gets filtered out by HA's "entity not currently available" check. The integration eventually retries and recovers when the TV is on; the user's normal flow (HA always-up, TV cycling) is unaffected, but a "cold boot" sequence requires waking the TV by another means first.
 
-#### IoT zone traffic blocked by FORWARD default DROP `ACTIVE`
+#### IoT zone traffic blocked by FORWARD default DROP `OBSOLETE`
 - **Symptom**: DNS worked but TCP outbound from IoT devices dropped. `zone_fvpn_iot_forward` counter was 0.
-- **Root cause**: GL.iNet's custom `forwarding_rule` chain accepts traffic only when `mark ! 0x0/0xf000`. Unmarked traffic (not going to VPN) bypassed the zone forwarding check entirely.
-- **Fix**: The global `-m mark ! --mark 0x0/0xf000 -j ACCEPT` rule in `forwarding_rule` (written by `/etc/fvpn/lan_access_rules.sh`) passes through fwmark-marked traffic. Non-marked traffic still relies on fw3 `forwarding` sections.
+- **Root cause (as understood then)**: GL.iNet's custom `forwarding_rule` chain accepts traffic only when `mark ! 0x0/0xf000`. Unmarked traffic (not going to VPN) bypassed the zone forwarding check entirely.
+- **Fix (then)**: A global `-m mark ! --mark 0x0/0xf000 -j ACCEPT` rule in `forwarding_rule`.
+- **Why obsolete**: The real cause was that GL never treated app networks as VPN sources (no zone forwardings to VPN zones, no mangle hook), and the global accept itself broke zone isolation. Both are fixed: see "App networks never VPN-routed (`append_source_if`)" and "Global mark ACCEPT bypassed zone isolation" below.
+
+#### App networks never VPN-routed (`append_source_if`) `ACTIVE` (hard invariant)
+- **Symptom**: Found while testing the Work network (2026-11-18), but the bug was old. Devices on app-created networks (ArmI, ArmW) never used their group's VPN. ArmI IoT devices in the "IoT Online" group (VPN, kill switch on) went out via WAN: their flows had `mark=0` and were NATed to the WAN IP. The kill switch never fired because the traffic never reached a VPN routing table.
+- **Root cause**: GL only hooks `lan` and `guest` into VPN routing. Its mangle `VPN_PREROUTING_HOOK` jumps to `ROUTE_POLICY` only for `-i br-lan` / `-i br-guest`, and `rtp2.sh` only creates zone forwardings from those zones to the VPN zones. Packets from `br-fvpn_*` never went through `ROUTE_POLICY`, so the MAC ipsets never matched. The old docs said the hook matched `br-+`. **That was false.** The 4.9 snapshot has the same hook, so this predates 4.11.
+- **Debug**: `iptables -t mangle -S VPN_PREROUTING_HOOK` (only `-i br-lan` / `-i br-guest` jumps); `conntrack -L | grep <device ip>` (`mark=0`, reply to the WAN IP); `uci -q get route_policy.global.append_source_if`.
+- **Fix**: GL already has the knob: `route_policy.global.append_source_if`. It's a space-separated list of extra source interfaces, and GL validates each one with `ubus call network.interface.<if> status`. `vpn-client restart` applies it (hook + forwardings). `RouterLanAccess.sync_vpn_source_ifs` keeps every `fvpn_*` network in the list and drops entries for interfaces that no longer exist. It commits and restarts vpn-client only when the list changed. `LanAccessService._sync_vpn_source_ifs` runs it on network create, network delete, and every unlock.
+- **Caveat**: `vpn-client restart` flushes the `src_mac_*` ipsets. They're rebuilt from UCI, and proton-wg (`pwg_mac_*`) and split VPN state aren't touched. It's only safe when no tunnel is stuck connecting.
+
+#### Global mark ACCEPT bypassed zone isolation `ACTIVE` (hard invariant)
+- **Symptom**: No user report. It turned up while tracing the bug above. Any device in a VPN group could reach other LAN zones (for example IoT → `lan`) even with no zone forwarding or device exception between them.
+- **Root cause**: The old workaround for custom zones missing their VPN forwardings was `iptables -I forwarding_rule -m mark ! --mark 0x0/0xf000 -j ACCEPT`. VPN-grouped devices are marked in `ROUTE_POLICY` whatever the destination. The priority-50 LAN rules then route LAN-destined packets to the other bridge, and `forwarding_rule` accepted them before fw3's zone chains could reject them.
+- **Fix**: The accepts are now scoped to VPN egress: `-o wgclient+`, `-o ovpnclient+`, `-o protonwg+`, `-o fvsv+` (split VPN veths), built by `vpn_egress_accept_rules()` in `lan_access.py`. `lan_access_rules.sh` deletes the legacy unscoped rule in a loop on every run, and so does `apply_device_exceptions` at runtime. Real cross-zone access still goes only through fw3 forwardings and `fvpn_lan_exc`.
+
+#### `rmmod mt_wifi` panics the router on firmware 4.11 `ACTIVE` (hard invariant)
+- **Symptom**: 2026-11-18, right after upgrading to 4.11.0. Creating the Work network ran the app's WiFi driver reload (`wifi down; rmmod mtk_warp_proxy; rmmod mt_wifi; …`). The router panicked and rebooted (`kernel.panic=3`). The UCI commit for the new network was lost because it hadn't been flushed to flash yet.
+- **Debug**: There was no crash log to read. The router uses eMMC and has no mtdoops partition. The tunnels all came back on their own, and verify.sh passed 66/0/0 afterwards.
+- **Fix**: On firmware ≥ 4.11, `_reload_wifi_driver` runs `sync` and then a clean `reboot`. At boot, `mtk-wifi-configurator` sizes `BssidNum` from UCI. Older firmware keeps the module reload, now preceded by `sync`. Version comes from `/etc/glversion` (`_firmware_version`).
+- **Lesson**: Run `sync` after every UCI commit, before any risky step. After a firmware upgrade, re-test every path that touches kernel modules at a time when an outage is acceptable. verify.sh doesn't exercise them.
 
 #### fw3 silently ignores zones with names > 11 chars `ACTIVE` (hard invariant)
 - **Symptom**: Newly-created zone had no firewall rules, no NAT; no error anywhere.
@@ -251,7 +276,7 @@ Related docs: [router-features-translation.md](router-features-translation.md), 
 #### MediaTek `mt_wifi` driver doesn't reload `BssidNum` from `.dat` files `ACTIVE` (hard invariant)
 - **Symptom**: After editing `/etc/wireless/mediatek/mt7986-ax6000.dbdc.b*.dat`, `wifi reload` didn't create new `ra<N>`/`rax<N>` interfaces.
 - **Root cause**: `mt_wifi` reads `BssidNum` only at module load time. `wifi reload` and `wifi down/up` don't re-load the module.
-- **Fix**: Full driver cycle — `wifi down → rmmod mtk_warp_proxy → rmmod mt_wifi → insmod mt_wifi → insmod mtk_warp_proxy → wifi up → firewall reload`. ~15s WiFi outage for ALL clients on ALL bands. Must run detached (`&`) over SSH because the WiFi drop kills the SSH session. [backend/router/facades/lan_access.py:545-564](backend/router/facades/lan_access.py#L545-L564).
+- **Fix**: Full driver cycle — `wifi down → rmmod mtk_warp_proxy → rmmod mt_wifi → insmod mt_wifi → insmod mtk_warp_proxy → wifi up → firewall reload`. ~15s WiFi outage for ALL clients on ALL bands. Must run detached (`&`) over SSH because the WiFi drop kills the SSH session. [backend/router/facades/lan_access.py:545-564](backend/router/facades/lan_access.py#L545-L564). **Firmware < 4.11 only**: on 4.11+ the module unload panics the router, so it's `sync` + reboot instead (see "`rmmod mt_wifi` panics the router on firmware 4.11").
 
 #### E2E tests flaky on LAN access — SSH contention `ACTIVE`
 - **Symptom**: Random LAN access E2E tests failed intermittently.
@@ -435,6 +460,17 @@ Related docs: [router-features-translation.md](router-features-translation.md), 
 #### BusyBox `date` has no nanoseconds `ACTIVE` (tooling gotcha)
 - **Fix**: Don't use `date +%N` on the router. For latency measurement use `curl -w '%{time_connect}'`.
 
+#### BusyBox `sleep` takes whole seconds only `ACTIVE` (tooling gotcha)
+- **Symptom**: The split VPN `svctl.sh` daemon wait loop used `sleep 0.5`, which BusyBox rejects, so the loop didn't wait as intended.
+- **Fix**: Use whole seconds (`sleep 1`) and count iterations.
+
+#### BusyBox `timeout` can't run shell functions `ACTIVE` (tooling gotcha)
+- **Symptom**: `timeout 150 nsx …` in `svctl.sh` failed because `nsx` is a shell function and `timeout` needs a binary.
+- **Fix**: Write the command out inline (`timeout 150 ip netns exec … sh -c '…'`). The same applies to `xargs`, `nohup`, and anything else that `exec`s its argument.
+
+#### BusyBox has no `unshare` `ACTIVE` (tooling gotcha / limitation)
+- **Impact**: Split VPN slots get a network namespace and a per-call mount namespace (`ip netns exec`), but no IPC namespace. The Barracuda daemon's POSIX message queues are shared across slots, so only one connected Barracuda instance at a time is guaranteed.
+
 ### Frontend polish
 
 #### Various `DeviceRow` / `DeviceListItem` cleanups `ACTIVE`
@@ -454,6 +490,10 @@ Paste-ready reminders to skim before acting on the router.
 - **Mangle rules must be created AFTER `firewall reload`.** Otherwise fw3 wipes them.
 - **fw3 silently ignores zones with names > 11 chars** and UCI `hash:mac` ipsets. Always `firewall reload 2>&1` and read warnings.
 - **A firewall include with `reload='1'` re-runs on every firewall reload.** `reload='0'` runs only on `firewall start`. Our includes are all `reload='1'`.
+- **GL only VPN-routes `lan`/`guest` unless told otherwise.** Every app network must be in `route_policy.global.append_source_if`, applied by `vpn-client restart`.
+- **Never accept marked traffic in FORWARD without `-o <VPN iface>`.** An unscoped mark accept defeats zone isolation.
+- **Firmware ≥ 4.11: never `rmmod mt_wifi`** (kernel panic). `sync` after UCI commits before risky steps.
+- **Firmware ≥ 4.11: every `protonwgN` needs `network.protonwgN.gl_vpn_instance=1`.** Without it, kernel WG tunnels stick at "connecting".
 
 ### Proton-wg
 - **`killall proton-wg` kills every proton-wg tunnel.** Always target by iface via `/proc/<pid>/environ`.
@@ -477,7 +517,7 @@ Paste-ready reminders to skim before acting on the router.
 - **Proton-wg DNS port = `2000 + (mark >> 12) * 100 + 53`** → 2653, 2753, 2953, 3553.
 
 ### BusyBox tooling
-- No `nc -z / -w`. No `date +%N`. No `nslookup -p`. Use `curl -sf --max-time N` for port/latency tests.
+- No `nc -z / -w`. No `date +%N`. No `nslookup -p`. No `grep -P`. No `unshare`. `sleep` takes whole seconds only. `timeout` can't run shell functions. Use `curl -sf --max-time N` for port/latency tests.
 
 ### Backup / profile store
 - **Router backup is unconditional source of truth on unlock.** No fingerprinting, no timestamp comparison.

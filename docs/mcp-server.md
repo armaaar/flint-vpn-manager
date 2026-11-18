@@ -30,7 +30,7 @@ The server exposes tools under the `flint_*` prefix, grouped by module:
 
 A Split VPN is a third-party VPN (currently Barracuda CloudGen, e.g. a company VPN) that runs on the router and carries only selected destinations (domains / IPv4 ranges) for selected groups; those groups keep their Proton VPN for everything else.
 
-- **Runtime**: the VPN client binaries must be on the router first. Check `runtime.installed` from `flint_list_split_vpns`; if false, call `flint_install_split_vpn_runtime` (downloads ~70MB, can take several minutes; the MCP client allows up to 11 minutes).
+- **Runtime**: the VPN client binaries must be on the router first. Check `runtime.installed` from `flint_list_split_vpns`; if false, call `flint_install_split_vpn_runtime`. It downloads nothing: it verifies and uploads the files in the app host's `runtime/` folder (the Barracuda 5.3.10 archive from the vendor portal + the qemu built by `tools/qemu/build.sh`; `runtime.local_files` shows which are present). It can take several minutes; the MCP client allows up to 11 minutes.
 - **Master password**: `flint_create_split_vpn` needs the VPN account `password` plus the app's `master_password`, because the account password is stored encrypted in `secrets.enc`. `flint_update_split_vpn` needs both only when changing the password.
 - **OTP**: codes are generated from the stored TOTP secret, so `flint_connect_split_vpn` normally needs only `vpn_id` (pass `otp` only when `has_totp` is false). VPNs with `auto_connect` reconnect on their own. Connecting can take up to ~2.5 minutes (the MCP client allows 210s for this call). On failure, read `flint_get_split_vpn_log`.
 - **List fields** (`group_ids`, `domains`, `cidrs`) on update replace the existing list.

@@ -29,6 +29,18 @@ Layering (SSH → tools → facades) is in `docs/internals/router-layer-internal
   `build_gl_vpn_instance_marker_cmds` and proton-wg-internals.md.
 - Only app-created networks (`fvpn_*`) may be deleted; GL's own networks use
   anonymous firewall sections the delete code can't clean.
+- **GL only VPN-routes `lan`/`guest` by default**: its `VPN_PREROUTING_HOOK`
+  jumps to mangle `ROUTE_POLICY` only for `-i br-lan`/`-i br-guest`, and zone
+  forwardings to the VPN zones are only made from those. Every app network must
+  be in `route_policy.global.append_source_if` (space-separated; GL validates
+  each with `ubus call network.interface.<if> status`; applied by a
+  `vpn-client restart`). `RouterLanAccess.sync_vpn_source_ifs` keeps it in sync.
+- **Never accept "mark != 0" in FORWARD without an `-o` VPN interface** — it
+  lets VPN-grouped devices reach other LAN bridges. Accepts are scoped to
+  `-o wgclient+/ovpnclient+/protonwg+/fvsv+` (`vpn_egress_accept_rules`).
+- **busybox**: `sleep` takes whole seconds only; `timeout` runs binaries, not
+  shell functions; there's no `unshare` (and no `nc -z`, `date +%N`,
+  `grep -P`). Test generated scripts against busybox, not your host shell.
 
 ## fwmark / table map (mask 0xf000)
 
@@ -44,7 +56,14 @@ Pick new marks only from what's left, and update this table.
 ## Split VPNs
 
 `facades/split_vpn.py` — read `docs/internals/split-vpn-internals.md` first.
-The Barracuda client runs in netns `fvpn_sv<N>` under `qemu-x86_64`; the
-generated `svctl.sh` is the only thing that starts/stops it. Credentials reach
-the client on stdin from a 0600 tmpfs file — never put a password or OTP in a
-command string. OTPs come from `backend/vpn/totp.py` (stored TOTP secret).
+The Barracuda 5.3.10 client (`barracudavpn-daemon` + `barracudavpn` CLI) runs
+in netns `fvpn_sv<N>` under a patched `qemu-x86_64` (tools/qemu/); the
+generated `svctl.sh` is the only thing that starts/stops it. Daemon and CLI
+share `/tmp/fvsv<N>run` bind-mounted over `/run` (OpenWrt has no `/run`, and
+each `ip netns exec` has its own mount namespace). The tunnel is an L3 **`tap0`**
+(the namespace firewall allows `tun+` and `tap+`). Credentials reach svctl on
+stdin from a 0600 tmpfs file — never put a password or OTP in an SSH command
+string or a log (svctl itself passes them to the CLI as args, root-visible on
+the router only while it runs). OTPs come from `backend/vpn/totp.py`. Only one
+connected Barracuda instance is guaranteed (no `unshare`, so the daemon's
+message queues aren't per-slot).
