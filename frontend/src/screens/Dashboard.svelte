@@ -10,6 +10,7 @@
   import SettingsPage from '../lib/components/settings/SettingsPage.svelte';
   import LanAccessPage from '../lib/components/lan/LanAccessPage.svelte';
   import VpnBypassPage from '../lib/components/bypass/VpnBypassPage.svelte';
+  import SplitVpnPage from '../lib/components/splitvpn/SplitVpnPage.svelte';
   import LogsModal from '../lib/components/modals/LogsModal.svelte';
 
   let refreshing = false;
@@ -22,7 +23,7 @@
   let selectedDevice = null;
   let showCreate = false;
   let editProfile = null;
-  let dashboardView = 'dashboard'; // 'dashboard' | 'settings' | 'networks' | 'bypass'
+  let dashboardView = 'dashboard'; // 'dashboard' | 'settings' | 'networks' | 'bypass' | 'split-vpns'
   let settingsTab = '';  // passed to SettingsPage from hash
   let showLogs = false;
   let showServerPicker = false;
@@ -49,6 +50,9 @@
     } else if (hash === 'bypass') {
       dashboardView = 'bypass';
       settingsTab = '';
+    } else if (hash === 'split-vpns') {
+      dashboardView = 'split-vpns';
+      settingsTab = '';
     } else {
       dashboardView = 'dashboard';
       settingsTab = '';
@@ -62,6 +66,8 @@
       window.location.hash = 'networks';
     } else if (view === 'bypass') {
       window.location.hash = 'bypass';
+    } else if (view === 'split-vpns') {
+      window.location.hash = 'split-vpns';
     } else {
       window.location.hash = '';
     }
@@ -225,6 +231,7 @@
       <a href="#" class:active={dashboardView === 'dashboard'} on:click|preventDefault={() => navigateTo('dashboard')}><span class="nav-icon">☰</span> Dashboard</a>
       <a href="#networks" class:active={dashboardView === 'networks'} on:click|preventDefault={() => navigateTo('networks')}><span class="nav-icon">🔗</span> Networks</a>
       <a href="#bypass" class:active={dashboardView === 'bypass'} on:click|preventDefault={() => navigateTo('bypass')}><span class="nav-icon">🔀</span> VPN Bypass</a>
+      <a href="#split-vpns" class:active={dashboardView === 'split-vpns'} on:click|preventDefault={() => navigateTo('split-vpns')}><span class="nav-icon">🏢</span> Split VPNs</a>
       <a href="#settings" class:active={dashboardView === 'settings'} on:click|preventDefault={() => navigateTo('settings')}><span class="nav-icon">⚙</span> Settings</a>
       <a href="#" on:click|preventDefault={() => showLogs = true}><span class="nav-icon">📋</span> Logs</a>
     </div>
@@ -262,6 +269,8 @@
       <LanAccessPage on:back={() => navigateTo('dashboard')} />
     {:else if dashboardView === 'bypass'}
       <VpnBypassPage on:back={() => navigateTo('dashboard')} />
+    {:else if dashboardView === 'split-vpns'}
+      <SplitVpnPage on:back={() => navigateTo('dashboard')} />
     {:else}
     <div class="content-header">
       <h2>Dashboard</h2>

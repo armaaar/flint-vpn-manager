@@ -236,6 +236,60 @@ export interface BypassOverview {
   dnsmasq_full_installed: boolean;
 }
 
+// ── Split VPN Types ───────────────────────────────────────────────────────
+
+export type SplitVpnTunnelMode = 'TCP' | 'UDP' | 'HYBRID';
+
+export interface SplitVpnStatus {
+  state: string;
+  ip?: string;
+  gateway?: string;
+  dns?: string[];
+  routes?: string[];
+  connected: boolean;
+  error?: string;
+}
+
+export interface SplitVpn {
+  id: string;
+  type: 'barracuda';
+  slot: number;
+  name: string;
+  server: string;
+  port: number;
+  tunnel_mode: SplitVpnTunnelMode;
+  username: string;
+  group_ids: string[];
+  domains: string[];
+  cidrs: string[];
+  use_pushed_routes: boolean;
+  auto_connect: boolean;
+  enabled: boolean;
+  pushed_routes: string[];
+  pushed_dns: string[];
+  last_connected_at?: number;   // unix seconds
+  has_password: boolean;
+  has_totp: boolean;
+  status?: SplitVpnStatus;
+}
+
+export interface SplitVpnRuntime {
+  installed: boolean;
+  files?: Record<string, boolean>;
+  error?: string;
+}
+
+export interface SplitVpnOverview {
+  vpns: SplitVpn[];
+  runtime: SplitVpnRuntime;
+  max: number;
+}
+
+export interface SplitVpnConnectResult extends SplitVpnStatus {
+  log?: string;
+  rc?: number;
+}
+
 // ── Toast ──────────────────────────────────────────────────────────────────
 
 export interface ToastMessage {

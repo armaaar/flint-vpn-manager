@@ -3,6 +3,7 @@
 import type {
   Profile, Device, ServerInfo, AppSettings, AdblockSettings,
   LanNetwork, LanException, AccessRule, BypassOverview, BypassException,
+  SplitVpn, SplitVpnOverview, SplitVpnRuntime, SplitVpnConnectResult,
 } from './types';
 
 const BASE = '';
@@ -105,6 +106,18 @@ export const api = {
   updateCustomPreset: (id: string, data: Record<string, unknown>) => request(`/api/vpn-bypass/presets/${id}`, { method: 'PUT', body: data }),
   deleteCustomPreset: (id: string) => request(`/api/vpn-bypass/presets/${id}`, { method: 'DELETE' }),
   installDnsmasqFull: () => request('/api/vpn-bypass/dnsmasq-install', { method: 'POST' }),
+
+  // Split VPNs
+  getSplitVpns: (live = true) => request<SplitVpnOverview>(`/api/split-vpns?live=${live ? 1 : 0}`),
+  createSplitVpn: (data: Record<string, unknown>) => request<SplitVpn>('/api/split-vpns', { method: 'POST', body: data }),
+  updateSplitVpn: (id: string, data: Record<string, unknown>) => request<SplitVpn>(`/api/split-vpns/${id}`, { method: 'PUT', body: data }),
+  deleteSplitVpn: (id: string) => request<{ success: boolean }>(`/api/split-vpns/${id}`, { method: 'DELETE' }),
+  /** Without `otp` the backend generates the code from the stored TOTP secret. */
+  connectSplitVpn: (id: string, otp?: string) => request<SplitVpnConnectResult>(`/api/split-vpns/${id}/connect`, { method: 'POST', body: otp ? { otp } : {} }),
+  disconnectSplitVpn: (id: string) => request<{ success: boolean }>(`/api/split-vpns/${id}/disconnect`, { method: 'POST' }),
+  getSplitVpnLog: (id: string) => request<{ log: string }>(`/api/split-vpns/${id}/log`),
+  getSplitVpnRuntime: () => request<SplitVpnRuntime>('/api/split-vpns/runtime'),
+  installSplitVpnRuntime: () => request<SplitVpnRuntime>('/api/split-vpns/runtime/install', { method: 'POST' }),
 
   // Refresh
   refresh: () => request('/api/refresh', { method: 'POST' }),

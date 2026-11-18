@@ -24,6 +24,7 @@ src/
 │   │   └── app.ts                       # Global stores: profiles, devices, SSE, toast, reloadData()
 │   │
 │   ├── utils/
+│   │   ├── splitVpn.ts                  # Split VPN form state + payload builder (omits unchanged secrets)
 │   │   ├── format.ts                    # timeAgo, formatBytes, formatSpeed, loadBarColor
 │   │   ├── device.ts                    # isOnline, isStale, deviceIcon, DEVICE_TYPES
 │   │   ├── country.ts                   # countryFlag, countryFlagUrl, countryName
@@ -63,6 +64,12 @@ src/
 │       │   ├── VpnBypassPage.svelte     # VPN bypass exceptions: list, presets, dnsmasq status
 │       │   └── BypassExceptionModal.svelte # Create/edit bypass exception (preset picker, scope, rules)
 │       │
+│       ├── splitvpn/
+│       │   ├── SplitVpnPage.svelte      # Split VPNs (third-party VPN for selected groups/destinations): list, runtime banner
+│       │   ├── SplitVpnModal.svelte     # Create/edit: server, credentials + TOTP secret (master pw), groups, domains/CIDRs
+│       │   ├── SplitVpnConnectModal.svelte # Connect progress (auto TOTP or manual code), error + client log tail
+│       │   └── SplitVpnLogModal.svelte  # Client connect log viewer
+│       │
 │       └── modals/
 │           ├── DeviceModal.svelte       # Device detail: label, type, group assignment
 │           └── LogsModal.svelte         # Log viewer with tabs (app.log, error.log, access.log)
@@ -73,7 +80,9 @@ src/
 │   ├── stores-extended.test.js          # SSE handling, reloadData, devicesForProfile
 │   ├── utils.test.js                    # Format, device, country utility tests
 │   ├── color.test.js                    # hexToHSL, gradient generation tests
-│   └── profile.test.js                  # connState, statusLabel, statusClass tests
+│   ├── profile.test.js                  # connState, statusLabel, statusClass tests
+│   ├── splitVpn.test.js                 # Split VPN API client + form helper tests
+│   └── splitVpnComponents.test.js       # Split VPN connect dialog + form component tests (@testing-library/svelte)
 │
 e2e/                                     # Playwright E2E tests (against real backend + router)
 ├── helpers.ts                           # unlockApp(), lockApp(), uniqueName(), API helpers
@@ -129,6 +138,8 @@ Sentry-inspired dark theme. All colors, fonts, shadows, and radii defined as CSS
 Hash-based routing in `Dashboard.svelte`:
 - `#/` or `#` → Dashboard view (group cards)
 - `#networks` → LanAccessPage
+- `#bypass` → VpnBypassPage
+- `#split-vpns` → SplitVpnPage
 - `#settings` or `#settings/{tab}` → SettingsPage
 
 ## Key Patterns
