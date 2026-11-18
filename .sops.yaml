@@ -1,5 +1,5 @@
 # SOPS config — secrets are encrypted to the owner's age key.
-# Edit secrets with:  sops secrets/flint.sops.yaml
+# Edit secrets with:  sops secrets/flint.enc.yaml
 creation_rules:
-  - path_regex: ^secrets/.*\.sops\.ya?ml$
+  - path_regex: ^secrets/.*\.enc\.ya?ml$
     age: age1celdqedmxyd6hyfq0rpdm9056srjqaqyh0j7js0yyvtcqcq5pvvqpvahum

@@ -1,6 +1,6 @@
 """Read-only access to the SOPS-encrypted secrets file.
 
-The file (default ``secrets/flint.sops.yaml``, override with the
+The file (default ``secrets/flint.enc.yaml``, override with the
 ``sops_secrets_file`` config key or ``FLINT_SOPS_FILE``) is encrypted with
 the owner's age key and edited by the owner with ``sops <file>`` — the app
 only ever decrypts it, in memory, when a value is needed. Decryption uses the
@@ -29,7 +29,7 @@ import time
 from pathlib import Path
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_FILE = "secrets/flint.sops.yaml"
+DEFAULT_FILE = "secrets/flint.enc.yaml"
 _CACHE_TTL = 30  # seconds; also invalidated when the file changes
 _PLACEHOLDER = "CHANGE_ME"
 

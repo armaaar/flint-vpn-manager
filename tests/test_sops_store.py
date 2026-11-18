@@ -11,7 +11,7 @@ import persistence.sops_store as sops
 
 @pytest.fixture(autouse=True)
 def _fresh(tmp_path, monkeypatch):
-    f = tmp_path / "flint.sops.yaml"
+    f = tmp_path / "flint.enc.yaml"
     f.write_text("encrypted")
     monkeypatch.setenv("FLINT_SOPS_FILE", str(f))
     monkeypatch.setattr(sops, "sops_binary", lambda: "/usr/bin/sops")

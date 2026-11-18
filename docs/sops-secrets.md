@@ -11,15 +11,15 @@ Template: [`secrets/flint.example.yaml`](../secrets/flint.example.yaml). Values 
 
 ## Files
 
-- `.sops.yaml` — creation rule: `secrets/*.sops.yaml` encrypts to the owner's **age** public key.
-- `secrets/flint.sops.yaml` — the encrypted file. **Gitignored** (this repo is public; an encrypted copy in git history would be permanent).
+- `.sops.yaml` — creation rule: `secrets/*.enc.yaml` encrypts to the owner's **age** public key.
+- `secrets/flint.enc.yaml` — the encrypted file. **Gitignored** (this repo is public; an encrypted copy in git history would be permanent).
 - Private key — standard SOPS location `~/.config/sops/age/keys.txt` (or `SOPS_AGE_KEY_FILE`). Never in the repo.
 - Override the file path with `FLINT_SOPS_FILE` or `sops_secrets_file` in `config.json`.
 
 ## Editing
 
 ```bash
-sops secrets/flint.sops.yaml      # decrypts into $EDITOR, re-encrypts on save
+sops secrets/flint.enc.yaml      # decrypts into $EDITOR, re-encrypts on save
 ```
 
 Changes are picked up automatically (the app re-reads the file when it changes; there's a 30 s cache otherwise). Auto-unlock only happens at startup — restart the service after adding the master password.

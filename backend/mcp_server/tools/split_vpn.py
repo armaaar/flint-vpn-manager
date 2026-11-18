@@ -67,7 +67,7 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
 
         Credentials come from one of two places:
         - secret_ref (preferred): name of an entry under ``split_vpns`` in the
-          SOPS secrets file (secrets/flint.sops.yaml) holding username,
+          SOPS secrets file (secrets/flint.enc.yaml) holding username,
           password and totp_secret. No secrets pass through the tool call.
         - password (+ totp_secret) stored encrypted by the app, which needs
           the app's master password. Ask the human; never guess.

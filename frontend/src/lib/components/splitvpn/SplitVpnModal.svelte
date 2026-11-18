@@ -117,7 +117,7 @@
             <div class="form-group">
               <label for="sv-ref" class="required">SOPS reference</label>
               <input id="sv-ref" type="text" bind:value={form.secret_ref} placeholder="e.g. work" autocomplete="off" spellcheck="false" />
-              <span class="hint">Entry under <code>split_vpns</code> in <code>secrets/flint.sops.yaml</code> with <code>password</code>, <code>totp_secret</code> and optionally <code>username</code>. Edit it with <code>sops secrets/flint.sops.yaml</code>.</span>
+              <span class="hint">Entry under <code>split_vpns</code> in <code>secrets/flint.enc.yaml</code> with <code>password</code>, <code>totp_secret</code> and optionally <code>username</code>. Edit it with <code>sops secrets/flint.enc.yaml</code>.</span>
             </div>
             <div class="form-group">
               <label for="sv-user-sops">Username</label>
