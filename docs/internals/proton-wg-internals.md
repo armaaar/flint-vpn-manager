@@ -98,6 +98,26 @@ Proton's wg-tls re-encapsulates WireGuard inside obfuscated TLS-over-TCP, adding
 
 The MSS clamp's idempotency depends on its self-cleaning sweep matching the rules it emitted. `iptables-save` quotes any `--comment` value containing whitespace (`--comment "foo bar"`), and word-splitting on the unquoted `iptables -t mangle $line` reads the literal `"` characters as part of the words → the delete fails silently → duplicates accumulate per reconnect. Always use a space-free tag (`fvpn-mss-protonwg0`, hyphens or underscores). This applies to **any** iptables `--comment` used by a self-cleaning sweep, not just MSS clamps.
 
+## GL 4.11 IP conflict check — gl_vpn_instance marker
+
+GL firmware 4.11 added "VPN IP address conflict detection". When a kernel WireGuard tunnel (`wgclientN`, GL vpn-client) comes up, `/etc/hotplug.d/wireguard/ifup.sh` calls `client_check_ip_validity` (`/lib/functions/vpn_client_func.sh`). It lists every local IPv4 address (`ip -4 -o addr show`) and treats one matching the tunnel's own address as a conflict, **unless** `uci -q get network.<ifname>.gl_vpn_instance` is `1` (the holder is then taken to be another VPN client and ignored).
+
+Every Proton WireGuard client uses `10.2.0.2/32`. Our userspace `protonwgN` interfaces hold that address but GL knows nothing about them (no `network.*` section). So any kernel WG tunnel (re)connected while a proton-wg tunnel is up stayed **"connecting" forever**: it got no address, and GL wrote `/tmp/run/vpn_tmp_dir/vpn_if_info/wgclientN/conflict_info` naming `protonwg0`. Seen live on 4.11.0.
+
+**Fix:** a marker-only UCI section per proton-wg interface:
+
+```
+uci set network.protonwg0=interface
+uci set network.protonwg0.proto=none
+uci set network.protonwg0.disabled=1
+uci set network.protonwg0.gl_vpn_instance=1
+uci commit network; sync
+```
+
+It looks wrong (a disabled network interface with no device), but that's on purpose: with no `device` and `disabled=1`, netifd never manages it, so **no network reload is needed**, and network reload/restart is forbidden anyway. Side effects we checked: `check_ip_conflict.sh`'s DNS check skips disabled sections. `rtp2.sh`'s `hotplug_source_if_set_firewall` may add a GL forwarding `src=<lan zone> dest=protonwgN`, which the app already allows, so it's harmless.
+
+**Code:** `build_gl_vpn_instance_marker_cmds()` (module-level, pure) builds the commands. `RouterProtonWG.ensure_gl_vpn_instance_marker()` runs on `upload_proton_wg_config` and `start_proton_wg_tunnel` (before the address is added). `remove_gl_vpn_instance_marker()` runs on `delete_proton_wg_config`; it only deletes sections that have `gl_vpn_instance=1`. `reconcile_gl_vpn_instance_markers()` runs on every unlock (`IpsetOps.reconcile_proton_wg_full`). It ensures markers for every tunnel with a `.conf` or a live `protonwgN` link, and drops markers of free slots. `stop_proton_wg_tunnel` leaves the marker: the config still exists, and the boot init script can bring the tunnel up without the app.
+
 ## Device registration names
 
 Proton cert registrations use `"FlintVPN-{profile_name}"` as the device name (see `_register_persistent_cert`; a name already starting with `FlintVPN` is passed through unprefixed). Since persistent certs cannot be deleted via the VPN API (requires `password` scope, returns 403 with VPN token), meaningful names matter. Cleanup is only possible through the Proton web dashboard at account.protonvpn.com → Downloads → WireGuard configurations.

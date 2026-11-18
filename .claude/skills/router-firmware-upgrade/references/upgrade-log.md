@@ -39,6 +39,10 @@ the next upgrade faster.
   `_reload_wifi_driver` now does `sync` + clean reboot on firmware ≥ 4.11. **Lesson for the
   runbook: after an upgrade, re-test every app path that touches kernel modules (driver
   reloads) before relying on it, ideally at a time an outage is acceptable.**
+- **Kernel WG tunnels stuck connecting after 4.11**: GL's new VPN IP conflict check
+  (`client_check_ip_validity`) saw `protonwg0` holding 10.2.0.2. Fixed with a `network.protonwgN`
+  `gl_vpn_instance=1` marker (disabled, `proto=none`, no network reload). The app now writes it on
+  create/connect/unlock and removes it on delete. verify.sh checks it.
 - Open risk (resolved by deleting the legacy iot network): 5G will need `BssidNum=6` once the Work network is added — >5 unverified on MT7986.
   Option: delete the disabled legacy GL `iot` network (iot2g/iot5g, duplicate ra2/rax2 ifnames) to
   free a slot on each radio.

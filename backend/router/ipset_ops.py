@@ -56,12 +56,20 @@ class IpsetOps:
     def reconcile_proton_wg_full(self, store_data=None):
         """Full reconciliation: sync .macs files, rebuild mangle rules + ipsets.
 
-        Called on app unlock. Writes .macs files from local store, then
-        rebuilds the entire mangle rules script (which includes ipset
-        creation and population from those files).
+        Called on app unlock. Ensures the GL 4.11 gl_vpn_instance markers,
+        writes .macs files from local store, then rebuilds the entire mangle
+        rules script (which includes ipset creation and population from
+        those files).
         """
         if store_data is None:
             store_data = ps.load()
+        # GL 4.11 IP conflict check: make sure every proton-wg tunnel has its
+        # gl_vpn_instance marker, so routers whose tunnels predate the marker
+        # get fixed on the next unlock (else kernel WG tunnels stick connecting).
+        try:
+            self._router.proton_wg.reconcile_gl_vpn_instance_markers()
+        except Exception as e:
+            log.warning(f"Failed to reconcile proton-wg gl_vpn_instance markers: {e}")
         self._sync_macs_to_router(store_data)
         self._router.proton_wg.rebuild_mangle_rules()
 

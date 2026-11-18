@@ -284,6 +284,7 @@ Writes three files per tunnel under `/etc/fvpn/protonwg/`:
 - `<iface>.macs` — empty file; device MACs get appended here.
 - Creates `pwg_mac_<tunnel_id>` ipset (`hash:mac`).
 - Installs `/etc/init.d/fvpn-protonwg` for boot persistence (see §3.3.1).
+- Writes the GL 4.11 IP-conflict marker `network.<iface>` (`proto=none`, `disabled=1`, `gl_vpn_instance=1`) + `uci commit network; sync`. Without it, kernel WG tunnels connected while the proton-wg tunnel holds `10.2.0.2` stay "connecting" forever. Also ensured on every connect and on unlock, and removed on delete. See proton-wg-internals.md "GL 4.11 IP conflict check".
 
 **Connect** (`start_proton_wg_tunnel`, [backend/router/facades/proton_wg.py:207-312](backend/router/facades/proton_wg.py#L207-L312)):
 ```sh
@@ -358,7 +359,7 @@ kill $pid
 
 **Switch server**: rewrite `.conf` file + `wg setconf <iface> <conf>` on live interface (zero-flicker).
 
-**Delete**: best-effort stop → `rm /etc/fvpn/protonwg/<iface>.{conf,env,macs}` → `ipset destroy pwg_mac_<tid>` → rebuild mangle script.
+**Delete**: best-effort stop → `rm /etc/fvpn/protonwg/<iface>.{conf,env,macs}` → `ipset destroy pwg_mac_<tid>` → delete `network.<iface>` marker → rebuild mangle script.
 
 #### 3.3.1 Boot persistence init script
 
@@ -1233,6 +1234,7 @@ Reverse lookup: given an artifact you found on the router, which feature owns it
 | `/etc/config/firewall` | `fvpn_*_mdns` | mDNS reflection firewall rule (§21) |
 | `/etc/config/firewall` | `fvpn_noint_include`, `fvpn_vpn_bypass`, `fvpn_adblock`, `fvpn_pwg_mangle`, `fvpn_lan_access`, `fvpn_ipv6_fwd`, `fvpn_ipv6_mangle`, `fvpn_splitvpn` | Firewall include registrations (§24) |
 | `/etc/config/network` | `fvpn_<zid>` | User-created LAN interface (§17) |
+| `/etc/config/network` | `protonwg<N>` (`proto=none`, `disabled=1`, `gl_vpn_instance=1`) | Proton-wg marker for GL 4.11's VPN IP conflict check; never managed by netifd, no network reload (§3.3, proton-wg-internals.md) |
 | `/etc/config/network` | `wan6` (managed) | IPv6 WAN (§22) |
 | `/etc/config/wireless` | `fvpn_<zid>_2g`, `fvpn_<zid>_5g` | User-created SSIDs (§17) |
 | `/etc/config/wireless` | `<iface>.isolate` | AP isolation (§18) |

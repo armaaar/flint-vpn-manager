@@ -638,3 +638,112 @@ class TestBuildMssClampCmds:
         # Sweep still runs (cleans up stale rules); no add commands
         assert any("-S FORWARD" in c for c in cmds)
         assert not any("-I FORWARD 1" in c for c in cmds)
+
+
+class TestGlVpnInstanceMarker:
+    """GL 4.11 IP conflict check: every protonwgN needs a disabled
+    network.<iface> section with gl_vpn_instance=1, managed via UCI only."""
+
+    _FORBIDDEN = ("network reload", "network restart", "ifup", "ifdown",
+                  "/etc/init.d/network")
+
+    @classmethod
+    def _assert_no_network_reload(cls, *mocks):
+        for m in mocks:
+            for c in m.mock_calls:
+                text = str(c)
+                for bad in cls._FORBIDDEN:
+                    assert bad not in text, f"forbidden {bad!r} in {text}"
+
+    @staticmethod
+    def _multi_cmds(uci):
+        return [cmd for c in uci.multi.call_args_list for cmd in c.args[0]]
+
+    def test_builder_ensure(self):
+        from router.facades.proton_wg import build_gl_vpn_instance_marker_cmds
+        cmds = build_gl_vpn_instance_marker_cmds(ensure=["protonwg0"])
+        assert cmds == [
+            "uci set network.protonwg0=interface",
+            "uci set network.protonwg0.proto='none'",
+            "uci set network.protonwg0.disabled='1'",
+            "uci set network.protonwg0.gl_vpn_instance='1'",
+            "uci commit network",
+            "sync",
+        ]
+
+    def test_builder_remove_only_deletes_markers(self):
+        from router.facades.proton_wg import build_gl_vpn_instance_marker_cmds
+        cmds = build_gl_vpn_instance_marker_cmds(remove=["protonwg2"])
+        assert "uci -q get network.protonwg2.gl_vpn_instance" in cmds[0]
+        assert "uci -q delete network.protonwg2" in cmds[0]
+        assert cmds[-2:] == ["uci commit network", "sync"]
+
+    def test_builder_empty_is_noop(self):
+        from router.facades.proton_wg import build_gl_vpn_instance_marker_cmds
+        assert build_gl_vpn_instance_marker_cmds() == []
+
+    @pytest.mark.parametrize("bad", ["lan", "wan", "protonwg", "protonwg0; reboot", "protonwg0\n", ""])
+    def test_builder_rejects_non_protonwg_names(self, bad):
+        from router.facades.proton_wg import build_gl_vpn_instance_marker_cmds
+        with pytest.raises(ValueError):
+            build_gl_vpn_instance_marker_cmds(ensure=[bad])
+        with pytest.raises(ValueError):
+            build_gl_vpn_instance_marker_cmds(remove=[bad])
+
+    def test_marker_created_on_upload(self, pwg, ssh, uci, ipset):
+        ssh.exec.return_value = ""
+        pwg.upload_proton_wg_config("NL", "p", "P", "1.2.3.4:443")
+        cmds = self._multi_cmds(uci)
+        assert "uci set network.protonwg0.gl_vpn_instance='1'" in cmds
+        assert "uci set network.protonwg0.disabled='1'" in cmds
+        assert "uci commit network" in cmds and "sync" in cmds
+        self._assert_no_network_reload(ssh, uci)
+
+    def test_marker_created_on_start_before_address(self, pwg, ssh, uci, ipset, iproute):
+        def exec_side_effect(cmd, **_kw):
+            if "[ -x" in cmd:
+                return "ok"
+            if "[ -f " in cmd and ".env" in cmd:
+                return "yes"
+            if "ip link show" in cmd:
+                return "24: protonwg1"
+            if "wg show" in cmd:
+                return "peer\t12345"
+            return ""
+        ssh.exec.side_effect = exec_side_effect
+        order = []
+        uci.multi.side_effect = lambda cmds: order.append(("multi", list(cmds)))
+        iproute.addr_add.side_effect = lambda *a: order.append(("addr_add", a))
+        with patch("time.sleep"):
+            pwg.start_proton_wg_tunnel("protonwg1", "0x7000", 1007, 101)
+        marker = [i for i, (k, v) in enumerate(order)
+                  if k == "multi" and "uci set network.protonwg1.gl_vpn_instance='1'" in v]
+        addr = [i for i, (k, _) in enumerate(order) if k == "addr_add"]
+        assert marker and addr and marker[0] < addr[0]
+        self._assert_no_network_reload(ssh, uci, iproute)
+
+    def test_marker_removed_on_delete(self, pwg, ssh, uci, ipset):
+        ssh.exec.return_value = ""
+        pwg.delete_proton_wg_config("protonwg0", 100)
+        cmds = self._multi_cmds(uci)
+        assert any("uci -q delete network.protonwg0" in c for c in cmds)
+        assert not any(c.startswith("uci set network.") for c in cmds)
+        self._assert_no_network_reload(ssh, uci)
+
+    def test_reconcile_ensures_all_tunnels_and_drops_free_slots(self, pwg, ssh, uci):
+        # protonwg0 + protonwg2 have confs; protonwg3 is a live link without conf
+        ssh.exec.return_value = "protonwg0\nprotonwg2\nprotonwg3\nprotonwg0\n"
+        ensured = pwg.reconcile_gl_vpn_instance_markers()
+        assert ensured == ["protonwg0", "protonwg2", "protonwg3"]
+        uci.multi.assert_called_once()
+        cmds = uci.multi.call_args.args[0]
+        for iface in ensured:
+            assert f"uci set network.{iface}.gl_vpn_instance='1'" in cmds
+        assert any("uci -q delete network.protonwg1" in c for c in cmds)
+        assert not any("delete network.protonwg0" in c for c in cmds)
+        assert cmds[-2:] == ["uci commit network", "sync"]
+        self._assert_no_network_reload(ssh, uci)
+
+    def test_reconcile_ignores_junk_lines(self, pwg, ssh, uci):
+        ssh.exec.return_value = "mangle_rules\nprotonwg1\nwgclient1\n"
+        assert pwg.reconcile_gl_vpn_instance_markers() == ["protonwg1"]

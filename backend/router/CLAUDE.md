@@ -22,6 +22,11 @@ Layering (SSH → tools → facades) is in `docs/internals/router-layer-internal
 - **Never `rmmod mt_wifi` on firmware ≥ 4.11** — it panicked the router and the
   unflushed UCI commit was lost. `_reload_wifi_driver` syncs + reboots there.
   Run `sync` after committing UCI before any risky step.
+- **Firmware ≥ 4.11 checks VPN IP conflicts**: a kernel WG tunnel stays
+  "connecting" while any local interface holds its address (10.2.0.2), unless
+  `network.<ifname>.gl_vpn_instance=1`. Every `protonwgN` needs that marker
+  section (disabled, `proto=none`, no device, so no network reload). See
+  `build_gl_vpn_instance_marker_cmds` and proton-wg-internals.md.
 - Only app-created networks (`fvpn_*`) may be deleted; GL's own networks use
   anonymous firewall sections the delete code can't clean.
 

@@ -138,6 +138,15 @@ class TestReconcileProtonWgFull:
         router.proton_wg.write_tunnel_macs.assert_called_once()
         # Should rebuild mangle rules (which includes ipset creation + population)
         router.proton_wg.rebuild_mangle_rules.assert_called_once()
+        # GL 4.11 IP conflict markers ensured for all proton-wg tunnels
+        router.proton_wg.reconcile_gl_vpn_instance_markers.assert_called_once()
+
+    @patch("router.ipset_ops.ps.load")
+    def test_marker_failure_does_not_block_mangle_rebuild(self, mock_load, ipset, router):
+        mock_load.return_value = {"profiles": [], "device_assignments": {}}
+        router.proton_wg.reconcile_gl_vpn_instance_markers.side_effect = RuntimeError("ssh")
+        ipset.reconcile_proton_wg_full()
+        router.proton_wg.rebuild_mangle_rules.assert_called_once()
 
     @patch("router.ipset_ops.ps.load")
     def test_empty_profiles(self, mock_load, ipset, router):

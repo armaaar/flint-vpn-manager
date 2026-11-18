@@ -5,6 +5,7 @@ tunnels: process, interface, routing, firewall zones, mangle rules,
 and init.d boot persistence.
 """
 
+import re
 import time
 
 from consts import (
@@ -110,6 +111,70 @@ def _build_mss_clamp_cmds(tunnels: list) -> list[str]:
                     f"-m comment --comment '{tag}' -j TCPMSS --set-mss {v6_mss}"
                 )
     return cmds
+
+
+# ── GL 4.11 VPN IP conflict check — gl_vpn_instance marker ─────────────────
+#
+# GL firmware 4.11 added "VPN IP address conflict detection": when a kernel
+# WireGuard tunnel (wgclientN, GL vpn-client) comes up, the hotplug script
+# /etc/hotplug.d/wireguard/ifup.sh runs client_check_ip_validity
+# (/lib/functions/vpn_client_func.sh). It lists every local IPv4 address and
+# treats one equal to the tunnel's own address as a conflict -- unless
+# ``uci get network.<ifname>.gl_vpn_instance`` is '1', which marks the holder
+# as another VPN client. Every Proton WG client uses 10.2.0.2/32, and our
+# userspace protonwgN interfaces hold it without any network.* section, so a
+# kernel WG tunnel (re)connected while a proton-wg tunnel is up gets stuck
+# "connecting" forever (GL writes vpn_if_info/wgclientN/conflict_info).
+#
+# The fix is a marker-only network section per proton-wg interface. It has
+# no device and is disabled, so netifd never manages it: NO network reload is
+# needed (and network reload/restart is forbidden anyway).
+_PWG_IFACE_RE = re.compile(r"protonwg[0-9]+")
+
+
+def _check_pwg_iface(iface: str) -> str:
+    """Refuse anything that isn't a protonwgN name (it becomes a UCI path)."""
+    if not _PWG_IFACE_RE.fullmatch(iface or ""):
+        raise ValueError(f"not a proton-wg interface name: {iface!r}")
+    return iface
+
+
+def build_gl_vpn_instance_marker_cmds(ensure=(), remove=()) -> list[str]:
+    """Build the uci commands that add/remove gl_vpn_instance markers.
+
+    For each interface in *ensure*, writes (idempotently)::
+
+        network.<iface>=interface
+        network.<iface>.proto='none'
+        network.<iface>.disabled='1'
+        network.<iface>.gl_vpn_instance='1'
+
+    For each in *remove*, deletes ``network.<iface>`` -- but only if it is
+    one of our markers (``gl_vpn_instance=1``), never another network.
+    Ends with ``uci commit network`` and ``sync`` (flush to flash before
+    anything risky happens; see backend/router/CLAUDE.md). Returns ``[]``
+    when there is nothing to do. Never emits a network reload/restart.
+    """
+    cmds: list[str] = []
+    for iface in ensure:
+        sec = f"network.{_check_pwg_iface(iface)}"
+        cmds += [
+            f"uci set {sec}=interface",
+            f"uci set {sec}.proto='none'",
+            f"uci set {sec}.disabled='1'",
+            f"uci set {sec}.gl_vpn_instance='1'",
+        ]
+    for iface in remove:
+        sec = f"network.{_check_pwg_iface(iface)}"
+        cmds.append(
+            f"{{ [ \"$(uci -q get {sec}.gl_vpn_instance)\" != 1 ] || "
+            f"uci -q delete {sec} || true; }}"
+        )
+    if cmds:
+        cmds += ["uci commit network", "sync"]
+    return cmds
+
+
 # Proton-wg ipsets use a distinct prefix so vpn-client restart (which
 # flushes all src_mac_* ipsets) never touches proton-wg device assignments.
 PWG_IPSET_PREFIX = "pwg_mac_"
@@ -196,6 +261,43 @@ class RouterProtonWG:
         if not raw:
             return []
         return [m.strip().lower() for m in raw.splitlines() if m.strip()]
+
+    # ── GL 4.11 IP conflict marker (see build_gl_vpn_instance_marker_cmds) ──
+
+    def ensure_gl_vpn_instance_marker(self, iface: str) -> None:
+        """Mark *iface* as a VPN client so GL 4.11's IP conflict check skips it.
+
+        Without it, kernel WG tunnels connected while this proton-wg tunnel
+        holds 10.2.0.2 stay "connecting" forever. Idempotent; UCI only (no
+        network reload). See the comment above
+        ``build_gl_vpn_instance_marker_cmds``.
+        """
+        self._uci.multi(build_gl_vpn_instance_marker_cmds(ensure=[iface]))
+
+    def remove_gl_vpn_instance_marker(self, iface: str) -> None:
+        """Delete *iface*'s gl_vpn_instance marker (tunnel deleted)."""
+        self._uci.multi(build_gl_vpn_instance_marker_cmds(remove=[iface]))
+
+    def reconcile_gl_vpn_instance_markers(self) -> list[str]:
+        """Ensure markers for every proton-wg tunnel; drop markers of free slots.
+
+        A tunnel counts if it has a ``.conf`` on the router or a live
+        ``protonwgN`` link. Run on unlock so routers already running
+        proton-wg tunnels get fixed. Returns the interfaces ensured.
+        """
+        raw = self._ssh.exec(
+            f"ls {PROTON_WG_DIR}/*.conf 2>/dev/null | sed 's#.*/##; s#[.]conf$##'; "
+            f"ip -br link 2>/dev/null | grep -o '^protonwg[0-9]*'; true"
+        ) or ""
+        present = sorted({
+            x.strip() for x in raw.splitlines() if _PWG_IFACE_RE.fullmatch(x.strip())
+        })
+        stale = [
+            f"protonwg{i}" for i in range(len(PROTON_WG_MARKS))
+            if f"protonwg{i}" not in present
+        ]
+        self._uci.multi(build_gl_vpn_instance_marker_cmds(ensure=present, remove=stale))
+        return present
 
     # ── Tunnel discovery ────────────────────────────────────────────────────
 
@@ -305,6 +407,9 @@ class RouterProtonWG:
         )
         self._ssh.write_file(f"{PROTON_WG_DIR}/{iface}.env", env)
 
+        # GL 4.11 IP conflict check: mark the iface before it ever holds 10.2.0.2.
+        self.ensure_gl_vpn_instance_marker(iface)
+
         ipset_name = f"{PWG_IPSET_PREFIX}{tunnel_id}"
         self._ipset.create(ipset_name, "hash:mac")
 
@@ -342,6 +447,10 @@ class RouterProtonWG:
                 self._ssh.exec(f"ip link del {iface} 2>/dev/null; true")
 
         self._ipset.create(ipset_name, "hash:mac")
+
+        # GL 4.11 IP conflict check: without this marker, kernel WG tunnels
+        # (re)connected while this one holds 10.2.0.2 never get an address.
+        self.ensure_gl_vpn_instance_marker(iface)
 
         env_exists = self._ssh.exec(f"[ -f {env_path} ] && echo yes || echo no").strip()
         if env_exists != "yes":
@@ -1019,13 +1128,14 @@ class RouterProtonWG:
         self._uci.ensure_firewall_include("fvpn_ipv6_fwd", IPV6_FWD_SCRIPT)
 
     def delete_proton_wg_config(self, iface: str, tunnel_id: int) -> None:
-        """Delete proton-wg config files, ipset, and rebuild mangle rules."""
+        """Delete proton-wg config files, ipset, GL 4.11 marker; rebuild mangle rules."""
         ipset_name = f"{PWG_IPSET_PREFIX}{tunnel_id}"
         self._ssh.exec(
             f"rm -f {PROTON_WG_DIR}/{iface}.conf {PROTON_WG_DIR}/{iface}.env "
             f"{PROTON_WG_DIR}/{iface}.macs"
         )
         self._ipset.destroy(ipset_name)
+        self.remove_gl_vpn_instance_marker(iface)
         self.rebuild_mangle_rules()
 
     def ensure_proton_wg_initd(self) -> None:

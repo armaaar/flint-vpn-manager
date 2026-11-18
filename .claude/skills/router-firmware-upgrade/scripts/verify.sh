@@ -69,6 +69,12 @@ if R 'ls /etc/fvpn/protonwg/*.env' >/dev/null; then
   chk "pwg_mac_* ipsets exist"                'ipset list -n | grep -q "^pwg_mac_"'
   chk "proton-wg process running"             'pgrep -f /usr/bin/proton-wg'
 fi
+# Firmware >= 4.11 VPN IP conflict check: kernel WG tunnels stay "connecting" while a protonwgN holds
+# 10.2.0.2 unless network.<iface>.gl_vpn_instance=1 (see proton-wg-internals.md).
+for ifc in $(R 'ip -br link | grep -o "^protonwg[0-9]*"'); do
+  [ "$(R "uci -q get network.$ifc.gl_vpn_instance")" = 1 ] && ok "$ifc has gl_vpn_instance marker (GL 4.11 IP conflict check)" \
+    || bad "$ifc lacks network.$ifc.gl_vpn_instance=1 -> kernel WG tunnels stick 'connecting' (unlock the app to add it, see proton-wg-internals.md)"
+done
 chk "LAN table 9910 rules (prio 50)"          'ip rule | grep -q "lookup 9910"'
 for ifc in $(R "wg show interfaces"); do
   age=$(R "now=\$(date +%s); wg show $ifc latest-handshakes | awk -v n=\$now '{print n-\$2}' | sort -n | head -1")
