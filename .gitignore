@@ -65,3 +65,7 @@ Thumbs.db
 # Playwright E2E
 frontend/playwright-report/
 frontend/test-results/
+
+# SOPS-encrypted secrets stay local (public repo); template + .sops.yaml are tracked
+secrets/*.sops.yaml
+secrets/*.sops.yml

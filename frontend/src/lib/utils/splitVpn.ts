@@ -11,6 +11,9 @@ export interface SplitVpnForm {
   port: number | string;
   tunnel_mode: SplitVpnTunnelMode;
   username: string;
+  /** Where credentials come from: encrypted in this app, or the SOPS secrets file. */
+  cred_source: 'app' | 'sops';
+  secret_ref: string;
   password: string;
   totp_secret: string;
   master_password: string;
@@ -40,6 +43,8 @@ export function initialSplitVpnForm(vpn: SplitVpn | null): SplitVpnForm {
     port: vpn?.port || SPLIT_VPN_DEFAULT_PORT,
     tunnel_mode: vpn?.tunnel_mode || 'TCP',
     username: vpn?.username || '',
+    cred_source: vpn?.secret_ref ? 'sops' : 'app',
+    secret_ref: vpn?.secret_ref || '',
     password: '',
     totp_secret: '',
     master_password: '',
@@ -54,6 +59,7 @@ export function initialSplitVpnForm(vpn: SplitVpn | null): SplitVpnForm {
 
 /** True when the form will store a secret (password or TOTP secret), which needs the master password. */
 export function settingSecret(form: SplitVpnForm): boolean {
+  if (form.cred_source === 'sops') return false;
   return !!form.password || !!form.totp_secret.trim();
 }
 
@@ -76,6 +82,11 @@ export function buildSplitVpnPayload(form: SplitVpnForm): Record<string, unknown
     auto_connect: !!form.auto_connect,
     enabled: !!form.enabled,
   };
+  if (form.cred_source === 'sops') {
+    data.secret_ref = form.secret_ref.trim();
+    return data;
+  }
+  data.secret_ref = '';
   if (form.password) data.password = form.password;
   if (form.totp_secret.trim()) data.totp_secret = form.totp_secret.trim();
   if (settingSecret(form)) data.master_password = form.master_password;

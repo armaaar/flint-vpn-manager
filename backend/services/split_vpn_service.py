@@ -28,7 +28,10 @@ import urllib.request
 import uuid
 from typing import TYPE_CHECKING
 
+import re
+
 import persistence.secrets_manager as sm
+import persistence.sops_store as sops
 from consts import (
     PROFILE_TYPE_NO_VPN,
     PROFILE_TYPE_VPN,
@@ -48,7 +51,8 @@ log = logging.getLogger(__name__)
 
 _CONNECTED_STATES = {"CONNECTED", "ESTABLISHED", "UP", "ONLINE"}
 _EDITABLE = ("name", "server", "port", "tunnel_mode", "username", "group_ids",
-             "domains", "cidrs", "use_pushed_routes", "enabled", "auto_connect")
+             "domains", "cidrs", "use_pushed_routes", "enabled", "auto_connect", "secret_ref")
+_SECRET_REF_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 # Don't submit a code that expires mid-handshake (emulated client + AD auth)
 _MIN_CODE_LIFETIME = 10
 # Auto-reconnect monitor
@@ -93,6 +97,29 @@ class SplitVpnService:
         sm.update(master_password, split_vpn_credentials=creds)
         self._creds = creds
 
+    def _credentials(self, vpn: dict) -> dict:
+        """Resolve {username, password, totp} for a VPN.
+
+        With ``secret_ref`` the values come from the SOPS secrets file
+        (``split_vpns.<ref>``), decrypted on demand; otherwise from the
+        app's encrypted store. Raises ValueError if SOPS can't be read.
+        """
+        ref = vpn.get("secret_ref")
+        if ref:
+            try:
+                entry = sops.split_vpn_credentials(ref)
+            except sops.SopsError as e:
+                raise ValueError(str(e)) from e
+            totp = parse_totp(entry["totp_secret"]) if entry.get("totp_secret") else None
+            return {
+                "username": entry.get("username") or vpn.get("username", ""),
+                "password": entry.get("password"),
+                "totp": totp,
+            }
+        creds = self._creds.get(vpn["id"], {})
+        return {"username": vpn.get("username", ""), "password": creds.get("password"),
+                "totp": creds.get("totp")}
+
     def _forget_credentials(self, vpn_id: str) -> None:
         """Drop from memory; the encrypted copy is removed on the next save
         that has the master password (stale entries are harmless)."""
@@ -117,7 +144,13 @@ class SplitVpnService:
 
     def _public(self, vpn: dict, live: dict | None = None) -> dict:
         out = {k: v for k, v in vpn.items()}
-        creds = self._creds.get(vpn["id"], {})
+        out["credentials_source"] = "sops" if vpn.get("secret_ref") else "app"
+        try:
+            creds = self._credentials(vpn)
+            out["credentials_error"] = None
+        except ValueError as e:
+            creds = {}
+            out["credentials_error"] = str(e)
         out["has_password"] = bool(creds.get("password"))
         out["has_totp"] = bool(creds.get("totp"))
         if live is not None:
@@ -170,17 +203,23 @@ class SplitVpnService:
             "use_pushed_routes": True,
             "enabled": True,
             "auto_connect": True,
+            "secret_ref": None,
             "pushed_routes": [],
             "pushed_dns": [],
         }
         self._apply_fields(vpn, data)
         if vpn["type"] not in SPLITVPN_TYPES:
             raise ValueError(f"Unsupported VPN type: {vpn['type']}")
-        password = data.get("password")
-        if not password:
-            raise ValueError("password is required")
-        totp = parse_totp(data["totp_secret"]) if data.get("totp_secret") else None
-        self._save_credentials(vpn["id"], data.get("master_password", ""), password=password, totp=totp)
+        if vpn["secret_ref"]:
+            creds = self._credentials(vpn)   # fail early if SOPS can't supply them
+            if not creds.get("password"):
+                raise ValueError(f"SOPS entry split_vpns.{vpn['secret_ref']} has no password")
+        else:
+            password = data.get("password")
+            if not password:
+                raise ValueError("password is required (or set a SOPS secret reference)")
+            totp = parse_totp(data["totp_secret"]) if data.get("totp_secret") else None
+            self._save_credentials(vpn["id"], data.get("master_password", ""), password=password, totp=totp)
         self.router.split_vpn.write_client_config(vpn["slot"], vpn)
         vpns.append(vpn)
         self._save_vpns(vpns)
@@ -227,13 +266,17 @@ class SplitVpnService:
             if key in data:
                 vpn[key] = data[key]
         vpn["name"] = str(vpn.get("name", "")).strip()[:64]
-        vpn["username"] = str(vpn.get("username", "")).strip()
+        vpn["username"] = str(vpn.get("username") or "").strip()
+        ref = str(vpn.get("secret_ref") or "").strip()
+        if ref and not _SECRET_REF_RE.match(ref):
+            raise ValueError("SOPS secret reference may only contain letters, digits, '_' and '-'")
+        vpn["secret_ref"] = ref or None
         vpn["server"] = str(vpn.get("server", "")).strip()
         vpn["tunnel_mode"] = str(vpn.get("tunnel_mode") or "TCP").upper()
         vpn["port"] = int(vpn.get("port") or 691)
         if not vpn["name"]:
             raise ValueError("name is required")
-        if not vpn["username"]:
+        if not vpn["username"] and not vpn["secret_ref"]:
             raise ValueError("username is required")
         build_client_config(vpn)  # validates server / port / mode
         vpn["group_ids"] = self._validate_groups(vpn.get("group_ids") or [])
@@ -284,10 +327,12 @@ class SplitVpnService:
         to expire)."""
         with self._lock:
             vpn = self._find(vpn_id)
-            creds = self._creds.get(vpn_id, {})
+            creds = self._credentials(vpn)
             password = creds.get("password")
             if not password:
                 raise ValueError("No stored password for this VPN — edit it and enter the password")
+            if not creds.get("username"):
+                raise ValueError("No username for this VPN")
             otp = str(otp or "").strip()
             if not otp:
                 totp = creds.get("totp")
@@ -301,7 +346,7 @@ class SplitVpnService:
                 raise ValueError("The VPN client runtime is not installed on the router")
             self.router.split_vpn.write_client_config(vpn["slot"], vpn)
             log.info(f"Split VPN '{vpn['name']}' connecting")
-            result = self.router.split_vpn.connect(vpn["slot"], vpn["username"], password, otp)
+            result = self.router.split_vpn.connect(vpn["slot"], creds["username"], password, otp)
             result["connected"] = _is_connected(result)
             if result["connected"]:
                 self._record_pushed(vpn_id, result)
@@ -432,9 +477,14 @@ class SplitVpnService:
         tried = []
         for v in self._vpns():
             vid = v["id"]
-            creds = self._creds.get(vid, {})
-            if not (v.get("enabled") and v.get("auto_connect", True)
-                    and creds.get("password") and creds.get("totp")):
+            if not (v.get("enabled") and v.get("auto_connect", True)):
+                continue
+            try:
+                creds = self._credentials(v)
+            except ValueError as e:
+                log.warning(f"Split VPN '{v['name']}' credentials unavailable: {e}")
+                continue
+            if not (creds.get("password") and creds.get("totp")):
                 continue
             next_try, delay = self._backoff.get(vid, (0.0, _BACKOFF_START))
             if now < next_try:

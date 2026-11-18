@@ -12,6 +12,7 @@ User-facing docs live at the top of `docs/`. Implementation deep-dives live in `
 - [docs/terminology.md](docs/terminology.md) — Domain glossary (Group, Device, Rule, Peer, Server Scope, etc.)
 - [docs/rest-api.md](docs/rest-api.md) — All REST API endpoints
 - [docs/features-and-specs.md](docs/features-and-specs.md) — Detailed user-facing feature specs
+- [docs/sops-secrets.md](docs/sops-secrets.md) — SOPS-encrypted secrets: master password (auto-unlock), split VPN credentials
 
 **Implementation internals** (`docs/internals/`) — **MUST READ before modifying these subsystems**; contain non-obvious constraints, real bugs that were hit, and design decisions that look wrong but are intentional:
 

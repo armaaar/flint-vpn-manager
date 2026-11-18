@@ -1,6 +1,7 @@
 """Auth blueprint — Status, setup, unlock, and lock endpoints."""
 
 import logging
+import threading
 import time
 
 from flask import Blueprint, request, jsonify
@@ -49,18 +50,19 @@ def api_setup():
     return jsonify({"success": True})
 
 
-@auth_bp.route("/api/unlock", methods=["POST"])
-def api_unlock():
-    """Unlock session with master password."""
-    data = request.json
-    if "master_password" not in data:
-        return jsonify({"error": "master_password required"}), 400
+_unlock_lock = threading.Lock()
 
-    try:
+
+def perform_unlock(master_password: str) -> None:
+    """Decrypt secrets and bring up all services (route + SOPS auto-unlock).
+
+    Raises ValueError (wrong password) or FileNotFoundError (not set up).
+    """
+    with _unlock_lock:
         t_total = time.time()
 
         t = time.time()
-        secrets = sm.unlock(data["master_password"])
+        secrets = sm.unlock(master_password)
         _registry.session_unlocked = True
         _registry.get_split_vpn_service().load_secrets(secrets)
         log.info(f"Unlock timing: decrypt={time.time()-t:.2f}s")
@@ -172,9 +174,41 @@ def api_unlock():
         log.info(f"Unlock timing: optimizer={time.time()-t:.2f}s")
 
         log.info(f"Unlock timing: TOTAL={time.time()-t_total:.2f}s")
+
+
+@auth_bp.route("/api/unlock", methods=["POST"])
+def api_unlock():
+    """Unlock session with master password."""
+    data = request.json or {}
+    if "master_password" not in data:
+        return jsonify({"error": "master_password required"}), 400
+    try:
+        perform_unlock(data["master_password"])
         return jsonify({"success": True})
     except (ValueError, FileNotFoundError) as e:
         return jsonify({"error": str(e)}), 401
+
+
+def auto_unlock_from_sops() -> bool:
+    """Unlock at startup with the master password from the SOPS secrets file
+    (``flint.master_password``). Returns True if it unlocked."""
+    import persistence.sops_store as sops
+    if not sm.is_setup() or _registry.session_unlocked:
+        return False
+    try:
+        master = sops.get("flint", "master_password")
+    except sops.SopsError as e:
+        log.warning(f"SOPS auto-unlock skipped: {e}")
+        return False
+    if not master:
+        return False
+    try:
+        perform_unlock(master)
+        log.info("Auto-unlocked from SOPS secrets")
+        return True
+    except (ValueError, FileNotFoundError) as e:
+        log.warning(f"SOPS auto-unlock failed: {e}")
+        return False
 
 
 @auth_bp.route("/api/lock", methods=["POST"])

@@ -84,5 +84,21 @@ def index():
 
 # ── Startup ──────────────────────────────────────────────────────────────────
 
+def _start_sops_auto_unlock() -> None:
+    """Unlock in the background using the SOPS secrets file, if it has a
+    master password — so a restart doesn't leave the app locked."""
+    import threading
+    from routes.auth import auto_unlock_from_sops
+
+    def run():
+        try:
+            auto_unlock_from_sops()
+        except Exception as e:  # never take the server down
+            logging.getLogger("flintvpn").warning(f"SOPS auto-unlock error: {e}")
+
+    threading.Thread(target=run, name="sops-auto-unlock", daemon=True).start()
+
+
 if __name__ == "__main__":
+    _start_sops_auto_unlock()
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)

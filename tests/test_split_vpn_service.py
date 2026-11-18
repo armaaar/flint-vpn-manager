@@ -217,3 +217,38 @@ def test_extract_from_deb():
 
     deb = b"!<arch>\n" + member("debian-binary", b"2.0\n") + member("data.tar.xz", body)
     assert _extract_from_deb(deb, "./usr/bin/qemu-x86_64") == payload
+
+
+class TestSopsCredentials:
+    def test_create_with_secret_ref_needs_no_password(self, env):
+        with patch.object(svc_mod.sops, "split_vpn_credentials",
+                          return_value={"username": "bob", "password": "sops-pw",
+                                        "totp_secret": "JBSWY3DPEHPK3PXP"}):
+            vpn = env["svc"].create({"name": "Work", "server": "vpn.example.com",
+                                     "secret_ref": "work", "group_ids": ["g_work"]})
+            assert vpn["credentials_source"] == "sops"
+            assert vpn["has_password"] and vpn["has_totp"]
+        env["sm"].update.assert_not_called()          # nothing copied into secrets.enc
+
+    def test_connect_uses_sops_values(self, env):
+        creds = {"username": "bob", "password": "sops-pw", "totp_secret": "JBSWY3DPEHPK3PXP"}
+        with patch.object(svc_mod.sops, "split_vpn_credentials", return_value=creds):
+            vpn = env["svc"].create({"name": "Work", "server": "vpn.example.com",
+                                     "secret_ref": "work", "group_ids": ["g_work"]})
+            env["router"].split_vpn.connect.return_value = {"state": "CONNECTED"}
+            with patch.object(svc_mod, "seconds_left", return_value=25), \
+                 patch.object(svc_mod, "totp_code", return_value="111222"):
+                env["svc"].connect(vpn["id"])
+        env["router"].split_vpn.connect.assert_called_with(0, "bob", "sops-pw", "111222")
+
+    def test_sops_error_surfaces_as_value_error(self, env):
+        with patch.object(svc_mod.sops, "split_vpn_credentials",
+                          side_effect=svc_mod.sops.SopsError("No 'split_vpns.x' entry")):
+            with pytest.raises(ValueError, match="split_vpns.x"):
+                env["svc"].create({"name": "Work", "server": "vpn.example.com",
+                                   "secret_ref": "x", "group_ids": ["g_work"]})
+
+    def test_rejects_bad_secret_ref(self, env):
+        with pytest.raises(ValueError, match="SOPS secret reference"):
+            env["svc"].create({"name": "W", "server": "vpn.example.com",
+                               "secret_ref": "../etc", "group_ids": ["g_work"]})

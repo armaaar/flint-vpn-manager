@@ -19,10 +19,14 @@
 
   $: groups = splitVpnEligibleGroups(profiles);
   $: needsMaster = settingSecret(form);
+  $: useSops = form.cred_source === 'sops';
   $: canSave =
-    !!form.name.trim() && !!form.server.trim() && !!form.username.trim() &&
-    (vpn ? true : (!!form.password && !!form.totp_secret.trim())) &&
-    (!needsMaster || !!form.master_password);
+    !!form.name.trim() && !!form.server.trim() &&
+    (useSops
+      ? !!form.secret_ref.trim()
+      : !!form.username.trim() &&
+        (vpn && !vpn.secret_ref ? true : (!!form.password && !!form.totp_secret.trim())) &&
+        (!needsMaster || !!form.master_password));
 
   function toggleGroup(id: string) {
     form.group_ids = form.group_ids.includes(id)
@@ -94,6 +98,36 @@
           </div>
         {/if}
 
+        <div class="form-group">
+          <span class="field-label">Credentials</span>
+          <div class="source-choice" role="radiogroup" aria-label="Credentials source">
+            <label class="source-option">
+              <input type="radio" name="sv-cred-source" value="app" bind:group={form.cred_source} />
+              <span>Stored in this app (encrypted)</span>
+            </label>
+            <label class="source-option">
+              <input type="radio" name="sv-cred-source" value="sops" bind:group={form.cred_source} />
+              <span>SOPS secrets file</span>
+            </label>
+          </div>
+        </div>
+
+        {#if useSops}
+          <div class="form-row">
+            <div class="form-group">
+              <label for="sv-ref" class="required">SOPS reference</label>
+              <input id="sv-ref" type="text" bind:value={form.secret_ref} placeholder="e.g. work" autocomplete="off" spellcheck="false" />
+              <span class="hint">Entry under <code>split_vpns</code> in <code>secrets/flint.sops.yaml</code> with <code>password</code>, <code>totp_secret</code> and optionally <code>username</code>. Edit it with <code>sops secrets/flint.sops.yaml</code>.</span>
+            </div>
+            <div class="form-group">
+              <label for="sv-user-sops">Username</label>
+              <input id="sv-user-sops" type="text" bind:value={form.username} autocomplete="off" placeholder="from SOPS entry" />
+            </div>
+          </div>
+          {#if vpn?.credentials_error}
+            <div class="error-msg" role="alert">{vpn.credentials_error}</div>
+          {/if}
+        {:else}
         <div class="form-row">
           <div class="form-group">
             <label for="sv-user" class="required">Username</label>
@@ -119,6 +153,7 @@
             <input id="sv-master" type="password" bind:value={form.master_password} autocomplete="current-password" />
             <span class="hint">The password and TOTP secret are stored encrypted. Enter this app's master password to save them.</span>
           </div>
+        {/if}
         {/if}
 
         <div class="form-group">
@@ -225,6 +260,16 @@
   .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   .field-label { display: block; margin-bottom: 5px; font-size: .825rem; font-weight: 500; color: var(--fg2); }
   .hint-top { margin: -2px 0 8px; }
+  .hint code { font-family: var(--font-mono); font-size: .75rem; color: var(--fg); }
+
+  .source-choice { display: flex; flex-wrap: wrap; gap: 8px; }
+  .source-option {
+    display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; cursor: pointer;
+    background: var(--surface); color: var(--fg2); border: 1.5px solid var(--border);
+    border-radius: var(--radius-xs); font-size: .825rem;
+  }
+  .source-option:has(input:checked) { border-color: var(--accent); background: var(--accent-bg); color: var(--fg); }
+  .source-option input { width: auto; margin: 0; accent-color: var(--accent); }
 
   textarea {
     width: 100%; resize: vertical; background: var(--bg); color: var(--fg);

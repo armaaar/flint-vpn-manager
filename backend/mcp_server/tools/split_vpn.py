@@ -49,10 +49,11 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
     def flint_create_split_vpn(
         name: str,
         server: str,
-        username: str,
-        password: str,
-        master_password: str,
         group_ids: list[str],
+        username: str | None = None,
+        password: str | None = None,
+        master_password: str | None = None,
+        secret_ref: str | None = None,
         totp_secret: str | None = None,
         domains: list[str] | None = None,
         cidrs: list[str] | None = None,
@@ -64,19 +65,23 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
     ) -> str:
         """Create a Split VPN (Barracuda CloudGen). Does not connect it.
 
-        The account password and the TOTP secret are stored encrypted in the
-        app's secrets file, which requires the app's master password (the one
-        used for flint_unlock). Ask the human for them; never guess. With a
-        TOTP secret the app generates the one-time codes itself, so connects
-        (and auto-reconnects) need no human input.
+        Credentials come from one of two places:
+        - secret_ref (preferred): name of an entry under ``split_vpns`` in the
+          SOPS secrets file (secrets/flint.sops.yaml) holding username,
+          password and totp_secret. No secrets pass through the tool call.
+        - password (+ totp_secret) stored encrypted by the app, which needs
+          the app's master password. Ask the human; never guess.
+        With a TOTP secret the app generates the one-time codes itself.
 
         Args:
             name: Display name (e.g. "Work VPN")
             server: VPN server hostname or IP
-            username: VPN account username
-            password: VPN account password (stored encrypted)
+            username: VPN account username (optional with secret_ref if the
+                      SOPS entry has one)
+            password: VPN account password (stored encrypted; omit with secret_ref)
             master_password: Flint VPN Manager master password, required to
                              write the encrypted password
+            secret_ref: SOPS entry name under split_vpns (e.g. "work")
             group_ids: Group (profile) IDs whose devices use this VPN for the
                        selected destinations. Groups must have internet access.
             totp_secret: Base32 TOTP secret or otpauth://totp/... URI used to
@@ -97,9 +102,6 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
             "server": server,
             "port": port,
             "tunnel_mode": tunnel_mode,
-            "username": username,
-            "password": password,
-            "master_password": master_password,
             "group_ids": group_ids,
             "domains": domains or [],
             "cidrs": cidrs or [],
@@ -107,8 +109,11 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
             "enabled": enabled,
             "auto_connect": auto_connect,
         }
-        if totp_secret:
-            body["totp_secret"] = totp_secret
+        for key, val in (("username", username), ("password", password),
+                         ("master_password", master_password), ("secret_ref", secret_ref),
+                         ("totp_secret", totp_secret)):
+            if val:
+                body[key] = val
         result = api.post("/api/split-vpns", json=body)
         return json.dumps(result, indent=2)
 
@@ -126,6 +131,7 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
         use_pushed_routes: bool | None = None,
         enabled: bool | None = None,
         auto_connect: bool | None = None,
+        secret_ref: str | None = None,
         password: str | None = None,
         totp_secret: str | None = None,
         master_password: str | None = None,
@@ -152,6 +158,8 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
             use_pushed_routes: Also route networks the server pushes on connect
             enabled: Whether routing rules are active
             auto_connect: Connect automatically / reconnect when it drops
+            secret_ref: SOPS entry name for credentials ("" to switch back to
+                        app-stored credentials)
             password: New VPN account password (requires master_password)
             totp_secret: New TOTP secret or otpauth URI (requires master_password)
             master_password: Flint VPN Manager master password
@@ -168,6 +176,7 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
             "use_pushed_routes": use_pushed_routes,
             "enabled": enabled,
             "auto_connect": auto_connect,
+            "secret_ref": secret_ref,
         }
         body: dict = {k: v for k, v in fields.items() if v is not None}
         if password:

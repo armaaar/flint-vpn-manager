@@ -77,6 +77,9 @@ the router) can query them through the tunnel.
 - `config.json` → `split_vpns.vpns[]`: `id, type, slot, name, server, port,
   tunnel_mode, username, group_ids, domains, cidrs, use_pushed_routes,
   enabled, pushed_routes, pushed_dns, last_connected_at`.
+- **Or SOPS**: with `secret_ref` set, `split_vpns.<ref>.{username,password,totp_secret}`
+  is decrypted from `secrets/flint.sops.yaml` on demand (see `docs/sops-secrets.md`);
+  nothing is copied into `secrets.enc`.
 - `secrets.enc` → `split_vpn_credentials: {id: {password, totp}}` (`totp` =
   parsed secret: base32 + digits/period/algorithm, from a bare secret or an
   `otpauth://totp/` URI); written with the master password (UI asks for it),

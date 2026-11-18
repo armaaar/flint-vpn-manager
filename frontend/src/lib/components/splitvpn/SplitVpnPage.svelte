@@ -199,7 +199,9 @@
                 {/if}
                 {#if !vpn.enabled}<span class="tag">Disabled</span>{/if}
                 {#if vpn.auto_connect}<span class="tag" title="Connects automatically and reconnects when the tunnel drops">Auto</span>{/if}
-                {#if !vpn.has_totp}<span class="tag tag-warn" title="No TOTP secret stored — a code must be entered on each connect">No TOTP secret</span>{/if}
+                {#if vpn.credentials_source === 'sops'}<span class="tag" title={`Credentials from SOPS entry split_vpns.${vpn.secret_ref}`}>SOPS</span>{/if}
+                {#if vpn.credentials_error}<span class="tag tag-warn" title={vpn.credentials_error}>Credentials unavailable</span>
+                {:else if !vpn.has_totp}<span class="tag tag-warn" title="No TOTP secret stored — a code must be entered on each connect">No TOTP secret</span>{/if}
               </div>
               <div class="vpn-meta">
                 <span class="mono">{vpn.server}{vpn.port && vpn.port !== 691 ? `:${vpn.port}` : ''}</span>

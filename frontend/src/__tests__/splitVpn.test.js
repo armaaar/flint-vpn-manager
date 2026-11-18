@@ -164,3 +164,24 @@ describe('split VPN form helpers', () => {
     expect(unixToIso(1700000000)).toBe('2023-11-14T22:13:20.000Z');
   });
 });
+
+describe('split VPN SOPS credentials', () => {
+  it('sends only secret_ref (no secrets, no master password) for SOPS credentials', async () => {
+    const { initialSplitVpnForm, buildSplitVpnPayload } = await import('../lib/utils/splitVpn');
+    const form = { ...initialSplitVpnForm(null), name: 'W', server: 'vpn.example.com',
+      cred_source: 'sops', secret_ref: ' work ', password: 'x', totp_secret: 'y', master_password: 'z' };
+    const body = buildSplitVpnPayload(form);
+    expect(body.secret_ref).toBe('work');
+    expect(body).not.toHaveProperty('password');
+    expect(body).not.toHaveProperty('totp_secret');
+    expect(body).not.toHaveProperty('master_password');
+  });
+
+  it('pre-selects SOPS for a VPN with a secret_ref and clears it when switching back', async () => {
+    const { initialSplitVpnForm, buildSplitVpnPayload } = await import('../lib/utils/splitVpn');
+    const form = initialSplitVpnForm({ id: 'sv_1', name: 'W', server: 's', secret_ref: 'work' });
+    expect(form.cred_source).toBe('sops');
+    form.cred_source = 'app';
+    expect(buildSplitVpnPayload(form).secret_ref).toBe('');
+  });
+});

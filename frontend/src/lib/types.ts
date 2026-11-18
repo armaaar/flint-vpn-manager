@@ -270,6 +270,9 @@ export interface SplitVpn {
   last_connected_at?: number;   // unix seconds
   has_password: boolean;
   has_totp: boolean;
+  secret_ref?: string | null;
+  credentials_source?: 'app' | 'sops';
+  credentials_error?: string | null;
   status?: SplitVpnStatus;
 }
 
