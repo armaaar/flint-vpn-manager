@@ -172,6 +172,7 @@ class LanAccessService:
         # is idempotent and the routing override is the load-bearing side
         # effect here.
         self._reapply_lan_routing()
+        self._sync_vpn_source_ifs(extra=[f"fvpn_{zone_id}"])
         log.info(f"Created network '{name}' (zone=fvpn_{zone_id}, subnet={subnet_ip}/24)")
         return {"success": True, "zone_id": f"fvpn_{zone_id}"}
 
@@ -251,6 +252,7 @@ class LanAccessService:
         # and refresh the include script so a firewall reload regenerates
         # only the rules for the surviving subnets.
         self._reapply_lan_routing()
+        self._sync_vpn_source_ifs(exclude=zone_id)
         log.info(f"Deleted network '{zone_id}'")
         return {"success": True}
 
@@ -398,6 +400,7 @@ class LanAccessService:
         log.info(f"LAN access: reapplied {len(exceptions)} exception(s)")
 
         self._sync_mdns()
+        self._sync_vpn_source_ifs()
 
     @staticmethod
     def _prune_stale_lan_config(la: dict, networks: list[dict]) -> bool:
@@ -479,6 +482,20 @@ class LanAccessService:
             self.router.lan_access.apply_device_exceptions(exceptions)
         except Exception as e:
             log.warning(f"Failed to apply LAN access exceptions: {e}")
+
+    def _sync_vpn_source_ifs(self, extra: list[str] | None = None, exclude: str | None = None) -> None:
+        """Keep every app-created network in GL's VPN source list (see
+        ``RouterLanAccess.sync_vpn_source_ifs``). Never fatal."""
+        try:
+            nets = [n["id"] for n in self.router.lan_access.get_networks()
+                    if str(n.get("id", "")).startswith("fvpn_") and n["id"] != exclude]
+            for e in extra or []:
+                if e not in nets:
+                    nets.append(e)
+            if self.router.lan_access.sync_vpn_source_ifs(nets):
+                log.info(f"VPN source networks updated: {nets}")
+        except Exception as e:
+            log.warning(f"VPN source network sync failed: {e}")
 
     def _reapply_lan_routing(self) -> None:
         """Refresh the LAN-destined priority-50 ip rules + firewall include.

@@ -15,6 +15,18 @@ import re
 from router.tools.uci import Uci
 
 _SAFE_NAME_RE = re.compile(r'^[a-zA-Z0-9_-]+$')
+
+# VPN-marked traffic is accepted in FORWARD only when it leaves through a VPN
+# tunnel. A blanket "mark != 0 → ACCEPT" (the old workaround for custom zones
+# lacking zone forwardings to VPN zones) also accepted marked traffic towards
+# *other LAN bridges*, silently defeating zone isolation for every device in
+# a VPN group. GL's forwardings now come from route_policy append_source_if.
+_VPN_EGRESS_IFACES = ("wgclient+", "ovpnclient+", "protonwg+", "fvsv+")
+_LEGACY_MARK_ACCEPT = "-m mark ! --mark 0x0/0xf000 -j ACCEPT"
+
+
+def vpn_egress_accept_rules() -> list[str]:
+    return [f"-m mark ! --mark 0x0/0xf000 -o {i} -j ACCEPT" for i in _VPN_EGRESS_IFACES]
 _SAFE_IP_RE = re.compile(r'^[0-9a-fA-F.:/%]+$')
 
 # Zone names to skip in cross-network rules (wan is managed separately)
@@ -322,10 +334,9 @@ class RouterLanAccess:
                                f"-s {to_ip} -d {from_ip} -j ACCEPT")
 
             ipt.insert_if_absent("filter", "forwarding_rule", "-j fvpn_lan_exc")
-            ipt.insert_if_absent(
-                "filter", "forwarding_rule",
-                "-m mark ! --mark 0x0/0xf000 -j ACCEPT",
-            )
+            ipt.remove_rule("filter", "forwarding_rule", _LEGACY_MARK_ACCEPT)
+            for rule in vpn_egress_accept_rules():
+                ipt.insert_if_absent("filter", "forwarding_rule", rule)
 
         # Apply the ip-rule routing override at runtime so the fix takes
         # effect immediately without waiting for a firewall reload.
@@ -604,9 +615,13 @@ class RouterLanAccess:
                 f"{binary} -I forwarding_rule 1 -j fvpn_lan_exc"
             )
             lines.append(
-                f"{binary} -C forwarding_rule -m mark ! --mark 0x0/0xf000 -j ACCEPT 2>/dev/null || "
-                f"{binary} -I forwarding_rule -m mark ! --mark 0x0/0xf000 -j ACCEPT"
+                f"while {binary} -D forwarding_rule {_LEGACY_MARK_ACCEPT} 2>/dev/null; do :; done"
             )
+            for rule in vpn_egress_accept_rules():
+                lines.append(
+                    f"{binary} -C forwarding_rule {rule} 2>/dev/null || "
+                    f"{binary} -I forwarding_rule {rule}"
+                )
 
         # LAN-destined route override (see _lan_subnets docstring for why
         # this is unconditional and ``iif``-less). Without these rules
@@ -861,6 +876,37 @@ class RouterLanAccess:
             )
         except Exception:
             pass  # expected — WiFi drop kills SSH before command returns
+
+    def sync_vpn_source_ifs(self, app_networks: list[str]) -> bool:
+        """Make GL treat app-created networks like lan/guest for VPN routing.
+
+        GL only hooks ``lan``, ``guest`` (and the servers) into the mangle
+        ``ROUTE_POLICY`` chain and only creates zone forwardings from them to
+        the VPN zones. Other networks must be listed in
+        ``route_policy.global.append_source_if`` — without that, devices on an
+        app-created network were never VPN-routed (their traffic left via WAN
+        unmarked despite being in a VPN group). Stale entries for networks
+        that no longer exist are dropped. Applying needs a vpn-client restart
+        (safe when no tunnel is stuck connecting; proton-wg and split-VPN
+        state is immune). Returns True if it changed anything.
+        """
+        current = self._uci.get("route_policy.global.append_source_if", "").split()
+        existing = set(self._ssh.exec(
+            "ubus list 'network.interface.*' 2>/dev/null | sed 's/^network.interface.//'"
+        ).split())
+        keep = [i for i in current if i in existing and _SAFE_NAME_RE.match(i)]
+        for net in app_networks:
+            if _SAFE_NAME_RE.match(net) and net not in keep:
+                keep.append(net)
+        if keep == current:
+            return False
+        if keep:
+            self._uci.set("route_policy.global.append_source_if", " ".join(keep))
+        else:
+            self._uci.delete("route_policy.global.append_source_if")
+        self._uci.commit("route_policy")
+        self._ssh.exec("sync; /etc/init.d/vpn-client restart >/dev/null 2>&1", timeout=90)
+        return True
 
     def _firmware_version(self) -> tuple[int, ...]:
         """GL.iNet firmware version from /etc/glversion, e.g. (4, 11, 0)."""

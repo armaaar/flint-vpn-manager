@@ -746,3 +746,38 @@ class TestReloadWifiDriver:
         reload_cmd = next(c for c in sent if "rmmod mt_wifi" in c)
         assert "sync; wifi down" in reload_cmd
         assert "reboot" not in reload_cmd
+
+
+class TestVpnMarkAccept:
+    def test_include_script_scopes_mark_accept_to_vpn_tunnels(self, lan, ssh):
+        """A blanket 'mark != 0 -> ACCEPT' let VPN-grouped devices reach other
+        LAN zones; marked traffic may only be accepted towards VPN tunnels."""
+        with patch.object(lan, "get_networks", return_value=[]):
+            lan.apply_device_exceptions([])
+        script = next(c.args[1] for c in ssh.write_file.call_args_list
+                      if c.args[0] == "/etc/fvpn/lan_access_rules.sh")
+        accepts = [l for l in script.splitlines() if "-I forwarding_rule -m mark" in l]
+        assert accepts, "VPN egress accepts missing"
+        assert all(" -o " in l for l in accepts)
+        assert any("-o wgclient+" in l for l in accepts)
+        assert any("-o protonwg+" in l for l in accepts)
+        assert "while iptables -D forwarding_rule -m mark ! --mark 0x0/0xf000 -j ACCEPT" in script
+
+
+class TestSyncVpnSourceIfs:
+    def _lan(self, lan, uci, ssh, current, existing):
+        uci.get.return_value = current
+        ssh.exec.side_effect = lambda cmd, *a, **k: "\n".join(existing) if cmd.startswith("ubus list") else ""
+        return lan
+
+    def test_adds_app_networks_and_drops_stale(self, lan, uci, ssh):
+        self._lan(lan, uci, ssh, "iot", ["lan", "guest", "fvpn_iot", "fvpn_work"])
+        assert lan.sync_vpn_source_ifs(["fvpn_iot", "fvpn_work"]) is True
+        uci.set.assert_called_with("route_policy.global.append_source_if", "fvpn_iot fvpn_work")
+        assert any("vpn-client restart" in c.args[0] for c in ssh.exec.call_args_list)
+
+    def test_noop_when_already_in_sync(self, lan, uci, ssh):
+        self._lan(lan, uci, ssh, "fvpn_iot fvpn_work", ["fvpn_iot", "fvpn_work"])
+        assert lan.sync_vpn_source_ifs(["fvpn_iot", "fvpn_work"]) is False
+        uci.set.assert_not_called()
+        assert not any("vpn-client restart" in c.args[0] for c in ssh.exec.call_args_list)
