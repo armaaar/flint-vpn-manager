@@ -355,6 +355,13 @@ class DeviceService:
                 f"failed: {e}"
             )
 
+        # Same drift for kernel-WG / OpenVPN groups: GL rebuilds their dns_mark
+        # lists only on a vpn-client restart (see RouterDevices.sync_kernel_dns_marks).
+        try:
+            self._router.devices.sync_kernel_dns_marks()
+        except Exception as e:
+            log.warning(f"sync_kernel_dns_marks after assign_device({mac}) failed: {e}")
+
         # Invalidate the device cache so the next /api/devices call sees the new assignment
         self.invalidate_cache()
 

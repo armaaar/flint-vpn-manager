@@ -348,6 +348,28 @@ class RouterDevices:
                         self._ipset.remove(ipset_name, mac_lower)
                 return
 
+    # Rebuilds GL's dns_mark MAC lists for every kernel-WG / OpenVPN rule from
+    # route_policy from_mac. GL only refreshes /proc/dns_mark/rule<tid>/macs
+    # on a vpn-client restart, so after an app-side (re)assignment a device's
+    # DNS kept being marked for its *old* group's resolver (seen live: a new
+    # Work device couldn't resolve the work domain; a moved phone's old MAC
+    # stayed in Trusted's list). Zero-byte writes are no-ops in dns_mark, so
+    # each list is cleared with `echo ""` first (see proton-wg-internals.md).
+    SYNC_DNS_MARKS_CMD = (
+        "for r in $(uci show route_policy 2>/dev/null | "
+        "grep -oE '^route_policy\\.fvpn_rule_[0-9a-z_]+=rule' | cut -d. -f2 | cut -d= -f1); do "
+        "T=$(uci -q get route_policy.$r.tunnel_id); [ -d /proc/dns_mark/rule$T ] || continue; "
+        "M=$(uci -q get route_policy.$r.from_mac | tr ' ' '\\n' | tr A-F a-f | "
+        "grep -E '^([0-9a-f]{2}:){5}[0-9a-f]{2}$'); "
+        "echo '' > /proc/dns_mark/rule$T/macs; "
+        "[ -n \"$M\" ] && echo \"$M\" > /proc/dns_mark/rule$T/macs; "
+        "done; true"
+    )
+
+    def sync_kernel_dns_marks(self) -> None:
+        """Make GL's per-group DNS marking match the route_policy assignments."""
+        self._ssh.exec(self.SYNC_DNS_MARKS_CMD)
+
     def remove_device_from_all_vpn(self, mac: str):
         """Remove a device from ALL Flint VPN Manager route policy rules AND proton-wg ipsets.
 

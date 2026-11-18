@@ -322,3 +322,21 @@ class TestGetNdpNeighbors:
     def test_handles_error_gracefully(self, devices, iproute):
         iproute.neigh_show_v6.side_effect = RuntimeError("SSH fail")
         assert devices.get_ndp_neighbors() == {}
+
+
+class TestSyncKernelDnsMarks:
+    def test_rebuilds_lists_from_route_policy_and_clears_first(self):
+        from unittest.mock import MagicMock
+        from router.facades.devices import RouterDevices
+        cmd = RouterDevices.SYNC_DNS_MARKS_CMD
+        assert "route_policy.$r.from_mac" in cmd
+        # zero-byte writes are no-ops in dns_mark: must clear with echo '' first
+        assert cmd.index("echo '' > /proc/dns_mark/rule$T/macs") < cmd.index('echo "$M" > /proc/dns_mark/rule$T/macs')
+        assert "/proc/dns_mark/clear" not in cmd   # would wipe GL's own rules
+
+    def test_assign_device_triggers_dns_mark_sync(self):
+        from unittest.mock import MagicMock, patch
+        from services.device_service import DeviceService
+        import inspect
+        src = inspect.getsource(DeviceService.assign_device)
+        assert "sync_kernel_dns_marks()" in src
