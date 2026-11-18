@@ -32,7 +32,14 @@ the next upgrade faster.
   some UI plugins. None used by the app.
 - Docs updated: firmware version in CLAUDE.md / installation.md / project-overview.md;
   BssidNum rules in router-reference.md + router-features-translation.md §17.
-- Open risk: 5G will need `BssidNum=6` once the Work network is added — >5 unverified on MT7986.
+- **2026-11-18 13:09 — router crash after the upgrade**: creating the Work network ran the
+  app's WiFi driver reload (`rmmod mt_wifi` …). On 4.11 the router panicked and rebooted
+  (kernel.panic=3; no crash log — eMMC, no mtdoops partition) and the UCI commit was lost
+  (not yet flushed). All tunnels came back by themselves; verify.sh 66/0/0. Fix:
+  `_reload_wifi_driver` now does `sync` + clean reboot on firmware ≥ 4.11. **Lesson for the
+  runbook: after an upgrade, re-test every app path that touches kernel modules (driver
+  reloads) before relying on it, ideally at a time an outage is acceptable.**
+- Open risk (resolved by deleting the legacy iot network): 5G will need `BssidNum=6` once the Work network is added — >5 unverified on MT7986.
   Option: delete the disabled legacy GL `iot` network (iot2g/iot5g, duplicate ra2/rax2 ifnames) to
   free a slot on each radio.
 

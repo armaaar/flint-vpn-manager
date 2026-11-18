@@ -720,3 +720,29 @@ class TestGetNetworksIpv6Field:
         networks = lan.get_networks()
         assert len(networks) == 1
         assert networks[0]["ipv6_enabled"] is True
+
+
+class TestReloadWifiDriver:
+    def _run(self, lan, ssh, version):
+        sent = []
+
+        def exec_(cmd, *a, **k):
+            sent.append(cmd)
+            return version if cmd.startswith("cat /etc/glversion") else ""
+
+        ssh.exec.side_effect = exec_
+        lan._reload_wifi_driver()
+        return sent
+
+    def test_firmware_4_11_syncs_and_reboots_instead_of_rmmod(self, lan, ssh):
+        """rmmod mt_wifi panicked the router on 4.11 and lost the UCI commit."""
+        sent = self._run(lan, ssh, "4.11.0")
+        joined = "\n".join(sent)
+        assert "sync; (sleep 2; reboot)" in joined
+        assert "rmmod" not in joined
+
+    def test_older_firmware_reloads_module_after_sync(self, lan, ssh):
+        sent = self._run(lan, ssh, "4.9.0")
+        reload_cmd = next(c for c in sent if "rmmod mt_wifi" in c)
+        assert "sync; wifi down" in reload_cmd
+        assert "reboot" not in reload_cmd

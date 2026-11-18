@@ -827,8 +827,23 @@ class RouterLanAccess:
         self._reload_wifi_driver()
 
     def _reload_wifi_driver(self) -> None:
-        """Reload the MediaTek WiFi kernel module to pick up BssidNum changes."""
+        """Make the MediaTek driver pick up BssidNum / new BSS changes.
+
+        Firmware < 4.11: unload + reload ``mt_wifi`` (~15s WiFi outage).
+        Firmware >= 4.11: ``rmmod mt_wifi`` crashed the router (kernel panic
+        → reboot) and the just-committed UCI changes were lost because they
+        hadn't reached flash yet. There we ``sync`` and do a clean reboot
+        instead — the boot-time mtk-wifi-configurator sizes BssidNum from
+        UCI. ~2 min outage, but creating/deleting networks is rare.
+        """
+        if self._firmware_version() >= (4, 11):
+            try:
+                self._ssh.exec("sync; (sleep 2; reboot) </dev/null >/dev/null 2>&1 &")
+            except Exception:
+                pass  # expected — the reboot drops SSH
+            return
         reload_script = (
+            "sync; "
             "wifi down 2>/dev/null; "
             "rmmod mtk_warp_proxy 2>/dev/null; "
             "rmmod mt_wifi 2>/dev/null; "
@@ -846,6 +861,14 @@ class RouterLanAccess:
             )
         except Exception:
             pass  # expected — WiFi drop kills SSH before command returns
+
+    def _firmware_version(self) -> tuple[int, ...]:
+        """GL.iNet firmware version from /etc/glversion, e.g. (4, 11, 0)."""
+        try:
+            raw = self._ssh.exec("cat /etc/glversion 2>/dev/null || true").strip()
+            return tuple(int(x) for x in re.findall(r"\d+", raw)[:3]) or (0,)
+        except Exception:
+            return (0,)
 
     def _ap_ifnames_by_radio(self, exclude_prefix: str | None = None) -> dict[str, list[str]]:
         """AP-mode wifi-iface ifnames per radio, enabled or not.

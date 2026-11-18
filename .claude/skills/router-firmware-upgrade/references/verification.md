@@ -43,5 +43,8 @@ changes there are the most likely source of subtle routing breakage).
 5. From a device in a VPN group: public IP is the Proton exit; kill switch holds when the
    tunnel is disconnected (disconnect a test group, confirm no internet, reconnect).
 6. Adblock: a blocked domain resolves to `0.0.0.0` from an adblock group device.
-7. `pytest tests/` still green (no router needed, but catches nothing firmware-specific — the
+7. Paths that touch kernel modules (WiFi driver reload on network create/delete) are NOT exercised by
+   verify.sh — on 4.11 the `rmmod mt_wifi` reload crashed the router. Treat any such path as untested on
+   a new firmware until tried at a time an outage is acceptable.
+8. `pytest tests/` still green (no router needed, but catches nothing firmware-specific — the
    live checks above are the real test).

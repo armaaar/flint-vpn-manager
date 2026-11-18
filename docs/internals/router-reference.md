@@ -80,7 +80,9 @@ See [proton-wg-internals.md](proton-wg-internals.md) for process targeting, mang
 
 **Critical**: MediaTek's `mt_wifi` kernel module reads `BssidNum` from `.dat` files ONLY at module load time. `wifi reload` and `wifi down/up` do NOT reload the module, so new wireless interfaces (e.g. `ra2`, `rax2`) are never created by those commands alone.
 
-**Solution**: `router_lan_access.py`'s `_reload_wifi_driver()` performs a full driver reload:
+**Firmware ≥ 4.11 — do NOT `rmmod mt_wifi`.** On 4.11.0 the module reload panicked the router (`kernel.panic=3` → reboot, no crash log: eMMC, no mtdoops partition) and the UCI changes committed just before were lost because they hadn't been flushed to flash. `_reload_wifi_driver()` now does `sync` + a clean `reboot` on ≥ 4.11; the boot-time `mtk-wifi-configurator` sizes `BssidNum` from UCI. Always `sync` after committing UCI before anything risky.
+
+**Solution (firmware < 4.11)**: `router_lan_access.py`'s `_reload_wifi_driver()` performs a full driver reload:
 `wifi down` → `rmmod mtk_warp_proxy` → `rmmod mt_wifi` → `insmod mt_wifi` → `insmod mtk_warp_proxy` → `wifi up` → firewall/dnsmasq reload
 
 - Runs detached (`&`) via SSH so it survives the SSH disconnect (WiFi drop kills the SSH session)

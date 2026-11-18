@@ -19,6 +19,9 @@ Layering (SSH → tools → facades) is in `docs/internals/router-layer-internal
   contain spaces (self-cleaning sweeps word-split them).
 - WiFi: compute `BssidNum` and `ra<N>`/`rax<N>` **per radio** from UCI
   (`lan_access._RADIOS`). The radios differ since firmware 4.11 (mesh AP on 5G).
+- **Never `rmmod mt_wifi` on firmware ≥ 4.11** — it panicked the router and the
+  unflushed UCI commit was lost. `_reload_wifi_driver` syncs + reboots there.
+  Run `sync` after committing UCI before any risky step.
 - Only app-created networks (`fvpn_*`) may be deleted; GL's own networks use
   anonymous firewall sections the delete code can't clean.
 
