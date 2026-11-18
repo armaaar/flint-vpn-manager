@@ -94,10 +94,10 @@ def update(master_password: str, **updates) -> dict:
     """Update one or more credentials. Re-encrypts with a new salt.
 
     Valid keys: proton_user, proton_pass, router_pass,
-    split_vpn_passwords (dict: split VPN id -> password).
+    split_vpn_credentials (dict: split VPN id -> {password, totp}).
     Returns the updated secrets dict.
     """
-    valid_keys = {"proton_user", "proton_pass", "router_pass", "split_vpn_passwords"}
+    valid_keys = {"proton_user", "proton_pass", "router_pass", "split_vpn_credentials"}
     invalid = set(updates.keys()) - valid_keys
     if invalid:
         raise KeyError(f"Invalid secret keys: {invalid}")

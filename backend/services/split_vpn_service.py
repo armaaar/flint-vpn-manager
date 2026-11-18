@@ -8,9 +8,11 @@ groups; the groups keep their Proton tunnel for everything else. See
 
 Storage:
   * ``config.json`` → ``split_vpns.vpns``: settings + last pushed routes/DNS
-  * ``secrets.enc`` → ``split_vpn_passwords``: {vpn_id: password}. Writing it
-    needs the master password; after unlock the passwords live in memory.
-  * One-time passwords are never stored.
+  * ``secrets.enc`` → ``split_vpn_credentials``: {vpn_id: {password, totp}}
+    where ``totp`` is the parsed TOTP secret. Writing it needs the master
+    password; after unlock the credentials live in memory only.
+  * One-time codes are generated on demand from the TOTP secret (or passed
+    explicitly) and never stored.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ import io
 import logging
 import lzma
 import tarfile
+import threading
 import time
 import urllib.request
 import uuid
@@ -36,6 +39,7 @@ from consts import (
     SPLITVPN_TYPES,
 )
 from router.facades.split_vpn import build_client_config, normalize_cidr, _SAFE_DOMAIN_RE
+from vpn.totp import parse_totp, seconds_left, totp_code
 
 if TYPE_CHECKING:
     from router.api import RouterAPI
@@ -44,39 +48,55 @@ log = logging.getLogger(__name__)
 
 _CONNECTED_STATES = {"CONNECTED", "ESTABLISHED", "UP", "ONLINE"}
 _EDITABLE = ("name", "server", "port", "tunnel_mode", "username", "group_ids",
-             "domains", "cidrs", "use_pushed_routes", "enabled")
+             "domains", "cidrs", "use_pushed_routes", "enabled", "auto_connect")
+# Don't submit a code that expires mid-handshake (emulated client + AD auth)
+_MIN_CODE_LIFETIME = 10
+# Auto-reconnect monitor
+_MONITOR_INTERVAL = 60
+_BACKOFF_START = 120
+_BACKOFF_MAX = 3600
 
 
 class SplitVpnService:
     def __init__(self, router: RouterAPI):
         self.router = router
-        self._passwords: dict[str, str] = {}
+        self._creds: dict[str, dict] = {}
+        self._lock = threading.RLock()          # serialises connect/disconnect
+        self._monitor: threading.Thread | None = None
+        self._stop = threading.Event()
+        self._backoff: dict[str, tuple[float, float]] = {}  # id -> (next_try, delay)
 
     # ── Secrets ───────────────────────────────────────────────────────────
 
     def load_secrets(self, secrets: dict) -> None:
         """Called on unlock with the decrypted secrets."""
-        self._passwords = dict(secrets.get("split_vpn_passwords") or {})
+        self._creds = {k: dict(v) for k, v in (secrets.get("split_vpn_credentials") or {}).items()}
 
-    def _save_password(self, vpn_id: str, password: str | None, master_password: str) -> None:
+    def _save_credentials(self, vpn_id: str, master_password: str,
+                          password: str | None = None, totp: dict | None = None,
+                          delete: bool = False) -> None:
         if not master_password:
-            raise ValueError("Master password is required to store the VPN password")
+            raise ValueError("Master password is required to store VPN credentials")
         try:
             secrets = sm.unlock(master_password)
         except ValueError as e:
             raise ValueError("Wrong master password") from e
-        pwds = dict(secrets.get("split_vpn_passwords") or {})
-        if password is None:
-            pwds.pop(vpn_id, None)
+        creds = {k: dict(v) for k, v in (secrets.get("split_vpn_credentials") or {}).items()}
+        if delete:
+            creds.pop(vpn_id, None)
         else:
-            pwds[vpn_id] = password
-        sm.update(master_password, split_vpn_passwords=pwds)
-        self._passwords = pwds
+            entry = creds.setdefault(vpn_id, {})
+            if password is not None:
+                entry["password"] = password
+            if totp is not None:
+                entry["totp"] = totp
+        sm.update(master_password, split_vpn_credentials=creds)
+        self._creds = creds
 
-    def _forget_password(self, vpn_id: str) -> None:
+    def _forget_credentials(self, vpn_id: str) -> None:
         """Drop from memory; the encrypted copy is removed on the next save
         that has the master password (stale entries are harmless)."""
-        self._passwords.pop(vpn_id, None)
+        self._creds.pop(vpn_id, None)
 
     # ── Read ──────────────────────────────────────────────────────────────
 
@@ -97,7 +117,9 @@ class SplitVpnService:
 
     def _public(self, vpn: dict, live: dict | None = None) -> dict:
         out = {k: v for k, v in vpn.items()}
-        out["has_password"] = vpn["id"] in self._passwords
+        creds = self._creds.get(vpn["id"], {})
+        out["has_password"] = bool(creds.get("password"))
+        out["has_totp"] = bool(creds.get("totp"))
         if live is not None:
             out["status"] = live
         return out
@@ -147,6 +169,7 @@ class SplitVpnService:
             "cidrs": [],
             "use_pushed_routes": True,
             "enabled": True,
+            "auto_connect": True,
             "pushed_routes": [],
             "pushed_dns": [],
         }
@@ -156,7 +179,8 @@ class SplitVpnService:
         password = data.get("password")
         if not password:
             raise ValueError("password is required")
-        self._save_password(vpn["id"], password, data.get("master_password", ""))
+        totp = parse_totp(data["totp_secret"]) if data.get("totp_secret") else None
+        self._save_credentials(vpn["id"], data.get("master_password", ""), password=password, totp=totp)
         self.router.split_vpn.write_client_config(vpn["slot"], vpn)
         vpns.append(vpn)
         self._save_vpns(vpns)
@@ -170,8 +194,10 @@ class SplitVpnService:
         if not vpn:
             raise ValueError(f"Split VPN not found: {vpn_id}")
         self._apply_fields(vpn, data)
-        if data.get("password"):
-            self._save_password(vpn_id, data["password"], data.get("master_password", ""))
+        if data.get("password") or data.get("totp_secret"):
+            totp = parse_totp(data["totp_secret"]) if data.get("totp_secret") else None
+            self._save_credentials(vpn_id, data.get("master_password", ""),
+                                   password=data.get("password") or None, totp=totp)
         self.router.split_vpn.write_client_config(vpn["slot"], vpn)
         self._save_vpns(vpns)
         self.reapply_all()
@@ -190,7 +216,8 @@ class SplitVpnService:
         self.router.split_vpn.remove_slot_files(vpn["slot"])
         vpns = [v for v in vpns if v["id"] != vpn_id]
         self._save_vpns(vpns)
-        self._forget_password(vpn_id)
+        self._forget_credentials(vpn_id)
+        self._backoff.pop(vpn_id, None)
         self.reapply_all()
         log.info(f"Split VPN '{vpn['name']}' deleted")
         return {"success": True}
@@ -232,6 +259,7 @@ class SplitVpnService:
         vpn["cidrs"] = cidrs
         vpn["use_pushed_routes"] = bool(vpn.get("use_pushed_routes", True))
         vpn["enabled"] = bool(vpn.get("enabled", True))
+        vpn["auto_connect"] = bool(vpn.get("auto_connect", True))
 
     @staticmethod
     def _validate_groups(group_ids: list) -> list[str]:
@@ -250,34 +278,49 @@ class SplitVpnService:
 
     # ── Tunnel control ────────────────────────────────────────────────────
 
-    def connect(self, vpn_id: str, otp: str) -> dict:
-        vpn = self._find(vpn_id)
-        otp = str(otp or "").strip()
-        if not otp:
-            raise ValueError("A one-time password is required")
-        password = self._passwords.get(vpn_id)
-        if not password:
-            raise ValueError("No stored password for this VPN — edit it and enter the password")
-        if not self.runtime_status().get("installed"):
-            raise ValueError("The VPN client runtime is not installed on the router")
-        self.router.split_vpn.write_client_config(vpn["slot"], vpn)
-        log.info(f"Split VPN '{vpn['name']}' connecting")
-        result = self.router.split_vpn.connect(vpn["slot"], vpn["username"], password, otp)
-        result["connected"] = _is_connected(result)
-        if result["connected"]:
-            self._record_pushed(vpn_id, result)
-            log.info(
-                f"Split VPN '{vpn['name']}' connected: ip={result.get('ip')} "
-                f"routes={result.get('routes')} dns={result.get('dns')}"
-            )
-        else:
-            log.warning(f"Split VPN '{vpn['name']}' failed to connect (state={result.get('state')})")
-        self.reapply_all()
-        return result
+    def connect(self, vpn_id: str, otp: str | None = None) -> dict:
+        """Connect. Without ``otp`` the code is generated from the stored
+        TOTP secret (waiting for a fresh window if the current code is about
+        to expire)."""
+        with self._lock:
+            vpn = self._find(vpn_id)
+            creds = self._creds.get(vpn_id, {})
+            password = creds.get("password")
+            if not password:
+                raise ValueError("No stored password for this VPN — edit it and enter the password")
+            otp = str(otp or "").strip()
+            if not otp:
+                totp = creds.get("totp")
+                if not totp:
+                    raise ValueError("No TOTP secret stored — add it to the VPN or pass a one-time code")
+                left = seconds_left(totp)
+                if left < _MIN_CODE_LIFETIME:
+                    time.sleep(left + 0.5)
+                otp = totp_code(totp)
+            if not self.runtime_status().get("installed"):
+                raise ValueError("The VPN client runtime is not installed on the router")
+            self.router.split_vpn.write_client_config(vpn["slot"], vpn)
+            log.info(f"Split VPN '{vpn['name']}' connecting")
+            result = self.router.split_vpn.connect(vpn["slot"], vpn["username"], password, otp)
+            result["connected"] = _is_connected(result)
+            if result["connected"]:
+                self._record_pushed(vpn_id, result)
+                self._backoff.pop(vpn_id, None)
+                log.info(
+                    f"Split VPN '{vpn['name']}' connected: ip={result.get('ip')} "
+                    f"routes={result.get('routes')} dns={result.get('dns')}"
+                )
+            else:
+                log.warning(f"Split VPN '{vpn['name']}' failed to connect (state={result.get('state')})")
+            self.reapply_all()
+            return result
 
     def disconnect(self, vpn_id: str) -> dict:
-        vpn = self._find(vpn_id)
-        self.router.split_vpn.disconnect(vpn["slot"], teardown=True)
+        with self._lock:
+            vpn = self._find(vpn_id)
+            self.router.split_vpn.disconnect(vpn["slot"], teardown=True)
+            # a manual disconnect pauses auto-reconnect until the next connect
+            self._backoff[vpn_id] = (float("inf"), _BACKOFF_START)
         log.info(f"Split VPN '{vpn['name']}' disconnected")
         return {"success": True}
 
@@ -356,6 +399,64 @@ class SplitVpnService:
         if changed:
             self._save_vpns(vpns)
             self.reapply_all()
+
+    # ── Auto-connect monitor ──────────────────────────────────────────────
+
+    def start_monitor(self) -> None:
+        """Start the background loop that (re)connects ``auto_connect`` VPNs
+        whose tunnel is down. Called on unlock."""
+        if self._monitor and self._monitor.is_alive():
+            return
+        self._stop.clear()
+        self._monitor = threading.Thread(target=self._monitor_loop, name="split-vpn-monitor", daemon=True)
+        self._monitor.start()
+
+    def stop_monitor(self) -> None:
+        self._stop.set()
+
+    def _monitor_loop(self) -> None:
+        # first pass shortly after unlock, then every _MONITOR_INTERVAL
+        if self._stop.wait(5):
+            return
+        while not self._stop.is_set():
+            try:
+                self.check_and_reconnect()
+            except Exception as e:
+                log.warning(f"Split VPN monitor error: {e}")
+            if self._stop.wait(_MONITOR_INTERVAL):
+                return
+
+    def check_and_reconnect(self, now: float | None = None) -> list[str]:
+        """One monitor pass. Returns the ids it tried to connect."""
+        now = time.time() if now is None else now
+        tried = []
+        for v in self._vpns():
+            vid = v["id"]
+            creds = self._creds.get(vid, {})
+            if not (v.get("enabled") and v.get("auto_connect", True)
+                    and creds.get("password") and creds.get("totp")):
+                continue
+            next_try, delay = self._backoff.get(vid, (0.0, _BACKOFF_START))
+            if now < next_try:
+                continue
+            try:
+                st = self.router.split_vpn.status(v["slot"])
+            except Exception as e:
+                log.warning(f"Split VPN '{v['name']}' status check failed: {e}")
+                continue
+            if _is_connected(st):
+                continue
+            tried.append(vid)
+            log.info(f"Split VPN '{v['name']}' is down — auto-connecting")
+            try:
+                ok = self.connect(vid).get("connected")
+            except Exception as e:
+                log.warning(f"Split VPN '{v['name']}' auto-connect error: {e}")
+                ok = False
+            if not ok:
+                # exponential backoff so a wrong password/secret can't lock the account
+                self._backoff[vid] = (time.time() + delay, min(delay * 2, _BACKOFF_MAX))
+        return tried
 
     # ── Runtime install ───────────────────────────────────────────────────
 

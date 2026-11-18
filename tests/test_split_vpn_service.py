@@ -42,18 +42,30 @@ def env():
 def _create(env, **kw):
     data = {"name": "Work VPN", "server": "vpn.example.com", "username": "alice",
             "password": "pw", "master_password": "mp", "group_ids": ["g_work"],
+            "totp_secret": "JBSWY3DPEHPK3PXP",
             "domains": ["corp.example"], "cidrs": ["10.50.0.0/16"]}
     data.update(kw)
     return env["svc"].create(data)
 
 
 class TestCreate:
-    def test_creates_and_stores_password_encrypted(self, env):
+    def test_creates_and_stores_credentials_encrypted(self, env):
         vpn = _create(env)
-        assert vpn["slot"] == 0 and vpn["has_password"] is True
-        env["sm"].update.assert_called_once_with("mp", split_vpn_passwords={vpn["id"]: "pw"})
-        assert "password" not in env["config"]["split_vpns"]["vpns"][0]
+        assert vpn["slot"] == 0 and vpn["has_password"] is True and vpn["has_totp"] is True
+        (mp,), kwargs = env["sm"].update.call_args
+        assert mp == "mp"
+        entry = kwargs["split_vpn_credentials"][vpn["id"]]
+        assert entry["password"] == "pw"
+        assert entry["totp"]["secret"] == "JBSWY3DPEHPK3PXP"
+        stored = env["config"]["split_vpns"]["vpns"][0]
+        assert "password" not in stored and "totp_secret" not in stored
         env["router"].split_vpn.write_client_config.assert_called_once()
+
+    def test_rejects_invalid_totp_secret(self, env):
+        with pytest.raises(ValueError, match="base32"):
+            _create(env, totp_secret="not base32 !!")
+        env["router"].split_vpn.write_client_config.assert_not_called()
+        env["sm"].update.assert_not_called()
 
     def test_requires_master_password(self, env):
         with pytest.raises(ValueError, match="Master password"):
@@ -118,11 +130,28 @@ class TestConnect:
         assert stored["pushed_routes"] == ["10.0.0.0/8"]
         assert stored["pushed_dns"] == ["10.0.0.53"]
 
-    def test_connect_requires_otp_and_password(self, env):
+    def test_connect_generates_code_from_totp_secret(self, env):
         vpn = _create(env)
-        with pytest.raises(ValueError, match="one-time"):
-            env["svc"].connect(vpn["id"], "")
-        env["svc"]._passwords.clear()
+        env["router"].split_vpn.connect.return_value = {"state": "CONNECTED", "ip": "10.9.9.9"}
+        with patch.object(svc_mod, "seconds_left", return_value=25), \
+             patch.object(svc_mod, "totp_code", return_value="654321") as code:
+            env["svc"].connect(vpn["id"])
+        assert code.call_args.args[0]["secret"] == "JBSWY3DPEHPK3PXP"
+        env["router"].split_vpn.connect.assert_called_with(0, "alice", "pw", "654321")
+
+    def test_waits_for_fresh_window_when_code_about_to_expire(self, env):
+        vpn = _create(env)
+        env["router"].split_vpn.connect.return_value = {"state": "CONNECTED"}
+        with patch.object(svc_mod, "seconds_left", return_value=3), \
+             patch.object(svc_mod.time, "sleep") as sleep:
+            env["svc"].connect(vpn["id"])
+        sleep.assert_called_once_with(3.5)
+
+    def test_connect_requires_secret_or_otp_and_password(self, env):
+        vpn = _create(env, totp_secret=None)
+        with pytest.raises(ValueError, match="No TOTP secret"):
+            env["svc"].connect(vpn["id"])
+        env["svc"]._creds.clear()
         with pytest.raises(ValueError, match="No stored password"):
             env["svc"].connect(vpn["id"], "123456")
 
@@ -131,6 +160,29 @@ class TestConnect:
         env["router"].split_vpn.runtime_status.return_value = {}
         with pytest.raises(ValueError, match="runtime"):
             env["svc"].connect(vpn["id"], "123456")
+
+
+class TestMonitor:
+    def test_reconnects_down_vpn_and_backs_off_on_failure(self, env):
+        vpn = _create(env)
+        env["router"].split_vpn.status.return_value = {"state": "DOWN"}
+        env["router"].split_vpn.connect.return_value = {"state": "DISCONNECTED"}
+        svc = env["svc"]
+        assert svc.check_and_reconnect(now=1000) == [vpn["id"]]
+        # failed -> backoff: an immediate second pass doesn't retry
+        assert svc.check_and_reconnect(now=1001) == []
+
+    def test_skips_connected_disabled_and_manual_disconnect(self, env):
+        vpn = _create(env)
+        svc = env["svc"]
+        env["router"].split_vpn.status.return_value = {"state": "CONNECTED"}
+        assert svc.check_and_reconnect(now=1000) == []
+        env["router"].split_vpn.status.return_value = {"state": "DOWN"}
+        svc.disconnect(vpn["id"])                      # manual → paused
+        assert svc.check_and_reconnect(now=10**9) == []
+        svc.update(vpn["id"], {"auto_connect": False})
+        svc._backoff.clear()
+        assert svc.check_and_reconnect(now=10**9) == []
 
 
 class TestGroupDeleted:

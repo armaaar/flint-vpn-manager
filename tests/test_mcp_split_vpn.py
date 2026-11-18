@@ -77,6 +77,7 @@ def test_create_sends_full_body(setup):
         "cidrs": [],
         "use_pushed_routes": True,
         "enabled": True,
+        "auto_connect": True,
     })
 
 
@@ -116,6 +117,21 @@ def test_connect_uses_long_timeout(setup):
     assert args == ("/api/split-vpns/sv_1/connect",)
     assert kwargs["json"] == {"otp": "123456"}
     assert kwargs["timeout"] >= 200
+
+
+def test_connect_without_otp_uses_stored_totp(setup):
+    mcp, api = setup
+    _call(mcp, "flint_connect_split_vpn", vpn_id="sv_1")
+    _, kwargs = api.post.call_args
+    assert kwargs["json"] == {}
+
+
+def test_update_totp_secret_sends_master_password(setup):
+    mcp, api = setup
+    _call(mcp, "flint_update_split_vpn", vpn_id="sv_1", totp_secret="JBSWY3DPEHPK3PXP", master_password="mp")
+    api.put.assert_called_once_with(
+        "/api/split-vpns/sv_1", json={"totp_secret": "JBSWY3DPEHPK3PXP", "master_password": "mp"}
+    )
 
 
 def test_disconnect(setup):

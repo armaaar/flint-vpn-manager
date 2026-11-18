@@ -49,7 +49,8 @@ def api_delete_split_vpn(vpn_id):
 @split_vpn_bp.route("/api/split-vpns/<vpn_id>/connect", methods=["POST"])
 @require_unlocked
 def api_connect_split_vpn(vpn_id):
-    return _run(_svc().connect, vpn_id, (request.json or {}).get("otp", ""))
+    # otp is optional: without it the code is generated from the stored TOTP secret
+    return _run(_svc().connect, vpn_id, (request.get_json(silent=True) or {}).get("otp") or None)
 
 
 @split_vpn_bp.route("/api/split-vpns/<vpn_id>/disconnect", methods=["POST"])

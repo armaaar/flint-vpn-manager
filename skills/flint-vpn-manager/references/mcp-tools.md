@@ -92,15 +92,15 @@ Unlock is session-scoped in the backend. If the backend restarts, you need to un
 
 ### Split VPNs
 
-Third-party VPNs (Barracuda CloudGen) on the router that carry only work domains/CIDRs for chosen groups. Every connect needs a fresh OTP from the human — never guess or reuse one.
+Third-party VPNs (Barracuda CloudGen) on the router that carry only work domains/CIDRs for chosen groups. One-time codes are generated from the stored TOTP secret; pass `otp` only when `has_totp` is false.
 
 | Tool | Purpose |
 |---|---|
 | `flint_list_split_vpns` | List split VPNs, live tunnel status, runtime install state. |
-| `flint_create_split_vpn` | Create one (needs the VPN password and the app master password). |
+| `flint_create_split_vpn` | Create one (VPN password + TOTP secret + the app master password). |
 | `flint_update_split_vpn` | Change settings; password + master password only to change the password. |
 | `flint_delete_split_vpn` | Tear down namespace/tunnel and delete. |
-| `flint_connect_split_vpn` | Connect with an OTP (takes up to ~2.5 min). |
+| `flint_connect_split_vpn` | Connect (code generated from TOTP secret; up to ~2.5 min). |
 | `flint_disconnect_split_vpn` | Stop the tunnel. |
 | `flint_get_split_vpn_log` | Client connect log (why a connect failed). |
 | `flint_install_split_vpn_runtime` | Download + verify + upload the emulator and Barracuda client. |

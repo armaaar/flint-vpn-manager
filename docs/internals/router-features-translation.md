@@ -1103,6 +1103,7 @@ All Flint VPN Manager includes use `option reload '1'` — they re-run on `firew
 | `firewall.fvpn_lan_access` | `/etc/fvpn/lan_access_rules.sh` | LAN access exceptions + global fwmark ACCEPT (§20) |
 | `firewall.fvpn_ipv6_fwd` | `/etc/fvpn/ipv6_forward.sh` | IPv6 FORWARD rules (§22) |
 | `firewall.fvpn_ipv6_mangle` | `/etc/fvpn/ipv6_mangle_rules.sh` | IPv6 mangle MARK rules (§22) |
+| `firewall.fvpn_splitvpn` | `/etc/fvpn/splitvpn_rules.sh` | Split VPN marks/tables/forward rules (see split-vpn-internals.md) |
 
 Registration pattern (`Uci.ensure_firewall_include`, [backend/router/tools/uci.py:125-140](backend/router/tools/uci.py#L125-L140)):
 ```sh
@@ -1230,7 +1231,7 @@ Reverse lookup: given an artifact you found on the router, which feature owns it
 | `/etc/config/firewall` | `fvpn_<zid>_zone` | User-created LAN zone (§17) |
 | `/etc/config/firewall` | `fvpn_<zid>_{dhcp,dns,mdns,wan}` | User-created LAN firewall rules (§17, §21) |
 | `/etc/config/firewall` | `fvpn_*_mdns` | mDNS reflection firewall rule (§21) |
-| `/etc/config/firewall` | `fvpn_noint_include`, `fvpn_vpn_bypass`, `fvpn_adblock`, `fvpn_pwg_mangle`, `fvpn_lan_access`, `fvpn_ipv6_fwd`, `fvpn_ipv6_mangle` | Firewall include registrations (§24) |
+| `/etc/config/firewall` | `fvpn_noint_include`, `fvpn_vpn_bypass`, `fvpn_adblock`, `fvpn_pwg_mangle`, `fvpn_lan_access`, `fvpn_ipv6_fwd`, `fvpn_ipv6_mangle`, `fvpn_splitvpn` | Firewall include registrations (§24) |
 | `/etc/config/network` | `fvpn_<zid>` | User-created LAN interface (§17) |
 | `/etc/config/network` | `wan6` (managed) | IPv6 WAN (§22) |
 | `/etc/config/wireless` | `fvpn_<zid>_2g`, `fvpn_<zid>_5g` | User-created SSIDs (§17) |
@@ -1299,6 +1300,19 @@ See §1 for the full tree. Each file section cross-referenced above in §9, §14
 | 5353 (UDP) | mDNS (avahi) |
 
 ---
+
+### Split VPN artifacts (see [split-vpn-internals.md](split-vpn-internals.md))
+
+| Artifact | Meaning |
+|---|---|
+| netns `fvpn_sv<N>`, veth `fvsv<N>h` / `fvsv<N>n`, `10.250.<N>.0/30` | Split VPN slot N namespace (Barracuda client runs inside) |
+| ipset `fvpn_sv<N>_dst` | Destinations routed through split VPN N |
+| mangle chain `FVPN_SPLITVPN`, filter chain `FVPN_SPLITVPN_FWD` | Split VPN marking / forwarding |
+| fwmark `0xa000`–`0xd000`, tables `1010`–`1013`, rule prio `90` | Split VPN slots 0–3 |
+| `/etc/fvpn/splitvpn/` (`bin/`, `svctl.sh`, `sv<N>/`) | Runtime binaries, control script, per-slot client config/log |
+| `/tmp/dnsmasq.d*/fvpn-splitvpn.conf` | Work-domain `server=` / `ipset=` lines |
+
+Inspect: `ip netns list`, `/etc/fvpn/splitvpn/svctl.sh status <N>`, `ip rule | grep -E "^90:"`, `ip route show table 1010`, `ipset list fvpn_sv0_dst`, `tail /etc/fvpn/splitvpn/sv0/connect.log`.
 
 ## 28. Common Debug Recipes
 

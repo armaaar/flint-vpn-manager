@@ -118,6 +118,22 @@ Dedicated `#bypass` page accessible from the sidebar. Exception list with collap
 
 ---
 
+## Split VPNs (e.g. a work VPN)
+
+Run a third-party VPN **on the router** for selected groups, carrying only selected destinations; those groups keep their Proton tunnel for everything else. First supported type: **Barracuda CloudGen Firewall** (TINA). Up to 4 split VPNs.
+
+- **What goes through it**: work **domains** (resolved by the VPN's DNS through the tunnel, answers added to the routing set automatically), extra **IP ranges**, and optionally the **routes pushed by the VPN server** (default on; `/0` routes are ignored).
+- **Who**: one or more VPN/NoVPN groups (matched by the group's device MAC ipset).
+- **Two-factor**: store the account's **TOTP secret** (base32 or `otpauth://` URI) and the app generates the one-time codes itself. Password and secret are stored encrypted; saving them requires the master password. A manual one-time code can still be given for a single connect.
+- **Auto-connect** (default on): connects after unlock and reconnects within a minute when the tunnel drops, with exponential backoff on failures. A manual Disconnect pauses it until you connect again.
+- **Fail closed**: while the VPN is down, traffic to its destinations is dropped — it never falls back to Proton or the WAN.
+- **Runtime**: Barracuda's client is x86-only, so the router runs it under emulation inside its own network namespace. The UI offers a one-click "Install runtime" (pinned, checksum-verified downloads).
+- **After a router reboot** the tunnel comes back automatically once the app is unlocked (auto-connect).
+
+See [internals/split-vpn-internals.md](internals/split-vpn-internals.md).
+
+---
+
 ## Alternative Routing
 
 Global toggle in Settings. When enabled (default), Proton API calls automatically fall back to DNS-over-HTTPS routing through third-party infrastructure (Google/Quad9 DNS) when Proton's servers are directly unreachable. Useful in censored networks. Handled by the `proton-vpn-api-core` library's `AlternativeRoutingTransport`. Applied at unlock time and updated at runtime when the setting changes.

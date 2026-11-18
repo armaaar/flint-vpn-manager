@@ -152,6 +152,10 @@ def api_unlock():
             _registry.get_split_vpn_service().reapply_all()
         except Exception as e:
             log.warning(f"Split VPN reapply on unlock failed: {e}")
+        try:
+            _registry.get_split_vpn_service().start_monitor()
+        except Exception as e:
+            log.warning(f"Split VPN monitor start failed: {e}")
         log.info(f"Unlock timing: split_vpn={time.time()-t:.2f}s")
 
         # Start auto-optimizer
@@ -181,6 +185,11 @@ def api_lock():
     the auto-optimizer. The next request that needs an unlocked session will
     return 401 until /api/unlock is called again.
     """
+    try:
+        if _registry._split_vpn_service is not None:
+            _registry._split_vpn_service.stop_monitor()
+    except Exception as e:
+        log.warning(f"Failed to stop split VPN monitor on lock: {e}")
     _registry.reset()
     try:
         stop_tracker()

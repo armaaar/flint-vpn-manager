@@ -32,7 +32,7 @@ A Split VPN is a third-party VPN (currently Barracuda CloudGen, e.g. a company V
 
 - **Runtime**: the VPN client binaries must be on the router first. Check `runtime.installed` from `flint_list_split_vpns`; if false, call `flint_install_split_vpn_runtime` (downloads ~70MB, can take several minutes; the MCP client allows up to 11 minutes).
 - **Master password**: `flint_create_split_vpn` needs the VPN account `password` plus the app's `master_password`, because the account password is stored encrypted in `secrets.enc`. `flint_update_split_vpn` needs both only when changing the password.
-- **OTP**: every `flint_connect_split_vpn` call needs a fresh one-time password from the human. It is never stored. Connecting can take up to ~2.5 minutes (the MCP client allows 210s for this call). On failure, read `flint_get_split_vpn_log`.
+- **OTP**: codes are generated from the stored TOTP secret, so `flint_connect_split_vpn` normally needs only `vpn_id` (pass `otp` only when `has_totp` is false). VPNs with `auto_connect` reconnect on their own. Connecting can take up to ~2.5 minutes (the MCP client allows 210s for this call). On failure, read `flint_get_split_vpn_log`.
 - **List fields** (`group_ids`, `domains`, `cidrs`) on update replace the existing list.
 
 Full catalog with descriptions and usage patterns: [skills/flint-vpn-manager/references/mcp-tools.md](../skills/flint-vpn-manager/references/mcp-tools.md).

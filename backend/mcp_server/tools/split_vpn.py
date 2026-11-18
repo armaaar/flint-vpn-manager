@@ -53,20 +53,22 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
         password: str,
         master_password: str,
         group_ids: list[str],
+        totp_secret: str | None = None,
         domains: list[str] | None = None,
         cidrs: list[str] | None = None,
         port: int = 691,
         tunnel_mode: str = "TCP",
         use_pushed_routes: bool = True,
         enabled: bool = True,
+        auto_connect: bool = True,
     ) -> str:
         """Create a Split VPN (Barracuda CloudGen). Does not connect it.
 
-        The account password is stored encrypted in the app's secrets file,
-        which requires the app's master password (the one used for
-        flint_unlock). Ask the human for both; never guess them. A one-time
-        password (OTP) is NOT needed here — it is supplied on every
-        flint_connect_split_vpn call and never stored.
+        The account password and the TOTP secret are stored encrypted in the
+        app's secrets file, which requires the app's master password (the one
+        used for flint_unlock). Ask the human for them; never guess. With a
+        TOTP secret the app generates the one-time codes itself, so connects
+        (and auto-reconnects) need no human input.
 
         Args:
             name: Display name (e.g. "Work VPN")
@@ -77,6 +79,8 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
                              write the encrypted password
             group_ids: Group (profile) IDs whose devices use this VPN for the
                        selected destinations. Groups must have internet access.
+            totp_secret: Base32 TOTP secret or otpauth://totp/... URI used to
+                         generate one-time codes (stored encrypted)
             domains: Domains routed through this VPN (subdomains included),
                      e.g. ["corp.example.com"]
             cidrs: IPv4 networks routed through this VPN, e.g. ["10.20.0.0/16"].
@@ -85,6 +89,8 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
             tunnel_mode: "TCP" (default), "UDP" or "HYBRID"
             use_pushed_routes: Also route networks the server pushes on connect
             enabled: Whether routing rules are active
+            auto_connect: Connect automatically after unlock and reconnect
+                          when the tunnel drops (needs totp_secret)
         """
         body: dict = {
             "name": name,
@@ -99,7 +105,10 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
             "cidrs": cidrs or [],
             "use_pushed_routes": use_pushed_routes,
             "enabled": enabled,
+            "auto_connect": auto_connect,
         }
+        if totp_secret:
+            body["totp_secret"] = totp_secret
         result = api.post("/api/split-vpns", json=body)
         return json.dumps(result, indent=2)
 
@@ -116,7 +125,9 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
         cidrs: list[str] | None = None,
         use_pushed_routes: bool | None = None,
         enabled: bool | None = None,
+        auto_connect: bool | None = None,
         password: str | None = None,
+        totp_secret: str | None = None,
         master_password: str | None = None,
     ) -> str:
         """Update a Split VPN. Only the fields you pass are changed.
@@ -124,9 +135,9 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
         List fields (group_ids, domains, cidrs) REPLACE the existing list —
         pass the full desired list, not just additions.
 
-        To change the stored account password pass both password and
-        master_password (the app's master password). Omit both to keep the
-        current password.
+        To change the stored account password and/or TOTP secret pass them
+        together with master_password (the app's master password). Omit them
+        to keep the current credentials.
 
         Args:
             vpn_id: Split VPN ID (e.g. "sv_a1b2c3d4")
@@ -140,7 +151,9 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
             cidrs: IPv4 networks routed through this VPN (full list)
             use_pushed_routes: Also route networks the server pushes on connect
             enabled: Whether routing rules are active
+            auto_connect: Connect automatically / reconnect when it drops
             password: New VPN account password (requires master_password)
+            totp_secret: New TOTP secret or otpauth URI (requires master_password)
             master_password: Flint VPN Manager master password
         """
         fields = {
@@ -154,10 +167,14 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
             "cidrs": cidrs,
             "use_pushed_routes": use_pushed_routes,
             "enabled": enabled,
+            "auto_connect": auto_connect,
         }
         body: dict = {k: v for k, v in fields.items() if v is not None}
         if password:
             body["password"] = password
+        if totp_secret:
+            body["totp_secret"] = totp_secret
+        if password or totp_secret:
             body["master_password"] = master_password or ""
         result = api.put(f"/api/split-vpns/{vpn_id}", json=body)
         return json.dumps(result, indent=2)
@@ -174,33 +191,32 @@ def register(mcp: FastMCP, api: FlintAPI) -> None:
         return json.dumps(result, indent=2)
 
     @mcp.tool()
-    def flint_connect_split_vpn(vpn_id: str, otp: str) -> str:
-        """Connect a Split VPN using a one-time password (OTP).
+    def flint_connect_split_vpn(vpn_id: str, otp: str | None = None) -> str:
+        """Connect a Split VPN.
 
-        Every connect needs a fresh OTP from the human (e.g. their
-        authenticator app or SMS) — it is never stored, so ask for it right
-        before calling. The stored account password is used automatically.
-        Can take up to ~2.5 minutes. Requires the router runtime to be
-        installed (flint_install_split_vpn_runtime).
+        The stored password is used, and the one-time code is generated from
+        the stored TOTP secret — normally pass only vpn_id. Pass otp only if
+        no TOTP secret is stored (has_totp false). Can take up to ~2.5
+        minutes. Requires the router runtime (flint_install_split_vpn_runtime).
 
         Args:
             vpn_id: Split VPN ID (e.g. "sv_a1b2c3d4")
-            otp: Current one-time password / token code
+            otp: Optional explicit one-time code (overrides the TOTP secret)
 
         Returns the connection status, the client log, and the exit code (rc).
         If it fails, check the log for the reason (wrong OTP, auth failure).
         """
         result = api.post(
             f"/api/split-vpns/{vpn_id}/connect",
-            json={"otp": otp},
+            json={"otp": otp} if otp else {},
             timeout=CONNECT_TIMEOUT,
         )
         return json.dumps(result, indent=2)
 
     @mcp.tool()
     def flint_disconnect_split_vpn(vpn_id: str) -> str:
-        """Disconnect a Split VPN. Its config is kept; reconnecting needs a
-        new OTP.
+        """Disconnect a Split VPN. Its config is kept. Auto-reconnect is
+        paused until the next manual connect.
 
         Args:
             vpn_id: Split VPN ID (e.g. "sv_a1b2c3d4")

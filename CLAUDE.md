@@ -30,6 +30,7 @@ User-facing docs live at the top of `docs/`. Implementation deep-dives live in `
 - [docs/internals/source-of-truth.md](docs/internals/source-of-truth.md) — full field tables, JSON schema, sync mechanisms, ipset naming
 - [docs/internals/debugging-catalogue.md](docs/internals/debugging-catalogue.md) — historical debugging stories and hard-won invariants
 - [docs/internals/router-features-translation.md](docs/internals/router-features-translation.md) — feature → router artifact mapping
+- [docs/internals/split-vpn-internals.md](docs/internals/split-vpn-internals.md) — split VPNs (Barracuda work VPN): netns + qemu emulation, fwmark/table slots, fail-closed routing, OTP handling
 
 ## Quick Start
 
