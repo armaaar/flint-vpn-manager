@@ -54,7 +54,10 @@ if TYPE_CHECKING:
     from router.tools.uci import Uci
 
 _SAFE_HOST_RE = re.compile(r"^[A-Za-z0-9.-]{1,253}$")
-_SAFE_LOGIN_RE = re.compile(r"^[^\s'\"`$\\;|&<>]{1,128}$")
+# Logins like DOMAIN\\user or user@domain are normal (AD); the value is
+# shell-quoted end to end (shlex.quote → "$LOGIN"), so only control
+# characters (newlines would break the stdin protocol) are refused.
+_SAFE_LOGIN_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,128}$")
 _SAFE_DOMAIN_RE = re.compile(
     r"^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*$"
 )

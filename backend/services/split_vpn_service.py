@@ -47,7 +47,7 @@ from vpn.totp import parse_totp, seconds_left, totp_code
 if TYPE_CHECKING:
     from router.api import RouterAPI
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("flintvpn")
 
 _CONNECTED_STATES = {"CONNECTED", "ESTABLISHED", "UP", "ONLINE"}
 _EDITABLE = ("name", "server", "port", "tunnel_mode", "username", "group_ids",

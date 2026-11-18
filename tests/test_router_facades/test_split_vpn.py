@@ -163,9 +163,16 @@ class TestFacade:
         assert any("/etc/fvpn/splitvpn/svctl.sh start 0 alice < /tmp/fvsv0.in" in c.args[0]
                    for c in ssh.exec.call_args_list)
 
-    def test_connect_rejects_unsafe_login(self, ssh, uci):
+    def test_connect_rejects_control_characters_in_login(self, ssh, uci):
         with pytest.raises(ValueError):
-            RouterSplitVpn(uci, ssh).connect(0, "a b;reboot", "pw", "1")
+            RouterSplitVpn(uci, ssh).connect(0, "alice\nreboot", "pw", "1")
+
+    def test_connect_quotes_domain_style_login(self, ssh, uci):
+        """AD logins (DOMAIN\\user, odd chars) are allowed but shell-quoted."""
+        ssh.exec.return_value = "RC: 0"
+        RouterSplitVpn(uci, ssh).connect(0, "CORP\\alice; x", "pw", "1")
+        assert any("start 0 'CORP\\alice; x' < /tmp/fvsv0.in" in c.args[0]
+                   for c in ssh.exec.call_args_list)
 
     def test_dnsmasq_not_restarted_when_unchanged(self, ssh, uci):
         snippet = build_dnsmasq_snippet([{"slot": 0, "domains": ["corp.example"], "dns_servers": ["10.0.0.53"]}])
