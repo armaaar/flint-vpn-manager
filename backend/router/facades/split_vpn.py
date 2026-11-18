@@ -248,6 +248,10 @@ EOF
     iptables -t nat -C POSTROUTING -s $NIP/32 -o $WAN -j MASQUERADE 2>/dev/null || \
       iptables -t nat -I POSTROUTING 1 -s $NIP/32 -o $WAN -j MASQUERADE
   }
+  iptables -C FORWARD -i $H -s $NIP -j ACCEPT 2>/dev/null || \
+    iptables -I FORWARD 1 -i $H -s $NIP -j ACCEPT
+  iptables -C FORWARD -o $H -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
+    iptables -I FORWARD 1 -o $H -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
   ip route replace default via $NIP dev $H table __TABLE_BASE_EXPR__ 2>/dev/null
   return 0
 }
@@ -272,6 +276,10 @@ case "$ACT" in
   stop) ns_alive && client --stop >/dev/null 2>&1; kill_ns; echo OK ;;
   down)
     ns_alive && client --stop >/dev/null 2>&1; kill_ns
+    iptables -D FORWARD -i $H -s $NIP -j ACCEPT 2>/dev/null
+    iptables -D FORWARD -o $H -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null
+    WAN=$(ip route show default | awk '{print $5; exit}')
+    [ -n "$WAN" ] && iptables -t nat -D POSTROUTING -s $NIP/32 -o $WAN -j MASQUERADE 2>/dev/null
     ip link del $H 2>/dev/null
     ip netns del $NS 2>/dev/null
     rm -rf /etc/netns/$NS
