@@ -176,3 +176,16 @@ locally; the UI names the missing ones).
 ## rp_filter on the host veth must be 0
 
 Replies from work hosts arrive on `fvsvNh` while the router's own route to them points at the WAN. Even loose reverse-path filtering (`2`) drops them: the kernel validates the source with `iif lo`, and GL's `iif lo` policy rules (table 16800, rtp2 local policy) don't return a unicast route for work ranges, so validation fails with `EXDEV` (`ip route get <client> from <work-ip> iif fvsvNh` → "Cross-device link"). Symptom: ICMP/TCP replies are counted in conntrack (TCP stuck in `SYN_RECV`) but never forwarded to the client. `svctl.sh` sets `rp_filter=0` on the veth; the namespace firewall only admits tunnel replies, so this doesn't open anything.
+
+## Presence mode ("the router steps aside")
+
+The work account allows **one session**, so a router that reconnects within a minute would kick the laptop whenever it connects from outside. With `connect_mode: "presence"` the monitor (`SplitVpnService._decide`, every 60 s) holds the session only while one of `presence_macs` is home:
+
+| Situation | Decision (`auto_state`) |
+|---|---|
+| Device home (WiFi association on any `ra*/rax*`, or ARP `REACHABLE/DELAY/PROBE` — `STALE` lingers after leaving) and no own tunnel | hold / reconnect — `connected`, `home` |
+| Device runs its own client (conntrack flow from its IP to the gateway IP; the router's client connects from `10.250.N.2`, never a LAN IP) and `yield_to_device_tunnel` | release immediately, never reconnect — `standby`, `own_tunnel` |
+| Device left, within `presence_grace_min` (default 5) of last seen | keep the session — `releasing`, `release_at` |
+| Grace over / still away | release; **never reconnect while away** — `standby`, `away` |
+
+One read-only SSH call per pass (`build_presence_command` / `parse_presence`); the gateway IP is resolved on the app host and cached 10 min. A failed probe keeps the current state (never flaps the tunnel). A manual Disconnect still pauses everything (`paused`, `manual`). Releases go straight to the router (they don't set the manual pause). `auto_state` is exposed on `GET /api/split-vpns` and shown on the card; decisions are logged in `logs/app.log`.

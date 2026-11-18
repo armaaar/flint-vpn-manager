@@ -131,6 +131,8 @@ Run a third-party VPN **on the router** for selected groups, carrying only selec
 - **One at a time**: up to 4 split VPNs can be configured, but only one connected Barracuda VPN at a time is guaranteed to work (the router can't fully isolate the client instances from each other).
 - **After a router reboot** the tunnel comes back automatically once the app is unlocked (auto-connect).
 
+- **Presence mode** (*Connect mode → Only while these devices are home*): the work account allows one session, so the router holds it only while the chosen device (the work laptop) is home and not running its own VPN client. When the laptop leaves, the router keeps the session for a grace period (default 5 min) and then releases it — so the laptop's own client can connect from anywhere — and never reconnects while it's away. The card shows the current decision (e.g. "🟢 Connected — Work laptop at home", "⏸️ Standing by — Work laptop away").
+
 See [internals/split-vpn-internals.md](internals/split-vpn-internals.md).
 
 ---

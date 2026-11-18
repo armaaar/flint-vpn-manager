@@ -35,8 +35,8 @@ POST /api/vpn-bypass/presets           → save custom preset
 PUT  /api/vpn-bypass/presets/:id       → update custom preset
 DELETE /api/vpn-bypass/presets/:id     → delete custom preset
 POST /api/vpn-bypass/dnsmasq-install   → install dnsmasq-full on router
-GET  /api/split-vpns[?live=0]          → split VPNs (+ live tunnel status), runtime install state, max slots
-POST /api/split-vpns                   → create {name, server, port?, tunnel_mode?, username, password, totp_secret?, master_password, group_ids, domains, cidrs, use_pushed_routes?, enabled?, auto_connect?}
+GET  /api/split-vpns[?live=0]          → split VPNs (+ live tunnel status, auto_state {state, code, devices, since, release_at}), runtime install state, max slots
+POST /api/split-vpns                   → create {name, server, port?, tunnel_mode?, username, password, totp_secret?, master_password, group_ids, domains, cidrs, use_pushed_routes?, enabled?, auto_connect?, connect_mode? (always|presence), presence_macs?, presence_grace_min?, yield_to_device_tunnel?}
 PUT  /api/split-vpns/:id               → update (password/totp_secret + master_password only when changing credentials)
 DELETE /api/split-vpns/:id             → tear down tunnel/namespace and delete
 POST /api/split-vpns/:id/connect       → {otp?} (default: generated from stored TOTP secret) → start the client in its namespace (≤ ~150s); returns status + client log tail

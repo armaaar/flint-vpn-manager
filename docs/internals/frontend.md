@@ -148,3 +148,5 @@ Hash-based routing in `Dashboard.svelte`:
 - **Drag-and-drop**: `svelte-dnd-action` for group reordering and device assignment.
 - **Optimistic UI**: Connect/disconnect updates health to `'connecting'` immediately, before the API response.
 - **`reloadData()`**: Centralized profiles+devices fetch. Replaces duplicated `Promise.all([getProfiles, getDevices])` blocks.
+
+- `lib/utils/splitVpn.ts` also holds `splitVpnAutoStatus(vpn, devices, now)` — the pure helper that renders the presence-mode status line ("Connected — Work laptop at home", "Releasing in N min", …) on the Split VPN card.
