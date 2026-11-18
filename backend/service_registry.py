@@ -32,6 +32,8 @@ class ServiceRegistry:
         self.session_unlocked: bool = False
         self._lan_service = None
         self._bypass_service = None
+        self._split_vpn_service = None
+        self._split_vpn_service = None
 
     def get_proton(self) -> ProtonAPI:
         """Lazy-init ProtonAPI."""
@@ -70,12 +72,20 @@ class ServiceRegistry:
             self._bypass_service = VpnBypassService(self.get_router())
         return self._bypass_service
 
+    def get_split_vpn_service(self):
+        """Lazy-init and return the SplitVpnService instance."""
+        if self._split_vpn_service is None:
+            from services.split_vpn_service import SplitVpnService
+            self._split_vpn_service = SplitVpnService(self.get_router())
+        return self._split_vpn_service
+
     def reset(self):
         """Called on lock — clears service but keeps router/proton for re-unlock."""
         self.session_unlocked = False
         self.service = None
         self._lan_service = None
         self._bypass_service = None
+        self._split_vpn_service = None
 
 
 # Module-level singleton (one per process).

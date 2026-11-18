@@ -35,4 +35,13 @@ POST /api/vpn-bypass/presets           → save custom preset
 PUT  /api/vpn-bypass/presets/:id       → update custom preset
 DELETE /api/vpn-bypass/presets/:id     → delete custom preset
 POST /api/vpn-bypass/dnsmasq-install   → install dnsmasq-full on router
+GET  /api/split-vpns[?live=0]          → split VPNs (+ live tunnel status), runtime install state, max slots
+POST /api/split-vpns                   → create {name, server, port?, tunnel_mode?, username, password, master_password, group_ids, domains, cidrs, use_pushed_routes?, enabled?}
+PUT  /api/split-vpns/:id               → update (password + master_password only when changing the password)
+DELETE /api/split-vpns/:id             → tear down tunnel/namespace and delete
+POST /api/split-vpns/:id/connect       → {otp} → start the client in its namespace (≤ ~150s); returns status + client log tail
+POST /api/split-vpns/:id/disconnect    → stop the client and remove its namespace
+GET  /api/split-vpns/:id/log           → client connect log tail
+GET  /api/split-vpns/runtime           → emulator + client binaries present on the router (sha256-checked)
+POST /api/split-vpns/runtime/install   → download pinned qemu-x86_64 + barracudavpn, verify, upload to router
 ```

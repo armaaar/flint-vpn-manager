@@ -103,12 +103,16 @@ class RouterAPI:
                 raise RuntimeError(f"SSH connection lost: {e}") from e
 
     def write_file(self, remote_path: str, content: str):
+        """Write a text file to the router (see ``write_bytes``)."""
+        self.write_bytes(remote_path, content.encode("utf-8"))
+
+    def write_bytes(self, remote_path: str, data: bytes):
         """Write a file to the router.
 
         Small files (<1MB) use SSH stdin pipe. Large files use a local
-        temp file + ``scp`` to avoid Dropbear channel buffer limits.
+        temp file + ``scp -O`` (the router has no sftp-server) to avoid
+        Dropbear channel buffer limits.
         """
-        data = content.encode("utf-8")
         # Dropbear SSH drops large stdin pipes; use scp for files >= 1MB
         _SCP_THRESHOLD = 1_000_000
         if len(data) < _SCP_THRESHOLD:
@@ -309,6 +313,13 @@ class RouterAPI:
                 ip6tables=self.ip6tables,
             )
         return self._vpn_bypass_facade
+
+    @property
+    def split_vpn(self):
+        if not hasattr(self, "_split_vpn_facade"):
+            from router.facades.split_vpn import RouterSplitVpn
+            self._split_vpn_facade = RouterSplitVpn(self.uci, self)
+        return self._split_vpn_facade
 
     @property
     def proton_wg(self):

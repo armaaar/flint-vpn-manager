@@ -61,6 +61,7 @@ from routes.settings import settings_bp  # noqa: E402
 from routes.stream import stream_bp      # noqa: E402
 from routes.logs import logs_bp          # noqa: E402
 from routes.vpn_bypass import bypass_bp  # noqa: E402
+from routes.split_vpn import split_vpn_bp  # noqa: E402
 
 app.register_blueprint(auth_bp)
 app.register_blueprint(profiles_bp)
@@ -70,6 +71,7 @@ app.register_blueprint(settings_bp)
 app.register_blueprint(stream_bp)
 app.register_blueprint(logs_bp)
 app.register_blueprint(bypass_bp)
+app.register_blueprint(split_vpn_bp)
 
 
 # ── Static Files ─────────────────────────────────────────────────────────────

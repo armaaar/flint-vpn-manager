@@ -90,13 +90,14 @@ def unlock(master_password: str) -> dict:
     return json.loads(decrypted)
 
 
-def update(master_password: str, **updates: str) -> dict:
+def update(master_password: str, **updates) -> dict:
     """Update one or more credentials. Re-encrypts with a new salt.
 
-    Valid keys: proton_user, proton_pass, router_pass.
+    Valid keys: proton_user, proton_pass, router_pass,
+    split_vpn_passwords (dict: split VPN id -> password).
     Returns the updated secrets dict.
     """
-    valid_keys = {"proton_user", "proton_pass", "router_pass"}
+    valid_keys = {"proton_user", "proton_pass", "router_pass", "split_vpn_passwords"}
     invalid = set(updates.keys()) - valid_keys
     if invalid:
         raise KeyError(f"Invalid secret keys: {invalid}")

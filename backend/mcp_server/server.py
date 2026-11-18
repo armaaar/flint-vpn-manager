@@ -28,6 +28,7 @@ from mcp_server.tools import (
     lan_access,
     logs,
     vpn_bypass,
+    split_vpn,
 )
 
 BASE_URL = os.environ.get("FLINTVPN_API_URL", "http://localhost:5000")
@@ -42,7 +43,7 @@ mcp = FastMCP(
         "2. If locked, call flint_unlock with the master password.\n"
         "3. Use flint_list_groups and flint_list_devices to see the current state.\n"
         "4. Manage groups, tunnels, devices, servers, settings, adblock, "
-        "LAN networks, VPN bypass exceptions, and logs.\n\n"
+        "LAN networks, VPN bypass exceptions, Split VPNs, and logs.\n\n"
         "IMPORTANT: The router is the source of truth for tunnel state and "
         "device assignments. All reads are live from the router via SSH — "
         "data returned is a point-in-time snapshot, not a live stream."
@@ -61,6 +62,7 @@ settings.register(mcp, api)
 adblock.register(mcp, api)
 lan_access.register(mcp, api)
 vpn_bypass.register(mcp, api)
+split_vpn.register(mcp, api)
 logs.register(mcp, api)
 
 if __name__ == "__main__":

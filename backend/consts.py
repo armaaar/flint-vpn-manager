@@ -94,6 +94,46 @@ BYPASS_IPSET_PREFIX = "fvpn_byp_"
 BYPASS_SCRIPT_PATH = "/etc/fvpn/vpn_bypass.sh"
 BYPASS_DNSMASQ_CONF = "/tmp/dnsmasq.d/fvpn_bypass.conf"
 
+# Split VPNs — third-party VPNs (e.g. a work Barracuda VPN) that carry only
+# selected destinations for selected groups, on top of the group's Proton
+# tunnel. Each runs in its own network namespace on the router.
+# Marks 0xa000..0xd000 are unused by vpn-client (0x1000-0x5000), proton-wg
+# (0x6000/0x7000/0x9000/0xf000) and bypass (0x8000).
+SPLITVPN_MAX = 4
+SPLITVPN_MARK_BASE = 0xA000          # slot N → mark 0xA000 + N*0x1000
+SPLITVPN_MASK = "0xf000"
+SPLITVPN_TABLE_BASE = 1010           # slot N → table 1010 + N
+SPLITVPN_PRIORITY = 90               # before bypass (100) and tunnels (6000)
+SPLITVPN_CHAIN = "FVPN_SPLITVPN"
+SPLITVPN_FWD_CHAIN = "FVPN_SPLITVPN_FWD"
+SPLITVPN_IPSET_PREFIX = "fvpn_sv"    # fvpn_sv{N}_dst
+SPLITVPN_DIR = "/etc/fvpn/splitvpn"
+SPLITVPN_BIN_DIR = "/etc/fvpn/splitvpn/bin"
+SPLITVPN_CTL = "/etc/fvpn/splitvpn/svctl.sh"
+SPLITVPN_SCRIPT_PATH = "/etc/fvpn/splitvpn_rules.sh"
+SPLITVPN_DNSMASQ_SNIPPET = "fvpn-splitvpn.conf"
+SPLITVPN_TYPES = ("barracuda",)
+
+# Pinned third-party runtime for the Barracuda (TINA) client. The client is
+# x86-64 only, so it runs under qemu user-mode emulation on the ARM64 router.
+SPLITVPN_RUNTIME = {
+    "qemu-x86_64": {
+        # Debian trixie qemu-user (static binaries); file inside the .deb
+        "url": "https://deb.debian.org/debian/pool/main/q/qemu/qemu-user_10.0.13+ds-0+deb13u1_arm64.deb",
+        "sha256": "c73711af02b97cd5e2667e735d9c06890c57165517110ca4e646c95a7083158d",
+        "member": "./usr/bin/qemu-x86_64",
+        "binary_sha256": "9af86352fd463ad9ec25bdd6a4b891ac6b6a7f3d46a7db3da6f23e2c09094a59",
+    },
+    "barracudavpn": {
+        # Barracuda VPN Client 5.1.4 for Linux (statically linked x86-64),
+        # same tarball the AUR `barracudavpn` package pins.
+        "url": "https://raw.githubusercontent.com/RomarQ/barracudavpn-archlinux/master/tarball/barracudavpn-5.1.4.tar.gz",
+        "sha256": "66128019ca60c0b028b3e99293aea3c6cca1dd57d5d2d8fe51cf31994764fab7",
+        "member": "barracudavpn/barracudavpn",
+        "binary_sha256": "a80cacc0c0594db28d5befcbad9c6927b824d83614efb73785641a399397442c",
+    },
+}
+
 # Riot Games AS6507 + AS62830 — all announced IPv4 prefixes (2026-04)
 _RIOT_CIDRS = [
     # NA

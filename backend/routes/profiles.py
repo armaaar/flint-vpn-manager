@@ -109,6 +109,10 @@ def api_delete_profile(profile_id):
             _registry.get_bypass_service().on_group_deleted(profile_id)
         except Exception:
             pass
+        try:
+            _registry.get_split_vpn_service().on_group_deleted(profile_id)
+        except Exception:
+            pass
         return jsonify({"success": True})
     except NotFoundError:
         return jsonify({"error": "Profile not found"}), 404

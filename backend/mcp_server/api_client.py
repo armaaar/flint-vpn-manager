@@ -42,7 +42,13 @@ class FlintAPI:
     def get(self, path: str, **params) -> dict | list:
         return self._request("GET", path, params=params)
 
-    def post(self, path: str, json: dict | None = None) -> dict | list:
+    def post(
+        self, path: str, json: dict | None = None, timeout: float | None = None
+    ) -> dict | list:
+        """POST to *path*. Pass *timeout* (seconds) to override the default
+        30s client timeout for long-running operations."""
+        if timeout is not None:
+            return self._request("POST", path, json=json, timeout=timeout)
         return self._request("POST", path, json=json)
 
     def put(self, path: str, json: dict | None = None) -> dict | list:

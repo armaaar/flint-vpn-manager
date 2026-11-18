@@ -60,8 +60,9 @@ def api_unlock():
         t_total = time.time()
 
         t = time.time()
-        sm.unlock(data["master_password"])
+        secrets = sm.unlock(data["master_password"])
         _registry.session_unlocked = True
+        _registry.get_split_vpn_service().load_secrets(secrets)
         log.info(f"Unlock timing: decrypt={time.time()-t:.2f}s")
 
         # Create the VPN service
@@ -144,6 +145,14 @@ def api_unlock():
         except Exception as e:
             log.warning(f"VPN bypass reapply on unlock failed: {e}")
         log.info(f"Unlock timing: vpn_bypass={time.time()-t:.2f}s")
+
+        # Reapply split VPN routing (marks/tables/DNS; tunnels need an OTP)
+        t = time.time()
+        try:
+            _registry.get_split_vpn_service().reapply_all()
+        except Exception as e:
+            log.warning(f"Split VPN reapply on unlock failed: {e}")
+        log.info(f"Unlock timing: split_vpn={time.time()-t:.2f}s")
 
         # Start auto-optimizer
         t = time.time()

@@ -1,6 +1,6 @@
 # MCP Server
 
-Flint VPN Manager ships with an optional [Model Context Protocol](https://modelcontextprotocol.io/) server that exposes 52 tools to any MCP-compatible client — Claude Desktop, Claude Code, Cursor, or a custom client over stdio. It lets an AI agent operate every feature of the app without the human needing to click through the UI.
+Flint VPN Manager ships with an optional [Model Context Protocol](https://modelcontextprotocol.io/) server that exposes 60 tools to any MCP-compatible client — Claude Desktop, Claude Code, Cursor, or a custom client over stdio. It lets an AI agent operate every feature of the app without the human needing to click through the UI.
 
 The paired [flint-vpn-manager skill](../skills/flint-vpn-manager/) documents each tool, explains when to use MCP vs. raw SSH, and gives operational best practices. If you're setting up MCP to use with Claude, install the skill too:
 
@@ -20,10 +20,20 @@ The server exposes tools under the `flint_*` prefix, grouped by module:
 | **Servers** | `flint_browse_servers`, `flint_get_server_countries`, `flint_toggle_server_preference`, `flint_probe_latency` |
 | **LAN networks** | `flint_list_networks`, `flint_create_network`, `flint_update_access_rules`, `flint_add_exception` |
 | **VPN bypass** | `flint_list_vpn_bypass`, `flint_add_vpn_bypass`, `flint_toggle_vpn_bypass` |
+| **Split VPNs** | `flint_list_split_vpns`, `flint_create_split_vpn`, `flint_update_split_vpn`, `flint_delete_split_vpn`, `flint_connect_split_vpn`, `flint_disconnect_split_vpn`, `flint_get_split_vpn_log`, `flint_install_split_vpn_runtime` |
 | **Adblock** | `flint_get_adblock_settings`, `flint_update_blocklist_now`, `flint_search_blocked_domains` |
 | **Settings** | `flint_get_settings`, `flint_update_settings` |
 | **Status** | `flint_get_router_ip`, `flint_get_vpn_status` |
 | **Logs** | `flint_list_logs`, `flint_read_log`, `flint_clear_log` |
+
+### Split VPNs
+
+A Split VPN is a third-party VPN (currently Barracuda CloudGen, e.g. a company VPN) that runs on the router and carries only selected destinations (domains / IPv4 ranges) for selected groups; those groups keep their Proton VPN for everything else.
+
+- **Runtime**: the VPN client binaries must be on the router first. Check `runtime.installed` from `flint_list_split_vpns`; if false, call `flint_install_split_vpn_runtime` (downloads ~70MB, can take several minutes; the MCP client allows up to 11 minutes).
+- **Master password**: `flint_create_split_vpn` needs the VPN account `password` plus the app's `master_password`, because the account password is stored encrypted in `secrets.enc`. `flint_update_split_vpn` needs both only when changing the password.
+- **OTP**: every `flint_connect_split_vpn` call needs a fresh one-time password from the human. It is never stored. Connecting can take up to ~2.5 minutes (the MCP client allows 210s for this call). On failure, read `flint_get_split_vpn_log`.
+- **List fields** (`group_ids`, `domains`, `cidrs`) on update replace the existing list.
 
 Full catalog with descriptions and usage patterns: [skills/flint-vpn-manager/references/mcp-tools.md](../skills/flint-vpn-manager/references/mcp-tools.md).
 

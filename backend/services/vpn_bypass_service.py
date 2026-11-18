@@ -232,50 +232,7 @@ class VpnBypassService:
         self.router.vpn_bypass.apply_all(exceptions, group_map)
 
     def _build_group_ipset_map(self) -> dict[str, str]:
-        """Map profile_id → MAC ipset name for group-scoped exceptions.
-
-        Proton-wg tunnels have tunnel_id in local store. Kernel WG/OVPN
-        tunnels need a UCI query — batched into a single SSH call.
-        """
-        import persistence.profile_store as ps
-
-        result: dict[str, str] = {}
-        store = ps.load()
-        profiles = store.get("profiles", [])
-
-        # Proton-wg: tunnel_id is in local store (no SSH needed)
-        uci_lookups: list[tuple[str, str]] = []  # (profile_id, rule_name)
-        for p in profiles:
-            if p.get("type") != "vpn":
-                continue
-            pid = p.get("id", "")
-            ri = p.get("router_info", {})
-            vpn_proto = ri.get("vpn_protocol", "")
-            rule_name = ri.get("rule_name", "")
-
-            if vpn_proto in ("wireguard-tcp", "wireguard-tls"):
-                tunnel_id = ri.get("tunnel_id")
-                if tunnel_id:
-                    result[pid] = f"pwg_mac_{tunnel_id}"
-            elif rule_name:
-                uci_lookups.append((pid, rule_name))
-
-        # Kernel WG/OVPN: batch-query all tunnel_ids in one SSH call
-        if uci_lookups:
-            batch_cmd = "; ".join(
-                f"echo $( uci -q get route_policy.{rn}.tunnel_id 2>/dev/null )"
-                for _, rn in uci_lookups
-            )
-            try:
-                raw = self.router.exec(batch_cmd).strip()
-                for (pid, _), tid in zip(uci_lookups, raw.splitlines()):
-                    tid = tid.strip()
-                    if tid:
-                        result[pid] = f"src_mac_{tid}"
-            except Exception:
-                pass
-
-        return result
+        return build_group_ipset_map(self.router)
 
     def _resolve_preset(self, preset_id: str) -> dict | None:
         """Look up a preset by ID (built-in or custom)."""
@@ -307,3 +264,50 @@ class VpnBypassService:
                 raise ValueError("scope_target (group IDs and/or MAC addresses) required")
         else:
             raise ValueError(f"Invalid scope: {scope}")
+
+
+def build_group_ipset_map(router) -> dict[str, str]:
+    """Map profile_id → MAC ipset name for group-scoped exceptions.
+
+    Proton-wg tunnels have tunnel_id in local store. Kernel WG/OVPN
+    tunnels need a UCI query — batched into a single SSH call.
+    """
+    import persistence.profile_store as ps
+
+    result: dict[str, str] = {}
+    store = ps.load()
+    profiles = store.get("profiles", [])
+
+    # Proton-wg: tunnel_id is in local store (no SSH needed)
+    uci_lookups: list[tuple[str, str]] = []  # (profile_id, rule_name)
+    for p in profiles:
+        if p.get("type") != "vpn":
+            continue
+        pid = p.get("id", "")
+        ri = p.get("router_info", {})
+        vpn_proto = ri.get("vpn_protocol", "")
+        rule_name = ri.get("rule_name", "")
+
+        if vpn_proto in ("wireguard-tcp", "wireguard-tls"):
+            tunnel_id = ri.get("tunnel_id")
+            if tunnel_id:
+                result[pid] = f"pwg_mac_{tunnel_id}"
+        elif rule_name:
+            uci_lookups.append((pid, rule_name))
+
+    # Kernel WG/OVPN: batch-query all tunnel_ids in one SSH call
+    if uci_lookups:
+        batch_cmd = "; ".join(
+            f"echo $( uci -q get route_policy.{rn}.tunnel_id 2>/dev/null )"
+            for _, rn in uci_lookups
+        )
+        try:
+            raw = router.exec(batch_cmd).strip()
+            for (pid, _), tid in zip(uci_lookups, raw.splitlines()):
+                tid = tid.strip()
+                if tid:
+                    result[pid] = f"src_mac_{tid}"
+        except Exception:
+            pass
+
+    return result
