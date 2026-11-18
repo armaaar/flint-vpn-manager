@@ -4,7 +4,6 @@ import pytest
 
 from router.facades.split_vpn import (
     RouterSplitVpn,
-    build_client_config,
     build_ctl_script,
     build_dnsmasq_snippet,
     build_routing_commands,
@@ -59,25 +58,6 @@ class TestParseStatus:
     def test_disconnected_and_empty(self):
         assert parse_status("Dumping connection Status:\nSTATE:       DISCONNECTED\n")["state"] == "DISCONNECTED"
         assert parse_status("")["state"] == "DOWN"
-
-
-class TestClientConfig:
-    def test_renders_key_value_lines(self):
-        conf = build_client_config({"server": "vpn.example.com", "port": 691, "tunnel_mode": "tcp"})
-        assert "SERVER = vpn.example.com\n" in conf
-        assert "SERVERPORT = 691\n" in conf
-        assert "TUNNELMODE = TCP\n" in conf
-        assert "DYNSSA = 2\n" in conf           # user/pass auth
-        assert "WRITEDNS = NO\n" in conf        # never touch resolv.conf
-
-    @pytest.mark.parametrize("cfg", [
-        {"server": "vpn.example.com; reboot"},
-        {"server": "vpn.example.com", "port": 70000},
-        {"server": "vpn.example.com", "tunnel_mode": "QUIC"},
-    ])
-    def test_rejects_bad_values(self, cfg):
-        with pytest.raises(ValueError):
-            build_client_config(cfg)
 
 
 class TestRoutingCommands:
@@ -145,8 +125,12 @@ class TestCtlScript:
         assert "BIN=/etc/fvpn/splitvpn/bin\n" in script
         assert "$BIN/qemu-x86_64 $BIN/barracudavpn" in script
         assert "table $((1010+$I))" in script
-        # credentials only ever arrive on stdin
-        assert "--serverpwd" not in script
+        # secrets arrive on svctl's stdin (from the 0600 tmpfs file), never
+        # from the SSH command; the 5.3 daemon is started before the CLI
+        assert "read -r PW; read -r OTP" in script
+        assert '--serverpwd "$PW" --onetimepwd "$OTP"' in script
+        assert "$BIN/barracudavpn-daemon -f -c $DIR" in script
+        assert "mount --bind" in script and "RUN=/tmp/fvsv${I}run" in script
 
 
 class TestFacade:
@@ -193,3 +177,24 @@ class TestFacade:
         RouterSplitVpn(uci, ssh).apply_routing([])
         uci.delete.assert_called_with("firewall.fvpn_splitvpn")
         uci.ensure_firewall_include.assert_not_called()
+
+
+class TestClientToml:
+    def test_renders_profile_tables(self):
+        from router.facades.split_vpn import build_client_toml
+        toml = build_client_toml({"server": "vpn.example.com", "port": 691, "tunnel_mode": "tcp"})
+        assert "[profile.Default]" in toml
+        assert 'server = "vpn.example.com"' in toml
+        assert "serverport = 691" in toml
+        assert 'tunnelmode = "TCP"' in toml
+        assert 'otpmode = "STATIC"' in toml
+        assert 'writedns = "NO"' in toml
+        assert 'active_profile = "Default"' in toml
+        import tomllib
+        parsed = tomllib.loads(toml)
+        assert parsed["profile"]["Default"]["dynssa"] == 2
+
+    def test_rejects_injection_in_server(self):
+        from router.facades.split_vpn import build_client_toml
+        with pytest.raises(ValueError):
+            build_client_toml({"server": 'x"\n[evil]'})

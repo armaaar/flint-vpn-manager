@@ -68,3 +68,6 @@ frontend/test-results/
 
 # SOPS-encrypted secrets stay local (public repo); template + .sops.yaml are tracked
 .decrypted~*
+
+# Split VPN runtime binaries (vendor client + local qemu build) — see tools/qemu/README.md
+runtime/

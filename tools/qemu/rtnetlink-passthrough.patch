@@ -1,0 +1,32 @@
+--- a/linux-user/fd-trans.c	2026-08-26 21:31:26.000000000 +0200
++++ b/linux-user/fd-trans.c	2026-11-18 14:00:20.232937942 +0100
+@@ -1376,7 +1376,14 @@
+         }
+         break;
+     default:
++#if HOST_BIG_ENDIAN == TARGET_BIG_ENDIAN
++        /* flint-vpn-manager: same byte order and LP64 on both sides, so
++         * rtnetlink payloads without a translator (e.g. RTM_*RULE policy
++         * rules) need no conversion; pass them through unchanged. */
++        break;
++#else
+         return -TARGET_EINVAL;
++#endif
+     }
+     return 0;
+ }
+@@ -1647,7 +1654,14 @@
+         }
+         break;
+     default:
++#if HOST_BIG_ENDIAN == TARGET_BIG_ENDIAN
++        /* flint-vpn-manager: same byte order and LP64 on both sides, so
++         * rtnetlink payloads without a translator (e.g. RTM_*RULE policy
++         * rules) need no conversion; pass them through unchanged. */
++        break;
++#else
+         return -TARGET_EOPNOTSUPP;
++#endif
+     }
+     return 0;
+ }

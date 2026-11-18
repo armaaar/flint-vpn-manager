@@ -24,7 +24,6 @@ import lzma
 import tarfile
 import threading
 import time
-import urllib.request
 import uuid
 from typing import TYPE_CHECKING
 
@@ -38,10 +37,12 @@ from consts import (
     PROTO_WIREGUARD_TCP,
     PROTO_WIREGUARD_TLS,
     SPLITVPN_MAX,
-    SPLITVPN_RUNTIME,
+    SPLITVPN_BARRACUDA,
+    SPLITVPN_QEMU_FILE,
+    SPLITVPN_RUNTIME_DIR,
     SPLITVPN_TYPES,
 )
-from router.facades.split_vpn import build_client_config, normalize_cidr, _SAFE_DOMAIN_RE
+from router.facades.split_vpn import build_client_toml, normalize_cidr, _SAFE_DOMAIN_RE
 from vpn.totp import parse_totp, seconds_left, totp_code
 
 if TYPE_CHECKING:
@@ -175,10 +176,14 @@ class SplitVpnService:
             hashes = self.router.split_vpn.runtime_status()
         except Exception as e:
             return {"installed": False, "error": str(e)}
+        expected = _expected_runtime_hashes()
         files = {}
-        for name, spec in SPLITVPN_RUNTIME.items():
-            files[name] = hashes.get(name) == spec["binary_sha256"]
-        return {"installed": all(files.values()), "files": files}
+        for name, want in expected.items():
+            # qemu has no fixed hash (local build): present is enough if the
+            # local build artefact is gone
+            files[name] = (hashes.get(name) == want) if want else bool(hashes.get(name))
+        return {"installed": all(files.values()), "files": files,
+                "local_files": _local_runtime_state()}
 
     # ── CRUD ──────────────────────────────────────────────────────────────
 
@@ -278,7 +283,7 @@ class SplitVpnService:
             raise ValueError("name is required")
         if not vpn["username"] and not vpn["secret_ref"]:
             raise ValueError("username is required")
-        build_client_config(vpn)  # validates server / port / mode
+        build_client_toml(vpn)  # validates server / port / mode
         vpn["group_ids"] = self._validate_groups(vpn.get("group_ids") or [])
         domains = []
         for d in vpn.get("domains") or []:
@@ -511,14 +516,41 @@ class SplitVpnService:
     # ── Runtime install ───────────────────────────────────────────────────
 
     def install_runtime(self) -> dict:
-        """Download the pinned emulator + client, verify, upload to router."""
-        for name, spec in SPLITVPN_RUNTIME.items():
-            log.info(f"Split VPN runtime: fetching {name}")
-            archive = _download(spec["url"], spec["sha256"])
-            binary = _extract_member(spec["url"], archive, spec["member"])
-            if hashlib.sha256(binary).hexdigest() != spec["binary_sha256"]:
+        """Verify the local runtime files and upload them to the router.
+
+        Needs, in ``runtime/`` (or the repo root / ~/Downloads for the
+        archive): the Barracuda 5.3.10 archive (pinned sha256) and the
+        patched ``qemu-x86_64-flint`` from ``tools/qemu/build.sh``.
+        """
+        archive_path = _find_barracuda_archive()
+        if not archive_path:
+            raise ValueError(
+                f"{SPLITVPN_BARRACUDA['archive']} not found — download it from "
+                "dlportal.barracudanetworks.com (NAC / VPN Client) into runtime/"
+            )
+        archive = archive_path.read_bytes()
+        digest = hashlib.sha256(archive).hexdigest()
+        if digest != SPLITVPN_BARRACUDA["sha256"]:
+            raise ValueError(f"Checksum mismatch for {archive_path.name}: {digest}")
+        deb = _extract_member("archive.tar.gz", archive, SPLITVPN_BARRACUDA["deb"])
+        binaries = {}
+        for name, (member, want) in SPLITVPN_BARRACUDA["files"].items():
+            data = _extract_from_deb(deb, member)
+            if hashlib.sha256(data).hexdigest() != want:
                 raise ValueError(f"Checksum mismatch for extracted {name}")
-            self.router.split_vpn.install_runtime_file(name, binary)
+            binaries[name] = data
+        qemu_path = _runtime_dir() / SPLITVPN_QEMU_FILE
+        if not qemu_path.is_file():
+            raise ValueError(f"runtime/{SPLITVPN_QEMU_FILE} not found — build it with tools/qemu/build.sh")
+        qemu = qemu_path.read_bytes()
+        sha_file = qemu_path.with_name(qemu_path.name + ".sha256")
+        if sha_file.is_file() and sha_file.read_text().split()[0] != hashlib.sha256(qemu).hexdigest():
+            raise ValueError(f"{SPLITVPN_QEMU_FILE} does not match its .sha256")
+        binaries["qemu-x86_64"] = qemu
+        for name, data in binaries.items():
+            log.info(f"Split VPN runtime: uploading {name} ({len(data)} bytes)")
+            self.router.split_vpn.install_runtime_file(name, data)
+        self.router.exec(f"rm -f /etc/fvpn/splitvpn/bin/*53 /etc/fvpn/splitvpn/bin/qemu-x86_64-flint")
         status = self.runtime_status()
         log.info(f"Split VPN runtime installed: {status}")
         return status
@@ -536,14 +568,32 @@ def _is_connected(status: dict) -> bool:
     return bool(status.get("ip")) and state not in _DOWN_STATES
 
 
-def _download(url: str, sha256: str) -> bytes:
-    req = urllib.request.Request(url, headers={"User-Agent": "flint-vpn-manager"})
-    with urllib.request.urlopen(req, timeout=300) as resp:
-        data = resp.read()
-    digest = hashlib.sha256(data).hexdigest()
-    if digest != sha256:
-        raise ValueError(f"Checksum mismatch for {url}: {digest}")
-    return data
+def _runtime_dir():
+    from pathlib import Path
+    return Path(__file__).resolve().parents[2] / SPLITVPN_RUNTIME_DIR
+
+
+def _find_barracuda_archive():
+    from pathlib import Path
+    name = SPLITVPN_BARRACUDA["archive"]
+    for d in (_runtime_dir(), _runtime_dir().parent, Path.home() / "Downloads"):
+        if (d / name).is_file():
+            return d / name
+    return None
+
+
+def _expected_runtime_hashes() -> dict:
+    expected = {n: h for n, (_, h) in SPLITVPN_BARRACUDA["files"].items()}
+    sha_file = _runtime_dir() / f"{SPLITVPN_QEMU_FILE}.sha256"
+    expected["qemu-x86_64"] = sha_file.read_text().split()[0] if sha_file.is_file() else None
+    return expected
+
+
+def _local_runtime_state() -> dict:
+    return {
+        "barracuda_archive": bool(_find_barracuda_archive()),
+        "qemu": (_runtime_dir() / SPLITVPN_QEMU_FILE).is_file(),
+    }
 
 
 def _extract_member(url: str, data: bytes, member: str) -> bytes:

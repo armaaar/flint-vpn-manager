@@ -114,26 +114,28 @@ SPLITVPN_SCRIPT_PATH = "/etc/fvpn/splitvpn_rules.sh"
 SPLITVPN_DNSMASQ_SNIPPET = "fvpn-splitvpn.conf"
 SPLITVPN_TYPES = ("barracuda",)
 
-# Pinned third-party runtime for the Barracuda (TINA) client. The client is
-# x86-64 only, so it runs under qemu user-mode emulation on the ARM64 router.
-SPLITVPN_RUNTIME = {
-    "qemu-x86_64": {
-        # Debian trixie qemu-user (static binaries); file inside the .deb
-        "url": "https://deb.debian.org/debian/pool/main/q/qemu/qemu-user_10.0.13+ds-0+deb13u1_arm64.deb",
-        "sha256": "c73711af02b97cd5e2667e735d9c06890c57165517110ca4e646c95a7083158d",
-        "member": "./usr/bin/qemu-x86_64",
-        "binary_sha256": "9af86352fd463ad9ec25bdd6a4b891ac6b6a7f3d46a7db3da6f23e2c09094a59",
-    },
-    "barracudavpn": {
-        # Barracuda VPN Client 5.1.4 for Linux (statically linked x86-64),
-        # same tarball the AUR `barracudavpn` package pins.
-        "url": "https://raw.githubusercontent.com/RomarQ/barracudavpn-archlinux/master/tarball/barracudavpn-5.1.4.tar.gz",
-        "sha256": "66128019ca60c0b028b3e99293aea3c6cca1dd57d5d2d8fe51cf31994764fab7",
-        "member": "barracudavpn/barracudavpn",
-        "binary_sha256": "a80cacc0c0594db28d5befcbad9c6927b824d83614efb73785641a399397442c",
+# Router-side runtime for the Barracuda (TINA) client, installed from local
+# files in SPLITVPN_RUNTIME_DIR (gitignored) — the 5.3.x client isn't publicly
+# downloadable and qemu needs a small patch, so neither can be fetched.
+#  * Barracuda VPN Client 5.3.10 for Linux (dlportal.barracudanetworks.com,
+#    account required); archive hash = the AUR barracudavpn-bin pin.
+#    5.1.4 (the last public build) is refused by current gateways.
+#  * qemu-x86_64 built by tools/qemu/build.sh: Debian's qemu 10.0.13 with the
+#    rtnetlink pass-through patch (stock qemu rejects RTM_*RULE messages the
+#    5.3 daemon sends, so the daemon aborts at startup).
+SPLITVPN_RUNTIME_DIR = "runtime"
+SPLITVPN_BARRACUDA = {
+    "archive": "VPNClient_5.3.10_Linux.tar.gz",
+    "sha256": "db493451d64dbade574040a26b4c7a826526aa6fdfa9f6b2e6f7d58f6697cd4c",
+    "deb": "barracudavpn_5.3.10-1196.20260929_amd64.deb",
+    "files": {
+        "barracudavpn": ("./usr/local/bin/barracudavpn",
+                         "5d2d27ba37ce73cca48ab60f01cbf167c0488cbf869c435b3dbf628e91a0711e"),
+        "barracudavpn-daemon": ("./usr/local/bin/barracudavpn-daemon",
+                                "d6c284cf61bb30724f4ab37571c858a402b2de327f92f5c4baf52a9b0f8e19fb"),
     },
 }
-
+SPLITVPN_QEMU_FILE = "qemu-x86_64-flint"   # + .sha256 written by the build script
 # Riot Games AS6507 + AS62830 — all announced IPv4 prefixes (2026-04)
 _RIOT_CIDRS = [
     # NA

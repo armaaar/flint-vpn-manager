@@ -21,9 +21,8 @@ PROFILES = {"profiles": [
 def env():
     config = {"router_ip": "192.168.8.1"}
     router = MagicMock()
-    router.split_vpn.runtime_status.return_value = {
-        name: spec["binary_sha256"] for name, spec in svc_mod.SPLITVPN_RUNTIME.items()
-    }
+    hashes = {n: h for n, (_, h) in svc_mod.SPLITVPN_BARRACUDA["files"].items()}
+    router.split_vpn.runtime_status.return_value = {**hashes, "qemu-x86_64": "localbuild"}
     router.uci.show.return_value = {"fvpn_rule_9012": {"via": "wgclient5"}}
     router.exec.return_value = "305"
 
@@ -32,6 +31,8 @@ def env():
         return config
 
     with patch.object(svc_mod, "sm") as sm, \
+         patch.object(svc_mod, "_expected_runtime_hashes",
+                      return_value={**hashes, "qemu-x86_64": "localbuild"}), \
          patch("persistence.profile_store.load", return_value=PROFILES):
         sm.get_config.side_effect = lambda: config
         sm.update_config.side_effect = update_config
@@ -252,3 +253,24 @@ class TestSopsCredentials:
         with pytest.raises(ValueError, match="SOPS secret reference"):
             env["svc"].create({"name": "W", "server": "vpn.example.com",
                                "secret_ref": "../etc", "group_ids": ["g_work"]})
+
+
+class TestRuntime:
+    def test_install_needs_vendor_archive(self, env, tmp_path):
+        with patch.object(svc_mod, "_find_barracuda_archive", return_value=None):
+            with pytest.raises(ValueError, match="dlportal"):
+                env["svc"].install_runtime()
+
+    def test_install_rejects_wrong_archive_hash(self, env, tmp_path):
+        bad = tmp_path / "VPNClient_5.3.10_Linux.tar.gz"
+        bad.write_bytes(b"not the real thing")
+        with patch.object(svc_mod, "_find_barracuda_archive", return_value=bad):
+            with pytest.raises(ValueError, match="Checksum mismatch"):
+                env["svc"].install_runtime()
+        env["router"].split_vpn.install_runtime_file.assert_not_called()
+
+    def test_status_requires_every_runtime_file(self, env):
+        env["router"].split_vpn.runtime_status.return_value = {"qemu-x86_64": "localbuild"}
+        st = env["svc"].runtime_status()
+        assert st["installed"] is False
+        assert st["files"]["barracudavpn-daemon"] is False
