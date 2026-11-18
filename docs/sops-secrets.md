@@ -12,7 +12,7 @@ Template: [`secrets/flint.example.yaml`](../secrets/flint.example.yaml). Values 
 ## Files
 
 - `.sops.yaml` — creation rule: `secrets/*.enc.yaml` encrypts to the owner's **age** public key.
-- `secrets/flint.enc.yaml` — the encrypted file. **Gitignored** (this repo is public; an encrypted copy in git history would be permanent).
+- `secrets/flint.enc.yaml` — the encrypted file, committed (values are age-encrypted; only key names are readable).
 - Private key — standard SOPS location `~/.config/sops/age/keys.txt` (or `SOPS_AGE_KEY_FILE`). Never in the repo.
 - Override the file path with `FLINT_SOPS_FILE` or `sops_secrets_file` in `config.json`.
 

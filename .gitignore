@@ -67,5 +67,4 @@ frontend/playwright-report/
 frontend/test-results/
 
 # SOPS-encrypted secrets stay local (public repo); template + .sops.yaml are tracked
-secrets/*.enc.yaml
-secrets/*.enc.yml
+.decrypted~*
